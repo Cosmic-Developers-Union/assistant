@@ -10,6 +10,7 @@ package e2e
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -182,6 +183,66 @@ func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 	}
 	if len(report.NeedsTriage) != 1 || report.NeedsTriage[0].Index != 1 {
 		t.Errorf("NeedsTriage = %+v, want issue #1", report.NeedsTriage)
+	}
+
+	// 评审请求不被门禁阻断：必要检查失败 + /review 评论 → 仍进 status/review
+	// 队列（status/review = 「评审请求中」，门禁只在合并时校验）。
+	if _, _, err := sdkClient.Repositories.CreateFile(
+		ctx, adminLogin, repositoryName, "feature.txt",
+		gitea.CreateFileOptions{
+			FileOptions: gitea.FileOptions{
+				Message:       "e2e: change for review",
+				BranchName:    "main",
+				NewBranchName: "e2e-feature",
+			},
+			Content: base64.StdEncoding.EncodeToString([]byte("change\n")),
+		},
+	); err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+	pull, _, err := sdkClient.PullRequests.CreatePullRequest(ctx, adminLogin, repositoryName, gitea.CreatePullRequestOption{
+		Head:  "e2e-feature",
+		Base:  "main",
+		Title: "e2e review request",
+	})
+	if err != nil {
+		t.Fatalf("CreatePullRequest() error = %v", err)
+	}
+	if _, _, err := sdkClient.Repositories.CreateStatus(ctx, adminLogin, repositoryName, pull.Head.Sha, gitea.CreateStatusOption{
+		State:       gitea.StatusFailure,
+		Context:     "ci / required",
+		Description: "e2e failure",
+	}); err != nil {
+		t.Fatalf("CreateStatus() error = %v", err)
+	}
+	if _, _, err := sdkClient.Issues.CreateIssueComment(ctx, adminLogin, repositoryName, pull.Index, gitea.CreateIssueCommentOption{
+		Body: "/review",
+	}); err != nil {
+		t.Fatalf("CreateIssueComment() error = %v", err)
+	}
+	if err := manager.Sync(ctx); err != nil {
+		t.Fatalf("Sync() after /review error = %v", err)
+	}
+	updated, err := syncClient.GetPullRequest(ctx, repository, pull.Index)
+	if err != nil {
+		t.Fatalf("GetPullRequest() error = %v", err)
+	}
+	labelSet := map[string]bool{}
+	for _, label := range updated.Labels {
+		labelSet[label.Name] = true
+	}
+	if !labelSet["status/review"] {
+		t.Errorf("labels = %v, want status/review despite failing checks", updated.Labels)
+	}
+	if labelSet["status/changes-requested"] {
+		t.Errorf("labels = %v, failing checks must not auto-reject review requests", updated.Labels)
+	}
+	queue, err := syncClient.ListReviewPullRequests(ctx, repository)
+	if err != nil {
+		t.Fatalf("ListReviewPullRequests() error = %v", err)
+	}
+	if len(queue) != 1 || queue[0].Index != pull.Index {
+		t.Errorf("review queue = %+v, want pull #%d", queue, pull.Index)
 	}
 
 	// 幂等：重复 setup 复用令牌

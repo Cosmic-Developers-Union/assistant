@@ -14,20 +14,22 @@ B1–B2. `push_keeps_pr_state` / `merge_sets_merged` / `convert_to_draft_blocks_
     代码推送不改变 PR 生命周期状态；合并使状态进入 merged；转回 draft（WIP）
     后队列门关闭——draft 不进评审队列。
 C1–C3（会话内部状态机）：完成只锚定当前 head；head 漂移 ⇒ 本轮作废；
-    同一待办至多两个会话。
+    每个待办每次入队只起一个会话——未完成即放行，等待下一轮重新检测
+    （由请求唯一键守卫吸收连续 @ai / /review 的重复信号）。
 D1–D2（全局并发守卫）：入队受 pending 与 cap 双重守卫——同一待办不可能
     自我并发，会话数不越过上限。
 
 ## 与实现的对应
 
-- 时间线事件 ↔ Gitea 侧事实（`src/verify.ts` 的 head 漂移检测、review 列表）；
+- 时间线事件 ↔ Gitea 侧事实（`internal/dispatcher/verify.go` 的 head 漂移检测、review 列表）；
 - `completeOk` ↔ `verifyPullReview`；
-- 会话内部状态机 ↔ `src/loop.ts` 的 `processItem` attempt 循环；
-- 入队守卫 ↔ 检测去重与 `runLoop` 的轮间 barrier / 并发上限。
+- 会话内部状态机 ↔ `internal/dispatcher/loop.go` 的 `ProcessItem`（每待办一次会话）；
+- 入队守卫 ↔ 检测去重（`ListWork` 的 kind#number 唯一键）与 `RunLoop` 的
+  轮间 barrier / 并发上限 / settled 标记。
 
 ## 检查方式
 
-`lean apps/agent-dispatcher/formal/Dispatcher.lean`，退出码 0 即全部证明通过（纯 core Lean，无需
+`lean formal/Dispatcher.lean`，退出码 0 即全部证明通过（纯 core Lean，无需
 mathlib）。本文件是规格：改变上述任何一条语义的实现改动，必须同步修改模型
 并让证明重新通过，否则不应合入。
 -/
@@ -244,12 +246,12 @@ theorem convert_to_draft_blocks_queue (es : Timeline) (s : PrState) :
   simp only [mkConvert]
   exact stepState_convert_queue_closed _
 
-/-! ## 会话内部状态机（对应 processItem 的 attempt 循环） -/
+/-! ## 会话内部状态机（对应 ProcessItem：每待办一次会话） -/
 
-/-- 单个待办的生命周期。`inflight head attempt` 的 `attempt` 从 1 计。 -/
+/-- 单个待办的生命周期。 -/
 inductive Todo where
   | pending
-  | inflight (head : Sha) (attempt : Nat)
+  | inflight (head : Sha)
   | released
   | done (head : Sha)
 deriving DecidableEq, Repr
@@ -261,20 +263,19 @@ structure Facts where
   /-- 会话起点之后 reviewer 是否已提交新 review -/
   reviewed : Bool
 
-/-- 单待办一步迁移：对应 `processItem` 一次会话结束后的完成判定与走向决策。 -/
+/-- 单待办一步迁移：对应 `ProcessItem` 一次会话结束后的完成判定与走向决策。
+    每个待办每次入队只起一个会话：未完成一律放行，等待下一轮重新检测。 -/
 def step (todo : Todo) (f : Facts) : Option Todo :=
   match todo with
-  | .pending => some (.inflight f.headNow 1)
-  | .inflight h k =>
+  | .pending => some (.inflight f.headNow)
+  | .inflight h =>
       if f.headNow = h then
         if f.reviewed then
           some (.done h) -- head 未动 + 新 review ⇒ 完成，锚定被评审的 head
-        else if k < 2 then
-          some (.inflight h (k + 1)) -- 同 head 重试一次
         else
-          some .released -- 两个会话耗尽，放行
+          some .released -- 未产出 review ⇒ 放行，下一轮重新检测才可再入队
       else
-        some .released -- head 漂移 ⇒ 本轮作废放行（不烧重试会话）
+        some .released -- head 漂移 ⇒ 本轮作废放行
   | .released => some .pending -- 下一轮检测重新入队
   | .done _ => none -- 终态
 
@@ -285,7 +286,7 @@ theorem done_anchors_current_head (todo : Todo) (f : Facts) (h : Sha) :
   | pending => simp [step]
   | released => simp [step]
   | done u => simp [step]
-  | inflight u k =>
+  | inflight u =>
       intro heq
       simp only [step] at heq
       by_cases hhead : f.headNow = u
@@ -297,24 +298,22 @@ theorem done_anchors_current_head (todo : Todo) (f : Facts) (h : Sha) :
           -- h2 : u = h，而 f.headNow = u ⇒ h = f.headNow
           exact (hhead.trans h2).symm
         · rw [if_neg hrev] at heq
-          split at heq
-          · simp at heq
-          · simp at heq
+          simp at heq
       · rw [if_neg hhead] at heq
         simp at heq
 
 /-- **C2**：作者在会话期间推送（外部 head 离开会话钉定的 head）后，
 本轮无论 reviewer 是否已提交 review 都不可能判完成。 -/
-theorem stale_head_never_done (h k : Sha) (f : Facts) (hne : f.headNow ≠ h) :
-    step (.inflight h k) f ≠ some (.done h) := by
+theorem stale_head_never_done (h : Sha) (f : Facts) (hne : f.headNow ≠ h) :
+    step (.inflight h) f ≠ some (.done h) := by
   intro heq
-  have anchored := done_anchors_current_head (.inflight h k) f h heq
+  have anchored := done_anchors_current_head (.inflight h) f h heq
   exact hne anchored.symm
 
-/-- **C3**：第 2 个会话结束后只会走向完成或放行——同一待办至多两个会话
+/-- **C3**：一次会话结束后只会走向完成或放行——每个待办每次入队至多一个会话
 （`released → pending → 入队` 是回到会话的唯一路径，且要重新过检测）。 -/
-theorem no_third_session (h : Sha) (f : Facts) (t : Todo) :
-    step (.inflight h 2) f = some t → t = .done h ∨ t = .released := by
+theorem single_session_per_round (h : Sha) (f : Facts) (t : Todo) :
+    step (.inflight h) f = some t → t = .done h ∨ t = .released := by
   intro heq
   simp only [step] at heq
   by_cases hhead : f.headNow = h
@@ -324,10 +323,8 @@ theorem no_third_session (h : Sha) (f : Facts) (t : Todo) :
       injection heq with h1
       exact Or.inl h1.symm
     · rw [if_neg hrev] at heq
-      split at heq
-      · omega
-      · injection heq with h1
-        exact Or.inr h1.symm
+      injection heq with h1
+      exact Or.inr h1.symm
   · rw [if_neg hhead] at heq
     injection heq with h1
     exact Or.inr h1.symm
@@ -344,7 +341,7 @@ structure Sys where
 
 /-- 待办是否正占用一个会话槽。 -/
 def busy : Todo → Nat
-  | .inflight _ _ => 1
+  | .inflight _ => 1
   | _ => 0
 
 /-- 每个待办至多占用一个会话槽。 -/
@@ -356,7 +353,7 @@ theorem busy_at_most_one (t : Todo) : busy t ≤ 1 := by
 def enqueue (s : Sys) (p : PrId) (h : Sha) : Option Sys :=
   if s.todo p = .pending ∧ s.nInFlight < s.cap then
     some
-      { todo := fun q => if q = p then .inflight h 1 else s.todo q
+      { todo := fun q => if q = p then .inflight h else s.todo q
         nInFlight := s.nInFlight + 1
         cap := s.cap }
   else

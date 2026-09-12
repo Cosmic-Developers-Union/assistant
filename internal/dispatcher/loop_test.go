@@ -63,7 +63,7 @@ func TestDryRunPassListsPlanWithoutSideEffects(t *testing.T) {
 		"curl -s -H",
 		"/pulls/67/reviews?limit=50",
 		"head 漂移即本轮作废",
-		"至多 2 个会话",
+		"同一请求只拉起一个会话",
 		"git worktree remove --force " + worktreeDir,
 		"cwd=宿主检出根",
 		"triage issue #66",
@@ -111,6 +111,25 @@ func TestDryRunPassWithSyncMirror(t *testing.T) {
 	}
 }
 
+func TestPruneSettledFiltersHandledAndReleasesWhenGone(t *testing.T) {
+	work := []WorkItem{{Kind: KindPull, Number: 67}, {Kind: KindIssue, Number: 66}}
+	settled := map[string]bool{"pull#67": true}
+
+	filtered := pruneSettled(work, settled)
+	if len(filtered) != 1 || filtered[0] != (WorkItem{Kind: KindIssue, Number: 66}) {
+		t.Errorf("filtered = %+v, want only issue#66", filtered)
+	}
+	if !settled["pull#67"] {
+		t.Error("settled entry for a still-present request must be kept")
+	}
+
+	// 标签被 sync 收敛（待办从列表消失）后守卫解除：新请求可以重新入队
+	pruneSettled(nil, settled)
+	if len(settled) != 0 {
+		t.Errorf("settled = %v, want released", settled)
+	}
+}
+
 func TestProcessItemRoutesProgressToConsoleAndLog(t *testing.T) {
 	logDir := t.TempDir()
 	var logs []string
@@ -145,7 +164,10 @@ func TestProcessItemRoutesProgressToConsoleAndLog(t *testing.T) {
 			}
 		},
 	}
-	ProcessItem(context.Background(), deps, WorkItem{Kind: KindIssue, Number: 66, Title: "ci: 分层重构"})
+	result := ProcessItem(context.Background(), deps, WorkItem{Kind: KindIssue, Number: 66, Title: "ci: 分层重构"})
+	if !result.Settled {
+		t.Error("completed triage should settle the request")
+	}
 
 	consoleOutput := strings.Join(logs, "\n")
 	for _, want := range []string{
@@ -200,7 +222,10 @@ func TestProcessItemHeadDriftInvalidatesWithoutRetry(t *testing.T) {
 			}
 		},
 	}
-	ProcessItem(context.Background(), deps, WorkItem{Kind: KindPull, Number: 67, Title: "fix: something"})
+	result := ProcessItem(context.Background(), deps, WorkItem{Kind: KindPull, Number: 67, Title: "fix: something"})
+	if result.Settled {
+		t.Error("head drift must not settle the request (new head needs a new session)")
+	}
 
 	if sessions != 1 {
 		t.Errorf("sessions = %d, want 1（漂移后不再烧第 2 个会话）", sessions)

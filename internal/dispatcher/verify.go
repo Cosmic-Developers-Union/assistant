@@ -13,8 +13,6 @@ import (
 	"assistant/internal/status"
 )
 
-const triageLabel = "status/triage"
-
 // PullVerdict 是 PR 完成判定结论：completed 之外给出依据；HeadMoved=true 时
 // 本轮直接放行，不烧重试会话。
 type PullVerdict struct {
@@ -94,13 +92,13 @@ func VerifyIssueTriage(
 	}
 	stillThere := false
 	for _, label := range labels {
-		if label.Name == triageLabel {
+		if label.Name == status.LabelTriage {
 			stillThere = true
 			break
 		}
 	}
 	if stillThere {
-		return IssueVerdict{Reason: triageLabel + " 仍在"}, nil
+		return IssueVerdict{Reason: status.LabelTriage + " 仍在"}, nil
 	}
-	return IssueVerdict{Completed: true, Reason: triageLabel + " 已移除"}, nil
+	return IssueVerdict{Completed: true, Reason: status.LabelTriage + " 已移除"}, nil
 }

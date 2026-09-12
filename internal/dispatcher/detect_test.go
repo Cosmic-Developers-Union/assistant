@@ -54,3 +54,28 @@ func TestListWorkSkipsIssuesMixedIntoPullResults(t *testing.T) {
 		t.Errorf("work = %+v, want only pull #58", work)
 	}
 }
+
+// 同一仓库内 (kind, number) 唯一：会话与完成判定都以该键去重。
+func TestDedupeWorkKeepsOnePerKindAndNumber(t *testing.T) {
+	work := []WorkItem{
+		{Kind: KindPull, Number: 1},
+		{Kind: KindPull, Number: 1},
+		{Kind: KindIssue, Number: 1},
+		{Kind: KindIssue, Number: 2},
+		{Kind: KindIssue, Number: 2},
+	}
+	deduped := dedupeWork(work)
+	want := []WorkItem{
+		{Kind: KindPull, Number: 1},
+		{Kind: KindIssue, Number: 1},
+		{Kind: KindIssue, Number: 2},
+	}
+	if len(deduped) != len(want) {
+		t.Fatalf("deduped = %+v, want %+v", deduped, want)
+	}
+	for index := range want {
+		if deduped[index] != want[index] {
+			t.Errorf("deduped[%d] = %+v, want %+v", index, deduped[index], want[index])
+		}
+	}
+}

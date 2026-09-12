@@ -32,6 +32,16 @@ const (
 	unknownReviewStatus       = "NONE"
 )
 
+// 对外暴露的规范标签名：dispatcher 的检测/完成判定与 setup 的初始化都复用
+// 同一事实来源，避免标签字符串多处复制。
+const (
+	// LabelTriage 表示 Issue 等待分诊。
+	LabelTriage = triageLabelName
+	// LabelReview 表示「评审请求中」：存在 @ai/@reviewer 提及、/review 命令或
+	// 原生 review 请求，等待评审会话处理。
+	LabelReview = reviewLabelName
+)
+
 type LabelDefinition struct {
 	Name        string
 	Color       string
@@ -147,26 +157,13 @@ func (m *Manager) reconcileRepository(ctx context.Context, repository Repository
 		reconcileErrors = append(reconcileErrors, err)
 	}
 
-	// 必要检查门禁依赖分支保护配置；普通协作者令牌（如 Actions 内置令牌）没有
-	// 分支保护读权限（HTTP 403），此时回退为「任何失败 context 即阻塞」的严格
-	// 模式继续同步——严格模式不需要该配置，且方向更保守，门禁不会因此失效。
-	// 其他错误（网络等）宁可本次不同步 PR，也不静默跳过门禁。
-	protections, err := m.api.ListBranchProtections(ctx, repository)
-	if err != nil {
-		if !IsPermissionError(err) {
-			return errors.Join(append(reconcileErrors, fmt.Errorf("list branch protections: %w", err))...)
-		}
-		m.logf("%s: 无权限读取分支保护，必要检查门禁回退为严格模式", repository.FullName())
-		protections = nil
-	}
-
 	pullRequests, err := m.api.ListOpenPullRequests(ctx, repository)
 	if err != nil {
 		return errors.Join(append(reconcileErrors, err)...)
 	}
 	m.logf("%s: 发现 %d 个 open PR", repository.FullName(), len(pullRequests))
 	for _, pullRequest := range pullRequests {
-		if err := m.reconcilePullRequest(ctx, repository, pullRequest.Index, labels, protections); err != nil {
+		if err := m.reconcilePullRequest(ctx, repository, pullRequest.Index, labels); err != nil {
 			reconcileErrors = append(reconcileErrors, fmt.Errorf("pull request #%d: %w", pullRequest.Index, err))
 		}
 	}
@@ -234,7 +231,6 @@ func (m *Manager) reconcilePullRequest(
 	repository Repository,
 	index int64,
 	repositoryLabels map[string]Label,
-	protections []BranchProtection,
 ) error {
 	pullRequest, err := m.api.GetPullRequest(ctx, repository, index)
 	if err != nil {
@@ -315,51 +311,25 @@ func (m *Manager) reconcilePullRequest(
 		formatBranchState(behind, hasBranchState),
 	)
 
+	// status/review 是「评审请求中」标记：只要存在评审意图（原生请求、
+	// @ai/@reviewer 提及、/review 命令或晚于最新内容结论的请求记录）就排队，
+	// 不再以门禁（冲突/落后/检查失败）阻断——门禁只在 automerge 合并时校验，
+	// 评审本身照常拉起。此前「检查失败即自动驳回」会把被取消的检查误判为失败，
+	// 直接卡住评审。
 	targetLabel := inProgressLabelName
 	if contentFound || reviewIntent {
 		// 有新评审意图时按 REQUEST_REVIEW 处理：无内容结论（评论请求）、
-		// REQUEST_CHANGES 后的复审请求、COMMENT 讨论后的再次请求都走同一门禁。
+		// REQUEST_CHANGES 后的复审请求、COMMENT 讨论后的再次请求都进评审队列。
 		state := ReviewStateRequestReview
 		if contentFound && !reviewIntent {
 			state = contentLatest.State
 		}
 		switch state {
-		case ReviewStateRequestReview, ReviewStateApproved:
-			if !hasBranchState {
-				return fmt.Errorf("missing base or merge-base commit metadata")
-			}
-			failedChecks, pendingChecks, err := m.checkStates(ctx, repository, pullRequest, protections)
-			if err != nil {
-				return err
-			}
-			// 检查仍在运行时本轮跳过：等检查完成再评估，避免基于半成品状态
-			// 修改标签或提交驳回 review。由后续事件或 schedule 收敛。
-			if len(pendingChecks) > 0 {
-				m.logf(
-					"%s#%d: 必要检查仍在运行: %v，本轮跳过",
-					repository.FullName(),
-					pullRequest.Index,
-					checkContexts(pendingChecks),
-				)
-				return nil
-			}
-			if !pullRequest.Mergeable || behind || len(failedChecks) > 0 {
-				return m.requestChangesAndSetStatus(
-					ctx,
-					repository,
-					pullRequest,
-					reviews,
-					repositoryLabels,
-					behind,
-					failedChecks,
-				)
-			}
-			if state == ReviewStateRequestReview {
-				targetLabel = reviewLabelName
-				m.logf("%s#%d: 需要 review", repository.FullName(), pullRequest.Index)
-			} else {
-				targetLabel = approvedLabelName
-			}
+		case ReviewStateRequestReview:
+			targetLabel = reviewLabelName
+			m.logf("%s#%d: 需要 review", repository.FullName(), pullRequest.Index)
+		case ReviewStateApproved:
+			targetLabel = approvedLabelName
 		case ReviewStateRequestChanges:
 			targetLabel = changesRequestedLabelName
 		case ReviewStateComment:
@@ -371,8 +341,8 @@ func (m *Manager) reconcilePullRequest(
 	}
 
 	// 与目标分支冲突（不可合并）或已落后时，无论评审进展如何都需要作者先处理，
-	// 不应停留在「开发中」。仅提升 in-progress，不覆盖已有的评审结论
-	// （review/approved 的冲突与落后在上面的门禁里已打回，changes-requested 本就如此）。
+	// 不应停留在「开发中」；不覆盖已有的评审结论（review/approved 保持原状，
+	// changes-requested 本就如此）。
 	needsAuthorRebase := !pullRequest.Mergeable || (hasBranchState && behind)
 	if needsAuthorRebase && targetLabel == inProgressLabelName {
 		targetLabel = changesRequestedLabelName
@@ -380,64 +350,6 @@ func (m *Manager) reconcilePullRequest(
 	}
 
 	return m.setPullRequestLabels(ctx, repository, pullRequest, repositoryLabels, targetLabel)
-}
-
-func (m *Manager) requestChangesAndSetStatus(
-	ctx context.Context,
-	repository Repository,
-	pullRequest PullRequest,
-	reviews []Review,
-	repositoryLabels map[string]Label,
-	behind bool,
-	failedChecks []CheckStatus,
-) error {
-	// 同一状态结论不必重复提交：状态通道的最新 review 已是驳回时，仅收敛标签
-	// （状态驳回是门禁健康度的实时表达，标签每轮重推，评论不随每次失败刷屏）。
-	if stateLatest, found := m.latestStateReview(reviews); found &&
-		stateLatest.State == ReviewStateRequestChanges {
-		return m.setPullRequestLabels(
-			ctx,
-			repository,
-			pullRequest,
-			repositoryLabels,
-			changesRequestedLabelName,
-		)
-	}
-	if pullRequest.HeadSHA == "" {
-		return fmt.Errorf("missing head commit metadata")
-	}
-	m.logf("%s#%d: PR 不满足评审条件，提交状态驳回 review", repository.FullName(), pullRequest.Index)
-	if err := m.api.CreatePullReview(ctx, repository, pullRequest.Index, ReviewInput{
-		State:    ReviewStateRequestChanges,
-		Body:     blockedReviewBody(pullRequest, behind, failedChecks),
-		CommitID: pullRequest.HeadSHA,
-	}); err != nil {
-		return err
-	}
-	return m.setPullRequestLabels(
-		ctx,
-		repository,
-		pullRequest,
-		repositoryLabels,
-		changesRequestedLabelName,
-	)
-}
-
-func blockedReviewBody(pullRequest PullRequest, behind bool, failedChecks []CheckStatus) string {
-	reasons := make([]string, 0, 2+len(failedChecks))
-	if !pullRequest.Mergeable {
-		reasons = append(reasons, "Gitea 当前判定该 PR 无法合并，请解决冲突或其他合并阻塞项。")
-	}
-	if behind {
-		reasons = append(
-			reasons,
-			fmt.Sprintf("当前分支落后基础分支 %s，请先 rebase 到最新基础分支。", pullRequest.BaseRef),
-		)
-	}
-	reasons = append(reasons, checkFailureReasons(failedChecks)...)
-	return "该 PR 暂不满足评审条件：\n\n- " + strings.Join(reasons, "\n- ") +
-		"\n\n请处理上述问题并更新 PR。本驳回来自 assistant，不影响你对 reviewer 的评审请求：" +
-		"门禁通过后 PR 会自动回到评审队列。"
 }
 
 func branchBehind(pullRequest PullRequest) (bool, bool) {

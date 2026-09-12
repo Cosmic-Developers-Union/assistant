@@ -44,7 +44,7 @@
 ```
 
 - `admin_token`：高权限令牌（repo admin），用于读取分支保护；`setup` 也用它建号建令牌。可以留空占位，由 `setup` 写入。
-- `reviewer` / `merger`：两个机器人账号与令牌；`name` 缺省 `ai` / `merge`，`token` 由 `setup` 生成。reviewer 是内容评审者（dispatcher 的完成判定与 `awaiting/reviewer` 检测都按它匹配），merger 是状态评审者（会签/合并）。
+- `reviewer` / `merger`：两个机器人账号与令牌；`name` 缺省 `ai` / `merge`，`token` 由 `setup` 生成。reviewer 是内容评审者（dispatcher 的完成判定与 `status/review` 请求检测都按它匹配），merger 是状态评审者（会签/合并）。
 - `repos`：仓库清单。字符串是 `owner/name` 简写；调度引擎的 `review`/`triage` 会话需要本地检出，多仓库时用对象形式给出 `dir`（单仓库可省略，退回启动目录的检出）。
 - 路径默认值按仓库隔离：日志 `<检出>/logs`、锁 `<检出>/dispatcher.lock`、worktree `<临时目录>/agent-dispatcher/<owner>-<repo>/worktrees`。
 - 文件含令牌，`setup` 以 0600 写入；请勿提交到版本库（`.gitignore` 已忽略常见位置，建议自行确认）。
@@ -78,7 +78,7 @@ assistant setup --host https://gitea.example.com \
 
 ## 仓库辅助机器人
 
-- `sync`：补齐标签体系、规范 open Issue 标签（含 duplicate/wontfix 自动关闭）、把 PR 原生评审状态同步为状态标签。单次执行、幂等，由 Gitea Actions 事件驱动运行。
+- `sync`：补齐标签体系、规范 open Issue 标签（含 duplicate/wontfix 自动关闭）、把 PR 评审状态同步为状态标签。`status/review` 即「评审请求中」标记：原生 review 请求、`@ai`/`@reviewer` 提及、行首 `/review` 命令任一出现就进评审队列，不再被门禁（冲突/落后/必要检查失败）阻断——门禁只在 `automerge` 合并时校验，避免「检查被取消」直接卡住评审。单次执行、幂等，由 Gitea Actions 事件驱动运行。
 - `check`：按标签检索待处理项并输出报告。默认立即返回；`--wait` 持续轮询直到出现待办，`--timeout` 轮询到超时为止（两者互斥，时长支持 `d` / `w` 单位，如 `1d1m1s`）；`--interval` 控制间隔（默认 15s），Ctrl+C 可随时中断。
 - `automerge`：把带 `status/approved` + `awaiting/merge` 标签且门禁全绿（分支未落后 main、无冲突、必要检查通过）的 PR squash 合并；一次运行至多合并一个 PR。由 schedule 工作流每 5 分钟驱动。
 
@@ -108,9 +108,12 @@ assistant setup --host https://gitea.example.com \
 ## 评审会话调度引擎
 
 ```
+评审请求 = 原生 review 请求 | @ai/@reviewer 提及 | 行首 /review 命令
+（sync 归一为 status/review，即「评审请求中」）
+
 检测（只读标签）                    每待办一个会话                      完成判定（简单规则）
 ─────────────────                 ─────────────────────              ─────────────────────
-awaiting/reviewer PR ──────────▶  review pr #N（起始提示词） ──────▶  起点之后 reviewer 的新 review
+status/review PR ─────────────▶  review pr #N（起始提示词） ──────▶  起点之后 reviewer 的新 review
 status/triage     Issue ───────▶  triage issue #N                  ▶  status/triage 标签已移除
 ```
 
@@ -119,7 +122,7 @@ status/triage     Issue ───────▶  triage issue #N               
 - **镜像同步（`--sync-mirror` / `DISPATCH_SYNC_MIRROR=1`，部署形态开启）**：每轮检测前把宿主检出强制对齐 `origin/<基线分支>`（`--base-branch` / `DISPATCH_BASE_BRANCH`，缺省 `main`）——`git fetch --prune origin` → `git checkout -f -B <基线> origin/<基线>` → `git clean -fd`，本地任何分叉一律丢弃；`.gitignore` 豁免的本地产物不受影响。同步失败跳过本轮等待重试。共享开发检出勿开启。
 - **会话驱动**：`claude -p` 子进程，命令面与手工运维一致（`--permission-mode auto`、`--autocompact auto`、stream-json 输出）。无人值守必需项：`--strict-mcp-config --mcp-config` 从宿主仓库 `.mcp.json` 显式注入 gitea MCP，外加 `--max-turns` / abort 超时兜底 runaway 会话。
 - **进度两路落点**：控制台实时显示会话 init 与编号的工具调用；完整明细实时写待办日志——stdout 按 stream-json 逐行解析，assistant 文本原样、工具调用记 `🔧 名称`。
-- **验证失败重试一次，head 漂移即作废**：每个 PR 会话开工时钉定当时的 head；完成后若 reviewer 提交了新 review 但 head 已被作者推进，本轮评审视为作废——直接放行等下一轮以新 head 重开。head 未变仅缺 review 才重试；两个会话后仍无完成动作则记录放行。
+- **一请求一会话，head 漂移即作废**：同一 instance+仓库+PR/Issue 同时至多一个会话；每个请求只拉起一个会话，完成（reviewer 已提交 review / triage 标签已移除）后在标签被 sync 收敛前不再重复拉起——连续 `@ai`、`/review` 不会造成重复会话。验证未过则本轮放行，等待下一轮检测；head 已被作者推进则本轮评审作废，下一轮以新 head 重开。
 - **有界并发（`--concurrency` / `DISPATCH_CONCURRENCY`，缺省 1）**：一轮待办至多同时跑 N 个会话；轮与轮之间是天然 barrier——同一 PR/Issue 同一时刻至多一个会话。
 - **单飞**：`dispatcher.lock` 记 PID（原子创建），同机第二实例拒绝启动，死 PID 残留自动接管（`review`/`triage` 一次性命令共用此锁）。
 - **多实例**：使用 `config.json` 时，`run` 为每个 instance × repo 启动一个独立循环（各自加锁、各自 worktree 根），任一循环失败即整体退出。启动前逐 instance 做健康检查：版本端点可达 + reviewer/merger/admin 令牌认证通过，任一不可用则拒绝启动（不带病运行）。
@@ -131,7 +134,7 @@ status/triage     Issue ───────▶  triage issue #N               
 assistant run             长驻主循环（部署形态；--interval/--timeout 可调）
 assistant run --dry-run   只读演练：按同一检测口径列出将执行的待办，逐步说明
                           将发生的动作（日志、worktree、会话、超时、完成判定、
-                          重试、清理），零副作用
+                          放行、清理），零副作用
 assistant list            只读列出当前待办（快速验证 host/仓库/令牌/标签链路）
 assistant review <n>      立即评审单个 PR（跳过检测，端到端调试用）
 assistant triage <n>      立即分诊单个 Issue
@@ -197,7 +200,7 @@ WantedBy=multi-user.target
 
 ## 形式化规格
 
-- `formal/Dispatcher.lean`：调度语义的 Lean 4 形式化规格（时间线建模、完成判定谓词）。机器检验的性质包括：作者 push 不同代码时完成判定不可能通过（A1）、更新 PR 说明对完成判定无影响（A2）、head 漂移本轮作废、同一待办至多两个会话、入队受 pending 与并发上限双重守卫。
+- `formal/Dispatcher.lean`：调度语义的 Lean 4 形式化规格（时间线建模、完成判定谓词）。机器检验的性质包括：作者 push 不同代码时完成判定不可能通过（A1）、更新 PR 说明对完成判定无影响（A2）、head 漂移本轮作废、同一待办每次入队至多一个会话、入队受 pending 与并发上限双重守卫。
 
   ```bash
   lean formal/Dispatcher.lean   # 退出码 0 即全部证明通过（纯 core Lean，无需 mathlib）

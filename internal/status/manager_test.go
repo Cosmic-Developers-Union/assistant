@@ -511,7 +511,9 @@ func TestManagerSynchronizesPullRequestReviewStates(t *testing.T) {
 	}
 }
 
-func TestManagerRequestsChangesForStaleReviewCandidate(t *testing.T) {
+// 落后（不可合并）的 PR 上出现评审请求：进入 review 队列而不是被自动驳回—
+// 门禁只在 automerge 合并时校验，评审本身照常拉起。
+func TestManagerQueuesReviewRequestOnStalePullRequest(t *testing.T) {
 	repository := Repository{Owner: "acme", Name: "video"}
 	labels := completeLabels()
 	reviewLabel := labelByName(t, labels, reviewLabelName)
@@ -524,52 +526,60 @@ func TestManagerRequestsChangesForStaleReviewCandidate(t *testing.T) {
 	if err := NewManager(api).Sync(t.Context()); err != nil {
 		t.Fatalf("Sync() error = %v", err)
 	}
-	if len(api.createdReviews) != 1 {
-		t.Fatalf("created reviews = %+v", api.createdReviews)
-	}
-	created := api.createdReviews[0]
-	if created.Input.State != ReviewStateRequestChanges || created.Input.CommitID != "head" {
-		t.Errorf("created review = %+v", created)
-	}
-	if !strings.Contains(created.Input.Body, "rebase") || !strings.Contains(created.Input.Body, "自动回到评审队列") {
-		t.Errorf("review body = %q", created.Input.Body)
-	}
-	wantRemoved := []labelChange{{Item: 12, Label: reviewLabel.ID}}
-	if !slices.Equal(api.removedLabels, wantRemoved) {
-		t.Errorf("removed labels = %+v", api.removedLabels)
+	if len(api.createdReviews) != 0 {
+		t.Fatalf("created reviews = %+v, want none", api.createdReviews)
 	}
 	wantAdded := []labelChange{
-		{Item: 12, Label: labelByName(t, labels, changesRequestedLabelName).ID},
-		{Item: 12, Label: labelByName(t, labels, awaitingAuthorLabelName).ID},
+		{Item: 12, Label: labelByName(t, labels, awaitingReviewerLabelName).ID},
 	}
 	if !slices.Equal(api.addedLabels, wantAdded) {
 		t.Errorf("added labels = %+v, want %+v", api.addedLabels, wantAdded)
 	}
+	if len(api.removedLabels) != 0 {
+		t.Errorf("removed labels = %+v, want none", api.removedLabels)
+	}
 }
 
-func TestManagerKeepsStatusWhenRequestChangesFails(t *testing.T) {
+// assistant（gitea-actions）曾自动驳回，作者随后重新请求评审：请求优先，回到
+// review 队列，旧驳回标签被替换。
+func TestManagerQueuesReviewRequestOverOldRejection(t *testing.T) {
 	repository := Repository{Owner: "acme", Name: "video"}
 	labels := completeLabels()
-	reviewLabel := labelByName(t, labels, reviewLabelName)
+	changesLabel := labelByName(t, labels, changesRequestedLabelName)
+	awaitingLabel := labelByName(t, labels, awaitingAuthorLabelName)
 	api := newFakeAPI(repository, labels)
-	api.pullRequests[repository.FullName()] = []PullRequest{{Index: 14}}
-	pr := unmergeablePullRequest(14, []Label{reviewLabel})
+	api.pullRequests[repository.FullName()] = []PullRequest{{Index: 18}}
+	pr := stalePullRequest(18, []Label{changesLabel, awaitingLabel})
 	pr.RequestedReviewers = []string{"ai"}
-	api.current[pullRequestKey(repository, 14)] = pr
-	api.reviewError = errors.New("permission denied")
+	api.current[pullRequestKey(repository, 18)] = pr
+	api.reviews[pullRequestKey(repository, 18)] = []Review{{
+		ID: 1, State: ReviewStateRequestChanges, Submitted: time.Unix(10, 0), User: "gitea-actions",
+	}}
 
-	err := NewManager(api).Sync(t.Context())
-	if err == nil || !strings.Contains(err.Error(), "permission denied") {
+	if err := NewManager(api).Sync(t.Context()); err != nil {
 		t.Fatalf("Sync() error = %v", err)
 	}
-	if len(api.addedLabels) != 0 || len(api.removedLabels) != 0 {
-		t.Fatalf("added = %+v, removed = %+v", api.addedLabels, api.removedLabels)
+	if len(api.createdReviews) != 0 {
+		t.Errorf("created reviews = %+v, want none", api.createdReviews)
+	}
+	wantAdded := []labelChange{
+		{Item: 18, Label: labelByName(t, labels, reviewLabelName).ID},
+		{Item: 18, Label: labelByName(t, labels, awaitingReviewerLabelName).ID},
+	}
+	if !slices.Equal(api.addedLabels, wantAdded) {
+		t.Errorf("added labels = %+v, want %+v", api.addedLabels, wantAdded)
+	}
+	wantRemoved := []labelChange{
+		{Item: 18, Label: changesLabel.ID},
+		{Item: 18, Label: awaitingLabel.ID},
+	}
+	if !slices.Equal(api.removedLabels, wantRemoved) {
+		t.Errorf("removed labels = %+v, want %+v", api.removedLabels, wantRemoved)
 	}
 }
 
 // assistant（gitea-actions）自动驳回后，作者对 reviewer 的评审请求仍然有效：
-// 最新评审者不是被请求的 reviewer，请求视为未回应，门禁通过则进入 review，
-// 且不重复提交 REQUEST_CHANGES。
+// 请求未被回应，进入 review 队列。
 func TestManagerHonorsPendingReviewRequestAfterRejection(t *testing.T) {
 	repository := Repository{Owner: "acme", Name: "video"}
 	labels := completeLabels()
@@ -599,33 +609,6 @@ func TestManagerHonorsPendingReviewRequestAfterRejection(t *testing.T) {
 	wantRemoved := []labelChange{{Item: 16, Label: changesLabel.ID}}
 	if !slices.Equal(api.removedLabels, wantRemoved) {
 		t.Errorf("removed labels = %+v, want %+v", api.removedLabels, wantRemoved)
-	}
-}
-
-// assistant 自动驳回后请求仍待处理，但门禁未过（仍落后基础分支）：
-// 保持 changes-requested，且已有驳回记录时不重复提交 REQUEST_CHANGES review。
-func TestManagerKeepsRejectionWhenPendingRequestStillBlocked(t *testing.T) {
-	repository := Repository{Owner: "acme", Name: "video"}
-	labels := completeLabels()
-	changesLabel := labelByName(t, labels, changesRequestedLabelName)
-	awaitingLabel := labelByName(t, labels, awaitingAuthorLabelName)
-	api := newFakeAPI(repository, labels)
-	api.pullRequests[repository.FullName()] = []PullRequest{{Index: 18}}
-	pr := stalePullRequest(18, []Label{changesLabel, awaitingLabel})
-	pr.RequestedReviewers = []string{"ai"}
-	api.current[pullRequestKey(repository, 18)] = pr
-	api.reviews[pullRequestKey(repository, 18)] = []Review{{
-		ID: 1, State: ReviewStateRequestChanges, Submitted: time.Unix(10, 0), User: "gitea-actions",
-	}}
-
-	if err := NewManager(api).Sync(t.Context()); err != nil {
-		t.Fatalf("Sync() error = %v", err)
-	}
-	if len(api.createdReviews) != 0 {
-		t.Errorf("created reviews = %+v, want none (不重复驳回)", api.createdReviews)
-	}
-	if len(api.addedLabels) != 0 || len(api.removedLabels) != 0 {
-		t.Errorf("added = %+v, removed = %+v, want 标签不变", api.addedLabels, api.removedLabels)
 	}
 }
 

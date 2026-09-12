@@ -20,6 +20,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"assistant/internal/status"
 )
 
 // Deps 是主循环的依赖：CLI 注入真实实现，测试注入桩。
@@ -201,6 +203,11 @@ func RunLoop(ctx context.Context, deps Deps) error {
 		config.BaseBranch, mirror,
 	))
 
+	// settled 是请求唯一键守卫（本进程内）：键为 kind#number，一个键同时只允许
+	// 一个未完成请求；处理完成后置位，直到标签被 sync 收敛（键从待办列表消失）
+	// 才解除——连续 @ai / /review 不会重复拉起同一待办。
+	settled := map[string]bool{}
+
 	for !ctxDone(ctx) {
 		// 镜像同步先行（fail-closed）：检出是评审标准与分诊的数据源，与其带着
 		// 陈旧基线评审，不如跳过本轮等待重试
@@ -225,6 +232,11 @@ func RunLoop(ctx context.Context, deps Deps) error {
 			sleep(config.Interval)
 			continue
 		}
+		// 请求唯一键守卫：已在本进程内处理过（review 已提交/triage 已移除）但
+		// 标签尚未被 sync 收敛的待办不再重复拉起——连续 @ai / /review 只会
+		// 形成一个未完成的请求。标签消失（sync 收敛）后自动解除守卫，之后
+		// 的新请求可以重新入队。
+		work = pruneSettled(work, settled)
 		if len(work) == 0 {
 			sleep(config.Interval)
 			continue
@@ -236,7 +248,7 @@ func RunLoop(ctx context.Context, deps Deps) error {
 		deps.Log(fmt.Sprintf("检测到 %d 个待办（并发 %d）：%s", len(work), config.Concurrency, strings.Join(labels, " ")))
 
 		// 有界并发：轮内至多 concurrency 个会话，轮与轮之间天然是 barrier——
-		// 同一待办同一时刻至多一个会话，同一待办的多次会话只发生在同一轮内
+		// 同一待办同一时刻至多一个会话
 		var wg sync.WaitGroup
 		var next int
 		var mutex sync.Mutex
@@ -251,7 +263,12 @@ func RunLoop(ctx context.Context, deps Deps) error {
 				index := next
 				next++
 				mutex.Unlock()
-				ProcessItem(ctx, deps, work[index])
+				result := ProcessItem(ctx, deps, work[index])
+				if result.Settled {
+					mutex.Lock()
+					settled[work[index].key()] = true
+					mutex.Unlock()
+				}
 			}
 		}
 		workers := config.Concurrency
@@ -331,7 +348,7 @@ func planSteps(deps Deps, item WorkItem) []string {
 			fmt.Sprintf("# 完成判定：head 漂移即本轮作废；reviewer %s 有新 review 才算完成", config.Reviewer),
 			curl(fmt.Sprintf("/pulls/%d", item.Number)),
 			curl(fmt.Sprintf("/pulls/%d/reviews?limit=50", item.Number)),
-			"# 未完成且 head 未动：同 head 重试 1 次（本待办至多 2 个会话）；两轮耗尽放行，下一轮检测再处理",
+			"# 未完成：本轮放行，下一轮检测再处理（同一请求只拉起一个会话）",
 			"cd " + deps.RepoDir,
 			fmt.Sprintf("git worktree remove --force %s   # 无论会话成败", worktreeDir),
 		}
@@ -342,10 +359,32 @@ func planSteps(deps Deps, item WorkItem) []string {
 		"cd " + deps.RepoDir,
 		claude("cwd=宿主检出根", strings.Split(
 			deps.BuildPrompt(KindIssue, item.Number, PromptContext{Title: item.Title}), "\n")[0]),
-		fmt.Sprintf("# 完成判定：%s 标签已从该 Issue 移除", triageLabel),
+		fmt.Sprintf("# 完成判定：%s 标签已从该 Issue 移除", status.LabelTriage),
 		curl(fmt.Sprintf("/issues/%d/labels", item.Number)),
-		"# 未完成：重试 1 次（本待办至多 2 个会话）；两轮耗尽放行，下一轮检测再处理",
+		"# 未完成：本轮放行，下一轮检测再处理（同一请求只拉起一个会话）",
 	}
+}
+
+// pruneSettled 过滤掉已处理但仍留在待办列表里的条目（请求标签尚未被 sync
+// 收敛），并清除已从列表消失的键（请求已收敛或关闭）——之后的重新请求可以
+// 再次入队。
+func pruneSettled(work []WorkItem, settled map[string]bool) []WorkItem {
+	present := make(map[string]bool, len(work))
+	filtered := work[:0]
+	for _, item := range work {
+		key := item.key()
+		present[key] = true
+		if settled[key] {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	for key := range settled {
+		if !present[key] {
+			delete(settled, key)
+		}
+	}
+	return filtered
 }
 
 // DryRunPass 是 run 的只读演练：按同一检测口径列出将执行的待办，逐条给出
@@ -394,11 +433,20 @@ type attemptRecord struct {
 	PermissionDenials int      `json:"permissionDenials"`
 }
 
+// ProcessResult 是一次处理的走向：Settled 表示已产出可验证的完成动作
+// （review 已提交 / triage 标签已移除），该请求已满足；在标签被 sync 收敛前
+// 不应重复拉起。
+type ProcessResult struct {
+	Settled bool
+}
+
 // ProcessItem 处理单个待办（主循环逐项调用；review/triage 一次性命令也走这里）。
 // 会话进度两路落点：控制台实时显示基础进度，完整明细实时写待办日志。
-func ProcessItem(ctx context.Context, deps Deps, item WorkItem) {
+// 每个待办每次只起一个会话：处理完即放行等待下一轮检测，同一请求的重复
+// 信号（连续 @ai / /review）由 RunLoop 的 settled 唯一键守卫吸收。
+func ProcessItem(ctx context.Context, deps Deps, item WorkItem) ProcessResult {
 	config := deps.Config
-	tag := fmt.Sprintf("%s#%d", item.Kind, item.Number)
+	tag := item.key()
 	logFile := filepath.Join(config.LogDir, fmt.Sprintf("%s-%d-%s.log", item.Kind, item.Number, stamp(time.Now())))
 	appendLog := func(line string) {
 		file, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
@@ -425,7 +473,7 @@ func ProcessItem(ctx context.Context, deps Deps, item WorkItem) {
 		if err != nil {
 			deps.Log(fmt.Sprintf("%s 处理异常：%v", tag, err))
 			appendLog(fmt.Sprintf("[error] %v\n", err))
-			return
+			return ProcessResult{}
 		}
 		headSHA = sha
 		cwd = worktreeDir
@@ -434,67 +482,62 @@ func ProcessItem(ctx context.Context, deps Deps, item WorkItem) {
 	prompt := deps.BuildPrompt(item.Kind, item.Number, PromptContext{Title: item.Title, HeadSHA: headSHA})
 	appendLog("[prompt] " + strings.ReplaceAll(prompt, "\n", " ⏎ ") + "\n")
 
-	for attempt := 1; attempt <= 2; attempt++ {
-		// 工具调用编号按会话计数——跨会话累计会被误读成单会话长度
-		toolCalls := 0
-		onProgress := func(line string) {
-			appendLog("[progress] " + line + "\n")
-			switch {
-			case strings.HasPrefix(line, "session="):
-				deps.Log(tag + " " + line)
-			case strings.HasPrefix(line, "🔧 "):
-				toolCalls++
-				deps.Log(fmt.Sprintf("%s 🔧 #%d %s", tag, toolCalls, strings.TrimPrefix(line, "🔧 ")))
-			}
-		}
-		if attempt > 1 {
-			deps.Log(fmt.Sprintf("%s 完成验证未通过，重试（第 %d 次，共 2 个会话）", tag, attempt))
-		}
-		startedAt := time.Now()
-		outcome := deps.RunSession(prompt, cwd, onProgress)
-		record, err := json.Marshal(attemptRecord{
-			Attempt:           int64(attempt),
-			StartedAt:         startedAt.UnixMilli(),
-			Subtype:           outcome.Subtype,
-			IsError:           outcome.IsError,
-			NumTurns:          outcome.NumTurns,
-			CostUSD:           outcome.CostUSD,
-			DurationMS:        outcome.DurationMS,
-			SessionID:         outcome.SessionID,
-			Result:            outcome.Result,
-			Errors:            outcome.Errors,
-			PermissionDenials: outcome.PermissionDenials,
-		})
-		if err == nil {
-			appendLog(string(record) + "\n")
-		}
-		denials := ""
-		if outcome.PermissionDenials > 0 {
-			denials = fmt.Sprintf(" denials=%d", outcome.PermissionDenials)
-		}
-		deps.Log(fmt.Sprintf("%s 会话结束：%s turns=%d cost=$%.2f%s",
-			tag, outcome.Subtype, outcome.NumTurns, outcome.CostUSD, denials))
-
-		verdict, err := verifyItem(ctx, deps, item, startedAt, headSHA)
-		if err != nil {
-			deps.Log(fmt.Sprintf("%s 处理异常：%v", tag, err))
-			appendLog(fmt.Sprintf("[error] %v\n", err))
-			return
-		}
-		appendLog(fmt.Sprintf("[verify] attempt=%d completed=%t headMoved=%t reason=%s\n",
-			attempt, verdict.completed, verdict.headMoved, verdict.reason))
-		if verdict.completed {
-			deps.Log(fmt.Sprintf("%s 完成（%s）", tag, verdict.reason))
-			return
-		}
-		// 作者在会话期间推送 ⇒ 评审锚定的旧 head 已作废：重试也只会再评旧代码，
-		// 直接放行，下一轮以新 head 重开（会话锚定的 head 记录在待办日志）
-		if verdict.headMoved {
-			deps.Log(fmt.Sprintf("%s %s；本轮放行，下一轮以新 head 重开", tag, verdict.reason))
-			return
+	toolCalls := 0
+	onProgress := func(line string) {
+		appendLog("[progress] " + line + "\n")
+		switch {
+		case strings.HasPrefix(line, "session="):
+			deps.Log(tag + " " + line)
+		case strings.HasPrefix(line, "🔧 "):
+			toolCalls++
+			deps.Log(fmt.Sprintf("%s 🔧 #%d %s", tag, toolCalls, strings.TrimPrefix(line, "🔧 ")))
 		}
 	}
-	deps.Log(fmt.Sprintf("%s 两次会话后仍未检测到完成动作，放行等待下一轮", tag))
+	startedAt := time.Now()
+	outcome := deps.RunSession(prompt, cwd, onProgress)
+	record, err := json.Marshal(attemptRecord{
+		Attempt:           1,
+		StartedAt:         startedAt.UnixMilli(),
+		Subtype:           outcome.Subtype,
+		IsError:           outcome.IsError,
+		NumTurns:          outcome.NumTurns,
+		CostUSD:           outcome.CostUSD,
+		DurationMS:        outcome.DurationMS,
+		SessionID:         outcome.SessionID,
+		Result:            outcome.Result,
+		Errors:            outcome.Errors,
+		PermissionDenials: outcome.PermissionDenials,
+	})
+	if err == nil {
+		appendLog(string(record) + "\n")
+	}
+	denials := ""
+	if outcome.PermissionDenials > 0 {
+		denials = fmt.Sprintf(" denials=%d", outcome.PermissionDenials)
+	}
+	deps.Log(fmt.Sprintf("%s 会话结束：%s turns=%d cost=$%.2f%s",
+		tag, outcome.Subtype, outcome.NumTurns, outcome.CostUSD, denials))
+
+	verdict, err := verifyItem(ctx, deps, item, startedAt, headSHA)
+	if err != nil {
+		deps.Log(fmt.Sprintf("%s 处理异常：%v", tag, err))
+		appendLog(fmt.Sprintf("[error] %v\n", err))
+		return ProcessResult{}
+	}
+	appendLog(fmt.Sprintf("[verify] completed=%t headMoved=%t reason=%s\n",
+		verdict.completed, verdict.headMoved, verdict.reason))
+	if verdict.completed {
+		deps.Log(fmt.Sprintf("%s 完成（%s）", tag, verdict.reason))
+		return ProcessResult{Settled: true}
+	}
+	// 作者在会话期间推送 ⇒ 评审锚定的旧 head 已作废：直接放行，下一轮以新
+	// head 重开（会话锚定的 head 记录在待办日志）
+	if verdict.headMoved {
+		deps.Log(fmt.Sprintf("%s %s；本轮放行，下一轮以新 head 重开", tag, verdict.reason))
+		return ProcessResult{}
+	}
+	deps.Log(fmt.Sprintf("%s 本轮未完成，放行等待下一轮检测", tag))
+	return ProcessResult{}
 }
 
 type itemVerdict struct {

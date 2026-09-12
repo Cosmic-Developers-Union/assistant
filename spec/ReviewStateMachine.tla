@@ -12,11 +12,12 @@
 (* 关键建模决策：                                                            *)
 (*   - 双批准模型：review 按作者角色分两条通道——内容结论（contentState，    *)
 (*     人员 reviewer "ai" 的批准/驳回/COMMENT）驱动状态标签；状态结论        *)
-(*     (stateState，状态评审者 "merge" 的门禁驳回与会签) 只表达门禁健康度。  *)
-(*     两条通道互不可替代：内容批准不是状态批准，状态批准不是内容批准        *)
+(*     (stateState，状态评审者 "merge" 的会签) 只在合并前一刻产生；门禁在    *)
+(*     Merge 动作校验。两条通道互不可替代：内容批准不是状态批准，状态批准    *)
+(*     不是内容批准                                                          *)
 (*   - 状态批准是惰性会签：Merge 动作在同一机械动作内完成「会签 + 合并」，   *)
-(*     不存在「盖了章等着」的中间态；会签使 required approvals 计满，        *)
-(*     同时以官方批准覆盖状态评审者自己的门禁驳回                           *)
+(*     不存在「盖了章等着」的中间态；会签使 required approvals 计满          *)
+(*     （内容批准 + 状态会签）                                               *)
 (*   - 「reviewer 提交 review 后 Gitea 是否消费 requested_reviewers」实测    *)
 (*     与源码结论矛盾，建模为非确定性选择——两种行为下规约都必须成立          *)
 (*   - requested_reviewers 无时间戳，无法区分「旧请求残留」与「重新请求」；  *)
@@ -28,8 +29,11 @@
 (*   - dismiss_stale_approvals 使推送作废旧批准（内容批准与会签一并作废）；  *)
 (*     旧批准之下可能露出更早的 review，该情形归约为 none（那些状态可由     *)
 (*     其他动作序列直接到达）。responded 是单调历史（含被 dismiss 的        *)
-(*     review），不随作废回退；状态驳回（requestChanges）推送后仅标记       *)
-(*     stale 不被 dismiss，建模为保持不变                                    *)
+(*     review），不随作废回退                                                *)
+(*   - 「status/review = 评审请求中」：评审意图（原生请求、按钮复审记录、    *)
+(*     @ai//review 提及）只由 Intent 决定标签，不再被门禁（冲突/落后/检查   *)
+(*     失败/pending）阻断——门禁只在 Merge 动作校验。此前「检查失败即自动   *)
+(*     驳回」会把被取消的检查误判为失败而卡住评审，已废弃                    *)
 (*   - 必要检查门禁（分支保护 required status checks）建模为 checks；        *)
 (*     Merge 动作本身也受门禁约束，对应 Gitea 的合并按钮硬性限制             *)
 (***************************************************************************)
@@ -45,7 +49,7 @@ VARIABLES
     freshMention,   \* 最新内容结论之后的评论中存在评审意图信号：实现中是两条独立
                     \* 谓词的并集（hasReviewerMention ‖ hasReviewCommand，即 @ai/@reviewer
                     \* 提及或行首 /review 命令）；同一扫描窗口、同一效果，建模为同一信号
-    stateState,     \* 状态通道最新结论: "none" | "approved"（会签） | "requestChanges"（门禁驳回）
+    stateState,     \* 状态通道最新结论: "none" | "approved"（会签）
     behind,         \* merge_base != base.sha（落后于基础分支）
     mergeable,      \* Gitea 判定可合并（无冲突）
     checks,         \* 必要检查聚合: "passed" | "pending" | "failed"
@@ -60,7 +64,7 @@ vars == <<contentState, requestedUsers, requestedTeam, responded, requestFresh,
 
 ContentStates == {"none", "approved", "requestChanges", "comment"}
 States == {"none", "approved", "requestChanges", "comment"}
-StateStates == {"none", "approved", "requestChanges"}
+StateStates == {"none", "approved"}
 CheckStates == {"passed", "pending", "failed"}
 Labels == {"inProgress", "review", "changesRequested", "approved"}
 
@@ -99,15 +103,14 @@ Intent == HasUnansweredRequest \/ recordFresh \/ freshMention
 EffectiveState == IF Intent THEN "requestReview" ELSE contentState
 
 \* sync 在非跳过情形下会设置的标签。与 Sync 动作分头编码，由 MirrorCorrect
-\* 交叉验证两处实现一致。
+\* 交叉验证两处实现一致。门禁不再参与标签推导——评审请求即排队，合并门禁
+\* 由 Merge 动作校验。
 ExpectedLabels ==
     IF ~ContentFound /\ ~Intent
     THEN IF ~mergeable \/ behind THEN "changesRequested" ELSE "inProgress"
-    ELSE IF EffectiveState \in {"requestReview", "approved"}
-         THEN IF ~mergeable \/ behind \/ checks = "failed"
-              THEN "changesRequested"
-              ELSE IF EffectiveState = "requestReview" THEN "review" ELSE "approved"
-         ELSE "changesRequested"
+    ELSE IF EffectiveState = "requestReview" THEN "review"
+         ELSE IF EffectiveState = "approved" THEN "approved"
+              ELSE "changesRequested"
 
 (***************************************************************************)
 (* sync（assistant reconcile）                                              *)
@@ -117,22 +120,12 @@ Sync ==
     /\ ~merged
     /\ IF ~ContentFound /\ ~Intent
        THEN \* 无内容结论且无意图：开发中；冲突/落后提升为「要求修改」
-            \* （状态通道的门禁驳回只表达门禁健康度，门禁恢复即回到开发中）
             /\ labels' = IF ~mergeable \/ behind THEN "changesRequested" ELSE "inProgress"
             /\ UNCHANGED <<contentState, requestedUsers, responded, stateState>>
        ELSE IF EffectiveState \in {"requestReview", "approved"}
-            THEN IF checks = "pending"
-                 THEN UNCHANGED <<labels, contentState, requestedUsers, responded, stateState>>  \* 检查运行中，本轮跳过
-                 ELSE IF ~mergeable \/ behind \/ checks = "failed"
-                      THEN \* 门禁未过：状态评审者驳回（状态通道已有驳回时不重复提交）
-                           \* 提交的 review 进入时间线，responded 随之吸收其作者
-                           /\ labels' = "changesRequested"
-                           /\ IF stateState # "requestChanges"
-                              THEN /\ stateState' = "requestChanges"
-                                   /\ responded' = responded \cup {"merge"}
-                              ELSE UNCHANGED <<stateState, responded>>
-                      ELSE /\ labels' = IF EffectiveState = "requestReview" THEN "review" ELSE "approved"
-                           /\ UNCHANGED <<contentState, requestedUsers, responded, stateState>>
+            THEN \* 评审意图 / 批准直接落标签：不被 checks/conflict/behind 阻断
+                 /\ labels' = IF EffectiveState = "requestReview" THEN "review" ELSE "approved"
+                 /\ UNCHANGED <<contentState, requestedUsers, responded, stateState>>
             ELSE \* 驳回或 COMMENT 讨论：等待作者
                  /\ labels' = "changesRequested"
                  /\ UNCHANGED <<contentState, requestedUsers, responded, stateState>>
@@ -199,8 +192,7 @@ ReviewerSubmit(state) ==
 
 \* 作者推送新提交：检查重跑（pending），可能引入或解决冲突；
 \* dismiss_stale_approvals 作废旧批准——内容批准与会签一并作废（归约为
-\* none，见模块头注释）；状态驳回（requestChanges）仅标记 stale，建模为
-\* 保持不变；responded 是单调历史，不随作废回退。
+\* none，见模块头注释）；responded 是单调历史，不随作废回退。
 AuthorPush ==
     /\ ~merged /\ ~quiet
     /\ contentState' = IF contentState = "approved" THEN "none" ELSE contentState
@@ -257,9 +249,8 @@ EnvQuiet ==
                   labels, dirty, merged>>
 
 \* 会签 + 合并（同一机械动作）：门禁全绿时状态评审者对 head 盖状态批准——
-\* required approvals 的第二票，同时以官方批准覆盖状态通道此前的驳回——
-\* 随即合并。人类手动合并同样受此约束：没有会签在场（或召唤 automerge）
-\* 就无法满足 required approvals。
+\* required approvals 的第二票——随即合并。人类手动合并同样受此约束：
+\* 没有会签在场（或召唤 automerge）就无法满足 required approvals。
 Merge ==
     /\ ~merged /\ ~quiet
     /\ labels = "approved"
@@ -320,47 +311,42 @@ TypeOK ==
     /\ quiet \in BOOLEAN
     /\ merged \in BOOLEAN
 
-\* sync 收敛后（无未同步变更、检查不在运行中——pending 时 sync 按设计跳过），
-\* 标签与算法输出一致。Sync 与 ExpectedLabels 是同一算法的两份独立编码，
-\* 相互印证。
+\* sync 收敛后（无未同步变更），标签与算法输出一致。Sync 与 ExpectedLabels 是
+\* 同一算法的两份独立编码，相互印证。
 MirrorCorrect ==
-    (~dirty /\ ~merged /\ checks # "pending") => labels = ExpectedLabels
+    (~dirty /\ ~merged) => labels = ExpectedLabels
 
 \* S1 球权归属：内容评审者本人回应过（驳回或讨论）、所有请求都已吸收、无新
 \* 提及且无新的按钮请求记录 → 球确定性在作者。这是「COMMENT 后 PR 不得停留
 \* 在 review 空等」的直接表达。意图可能来自其他未回应者或团队请求——那种情
 \* 形下 PR 留在 review 是正确行为（确有 reviewer 未回应），不在本性质约束内。
 BallWithAuthorAfterResponse ==
-    (~dirty /\ ~merged /\ checks # "pending"
+    (~dirty /\ ~merged
      /\ contentState \in {"requestChanges", "comment"}
      /\ ~HasUnansweredRequest /\ ~recordFresh /\ ~freshMention)
     => labels = "changesRequested"
 
-\* S2 approved 标签的真实性：只有内容评审者本人批准且门禁全绿时才成立——
-\* 状态评审者的会签（stateState = "approved"）绝不能单独驱动 approved。
+\* S2 approved 标签的真实性：只有内容评审者本人批准时才成立——状态评审者的
+\* 会签（stateState = "approved"）绝不能单独驱动 approved。合并门禁（检查/
+\* 冲突/落后）由 Merge 动作校验，不参与标签推导。
 ApprovedGenuine ==
-    (~dirty /\ ~merged /\ checks # "pending" /\ labels = "approved")
-    => (contentState = "approved" /\ checks = "passed" /\ mergeable /\ ~behind)
+    (~dirty /\ ~merged /\ labels = "approved")
+    => contentState = "approved"
 
-\* S3 review 标签的真实性：门禁全绿且存在有效评审意图。
+\* S3 review 标签的真实性：存在有效评审意图（评审请求不被门禁阻断）。
 ReviewGenuine ==
-    (~dirty /\ ~merged /\ checks # "pending" /\ labels = "review")
-    => (checks = "passed" /\ mergeable /\ ~behind /\ Intent)
+    (~dirty /\ ~merged /\ labels = "review")
+    => Intent
 
-\* S4 落后、冲突或必要检查失败时，绝不显示 review/approved。
-BlockedNeverReviewable ==
-    (~dirty /\ ~merged /\ checks # "pending" /\ (behind \/ ~mergeable \/ checks = "failed"))
-    => labels \in {"inProgress", "changesRequested"}
-
-\* S5 无内容结论、无意图且分支健康 → 开发中。状态会签在场也不能例外——
+\* S4 无内容结论、无意图且分支健康 → 开发中。状态会签在场也不能例外——
 \* 它是状态通道的结论，不构成内容批准。
 FreshPRIsInProgress ==
-    (~dirty /\ ~merged /\ checks # "pending"
+    (~dirty /\ ~merged
      /\ ~ContentFound /\ requestedUsers = {} /\ ~requestedTeam
      /\ ~recordFresh /\ ~freshMention /\ mergeable /\ ~behind)
     => labels = "inProgress"
 
-\* S6 状态会签只出现在合并前一刻：会签在场蕴含门禁全绿且标签已到 approved
+\* S5 状态会签只出现在合并前一刻：会签在场蕴含门禁全绿且标签已到 approved
 \* （会签与合并是同一机械动作，不存在「盖章等待」或「带病盖章」）。
 CountersignOnlyWhenGreen ==
     (~dirty /\ ~merged /\ stateState = "approved")
@@ -372,6 +358,6 @@ CountersignOnlyWhenGreen ==
 (***************************************************************************)
 
 ConvergesWhenQuiet ==
-    quiet ~> [](merged \/ (~dirty /\ (checks # "pending" => labels = ExpectedLabels)))
+    quiet ~> [](merged \/ (~dirty /\ labels = ExpectedLabels))
 
 ====

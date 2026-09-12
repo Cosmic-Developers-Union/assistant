@@ -2,7 +2,6 @@ package status
 
 import (
 	"context"
-	"fmt"
 	"path"
 	"slices"
 	"strings"
@@ -88,17 +87,4 @@ func branchRuleMatches(rule, branch string) bool {
 	}
 	matched, err := path.Match(rule, branch)
 	return err == nil && matched
-}
-
-// checkFailureReasons 把失败的检查格式化为 review 正文条目。
-func checkFailureReasons(failedChecks []CheckStatus) []string {
-	reasons := make([]string, 0, len(failedChecks))
-	for _, check := range failedChecks {
-		reason := fmt.Sprintf("必要检查 `%s` 未通过（%s）", check.Context, check.State)
-		if check.TargetURL != "" {
-			reason += fmt.Sprintf("：%s", check.TargetURL)
-		}
-		reasons = append(reasons, reason)
-	}
-	return reasons
 }

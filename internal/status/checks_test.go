@@ -1,16 +1,14 @@
 package status
 
 import (
-	"errors"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 )
 
-// 准备一个没有分支保护（回退模式：任何失败 context 阻塞评审）的待评审 PR。
+// 准备一个带评审请求（requested_reviewers）的待评审 PR。
 // 评审意图由 requested_reviewers 表达；REQUEST_REVIEW 时间线记录保留在 fixture
-// 中，用于同时验证它不会被当作评审结论（见 latestActiveReview）。
+// 中，用于同时验证它不会被当作评审结论。
 func newReviewCandidateAPI(t *testing.T) (*fakeAPI, Repository, []Label) {
 	t.Helper()
 	repository := Repository{Owner: "acme", Name: "video"}
@@ -26,7 +24,9 @@ func newReviewCandidateAPI(t *testing.T) (*fakeAPI, Repository, []Label) {
 	return api, repository, labels
 }
 
-func TestSyncBlocksReviewWhenCheckFails(t *testing.T) {
+// 评审请求不被门禁阻断：必要检查失败时照常进入 review 队列，不自动驳回、不
+// 改变球权。status/review 是「评审请求中」标记，门禁只在 automerge 合并时校验。
+func TestSyncQueuesReviewWhenCheckFails(t *testing.T) {
 	api, _, labels := newReviewCandidateAPI(t)
 	api.statuses["head"] = []CheckStatus{
 		{Context: "build / test", State: "failure", TargetURL: "https://ci.example.com/runs/1"},
@@ -36,149 +36,8 @@ func TestSyncBlocksReviewWhenCheckFails(t *testing.T) {
 	if err := NewManager(api).Sync(t.Context()); err != nil {
 		t.Fatalf("Sync() error = %v", err)
 	}
-	if len(api.createdReviews) != 1 {
-		t.Fatalf("created reviews = %+v", api.createdReviews)
-	}
-	created := api.createdReviews[0]
-	if created.Input.State != ReviewStateRequestChanges {
-		t.Errorf("review state = %s", created.Input.State)
-	}
-	if !strings.Contains(created.Input.Body, "build / test") ||
-		!strings.Contains(created.Input.Body, "https://ci.example.com/runs/1") ||
-		strings.Contains(created.Input.Body, "lint") {
-		t.Errorf("review body = %q", created.Input.Body)
-	}
-	wantAdded := []labelChange{
-		{Item: 21, Label: labelByName(t, labels, changesRequestedLabelName).ID},
-		{Item: 21, Label: labelByName(t, labels, awaitingAuthorLabelName).ID},
-	}
-	if !slices.Equal(api.addedLabels, wantAdded) {
-		t.Errorf("added labels = %+v, want %+v", api.addedLabels, wantAdded)
-	}
-}
-
-func TestSyncAllowsReviewWhenChecksPassOrPending(t *testing.T) {
-	for name, statuses := range map[string][]CheckStatus{
-		"all success": {
-			{Context: "build / test", State: "success"},
-			{Context: "lint", State: "success"},
-		},
-		"no checks at all": {},
-	} {
-		t.Run(name, func(t *testing.T) {
-			api, _, labels := newReviewCandidateAPI(t)
-			api.statuses["head"] = statuses
-
-			if err := NewManager(api).Sync(t.Context()); err != nil {
-				t.Fatalf("Sync() error = %v", err)
-			}
-			if len(api.createdReviews) != 0 {
-				t.Errorf("created reviews = %+v", api.createdReviews)
-			}
-			wantAdded := []labelChange{
-				{Item: 21, Label: labelByName(t, labels, reviewLabelName).ID},
-				{Item: 21, Label: labelByName(t, labels, awaitingReviewerLabelName).ID},
-			}
-			if !slices.Equal(api.addedLabels, wantAdded) {
-				t.Errorf("added labels = %+v, want %+v", api.addedLabels, wantAdded)
-			}
-		})
-	}
-}
-
-// 检查仍在运行（pending）时本轮跳过：不改标签、不提交 review，
-// 等检查完成后由后续事件或 schedule 重新评估。
-func TestSyncSkipsWhileChecksPending(t *testing.T) {
-	api, _, _ := newReviewCandidateAPI(t)
-	api.statuses["head"] = []CheckStatus{
-		{Context: "build / test", State: "pending"},
-	}
-
-	if err := NewManager(api).Sync(t.Context()); err != nil {
-		t.Fatalf("Sync() error = %v", err)
-	}
 	if len(api.createdReviews) != 0 {
-		t.Errorf("created reviews = %+v", api.createdReviews)
-	}
-	if len(api.addedLabels) != 0 || len(api.removedLabels) != 0 {
-		t.Errorf("added = %+v, removed = %+v, want 本轮跳过", api.addedLabels, api.removedLabels)
-	}
-}
-
-func TestSyncBlocksOnlyRequiredContextsWhenProtectionConfigured(t *testing.T) {
-	for name, test := range map[string]struct {
-		statuses    []CheckStatus
-		wantBlocked bool
-	}{
-		"required context failed": {
-			statuses: []CheckStatus{
-				{Context: "build / test", State: "failure"},
-				{Context: "optional / lint", State: "failure"},
-			},
-			wantBlocked: true,
-		},
-		"non-required context failed": {
-			statuses: []CheckStatus{
-				{Context: "optional / lint", State: "failure"},
-			},
-			wantBlocked: false,
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			api, repository, labels := newReviewCandidateAPI(t)
-			api.protections[repository.FullName()] = []BranchProtection{{
-				RuleName:          "main",
-				EnableStatusCheck: true,
-				Contexts:          []string{"build / test"},
-			}}
-			api.statuses["head"] = test.statuses
-
-			if err := NewManager(api).Sync(t.Context()); err != nil {
-				t.Fatalf("Sync() error = %v", err)
-			}
-			if test.wantBlocked {
-				if len(api.createdReviews) != 1 {
-					t.Fatalf("created reviews = %+v, want one REQUEST_CHANGES", api.createdReviews)
-				}
-				wantAdded := []labelChange{
-					{Item: 21, Label: labelByName(t, labels, changesRequestedLabelName).ID},
-					{Item: 21, Label: labelByName(t, labels, awaitingAuthorLabelName).ID},
-				}
-				if !slices.Equal(api.addedLabels, wantAdded) {
-					t.Errorf("added labels = %+v, want %+v", api.addedLabels, wantAdded)
-				}
-				return
-			}
-			if len(api.createdReviews) != 0 {
-				t.Errorf("created reviews = %+v", api.createdReviews)
-			}
-			wantAdded := []labelChange{
-				{Item: 21, Label: labelByName(t, labels, reviewLabelName).ID},
-				{Item: 21, Label: labelByName(t, labels, awaitingReviewerLabelName).ID},
-			}
-			if !slices.Equal(api.addedLabels, wantAdded) {
-				t.Errorf("added labels = %+v, want %+v", api.addedLabels, wantAdded)
-			}
-		})
-	}
-}
-
-// 严格回退模式下排除 assistant 自己的 sync 工作流 context：排队运行被取消会
-// 留下 failure 状态（"Canceled after 0s"），bot 自身的运行结果不是 PR 的质量
-// 信号，不排除则一次取消就触发自我驳回循环。构建工作流（Gitea Assistant Build）
-// 的 context 不受影响。
-func TestSyncIgnoresOwnWorkflowContextInFallback(t *testing.T) {
-	api, _, labels := newReviewCandidateAPI(t)
-	api.statuses["head"] = []CheckStatus{
-		{Context: "Gitea Assistant / run (pull_request)", State: "failure"},
-		{Context: "Gitea Assistant Build / build (pull_request)", State: "success"},
-	}
-
-	if err := NewManager(api).Sync(t.Context()); err != nil {
-		t.Fatalf("Sync() error = %v", err)
-	}
-	if len(api.createdReviews) != 0 {
-		t.Errorf("created reviews = %+v, want none（自身 context 不阻塞）", api.createdReviews)
+		t.Errorf("created reviews = %+v, want none（门禁不阻断评审）", api.createdReviews)
 	}
 	wantAdded := []labelChange{
 		{Item: 21, Label: labelByName(t, labels, reviewLabelName).ID},
@@ -189,38 +48,96 @@ func TestSyncIgnoresOwnWorkflowContextInFallback(t *testing.T) {
 	}
 }
 
-func TestSyncFallsBackToStrictModeWhenProtectionsForbidden(t *testing.T) {
-	api, repository, labels := newReviewCandidateAPI(t)
-	api.protectError[repository.FullName()] = &PermissionError{Operation: "list branch protections"}
+// 检查仍在运行（pending）同样不跳过、不阻断：请求照常排队。
+func TestSyncQueuesReviewWhileChecksPending(t *testing.T) {
+	api, _, labels := newReviewCandidateAPI(t)
 	api.statuses["head"] = []CheckStatus{
-		{Context: "optional / lint", State: "failure"},
+		{Context: "build / test", State: "pending"},
 	}
 
 	if err := NewManager(api).Sync(t.Context()); err != nil {
 		t.Fatalf("Sync() error = %v", err)
 	}
-	if len(api.createdReviews) != 1 {
-		t.Fatalf("created reviews = %+v, want one REQUEST_CHANGES", api.createdReviews)
+	if len(api.createdReviews) != 0 {
+		t.Errorf("created reviews = %+v", api.createdReviews)
 	}
 	wantAdded := []labelChange{
-		{Item: 21, Label: labelByName(t, labels, changesRequestedLabelName).ID},
-		{Item: 21, Label: labelByName(t, labels, awaitingAuthorLabelName).ID},
+		{Item: 21, Label: labelByName(t, labels, reviewLabelName).ID},
+		{Item: 21, Label: labelByName(t, labels, awaitingReviewerLabelName).ID},
 	}
 	if !slices.Equal(api.addedLabels, wantAdded) {
 		t.Errorf("added labels = %+v, want %+v", api.addedLabels, wantAdded)
 	}
 }
 
-func TestSyncSkipsPullRequestsWhenProtectionsUnreadable(t *testing.T) {
-	api, repository, _ := newReviewCandidateAPI(t)
-	api.protectError[repository.FullName()] = errors.New("connection reset")
+// 落后基础分支同样不阻断评审请求（此前会被自动驳回为 changes-requested）。
+func TestSyncQueuesStaleReviewRequest(t *testing.T) {
+	repository := Repository{Owner: "acme", Name: "video"}
+	labels := completeLabels()
+	api := newFakeAPI(repository, labels)
+	api.pullRequests[repository.FullName()] = []PullRequest{{Index: 12}}
+	pr := stalePullRequest(12, nil)
+	pr.RequestedReviewers = []string{"ai"}
+	api.current[pullRequestKey(repository, 12)] = pr
 
-	err := NewManager(api).Sync(t.Context())
-	if err == nil || !strings.Contains(err.Error(), "connection reset") {
+	if err := NewManager(api).Sync(t.Context()); err != nil {
 		t.Fatalf("Sync() error = %v", err)
 	}
-	if len(api.createdReviews) != 0 || len(api.addedLabels) != 0 || len(api.removedLabels) != 0 {
-		t.Errorf("reviews = %+v, added = %+v, removed = %+v", api.createdReviews, api.addedLabels, api.removedLabels)
+	if len(api.createdReviews) != 0 {
+		t.Errorf("created reviews = %+v, want none", api.createdReviews)
+	}
+	wantAdded := []labelChange{
+		{Item: 12, Label: labelByName(t, labels, reviewLabelName).ID},
+		{Item: 12, Label: labelByName(t, labels, awaitingReviewerLabelName).ID},
+	}
+	if !slices.Equal(api.addedLabels, wantAdded) {
+		t.Errorf("added labels = %+v, want %+v", api.addedLabels, wantAdded)
+	}
+}
+
+// checkStates 是 automerge 的门禁读取：配置了分支保护时只统计必要 context。
+func TestCheckStatesRespectsRequiredContexts(t *testing.T) {
+	repository := Repository{Owner: "acme", Name: "video"}
+	api := newFakeAPI(repository, nil)
+	api.statuses["head"] = []CheckStatus{
+		{Context: "build / test", State: "failure"},
+		{Context: "optional / lint", State: "failure"},
+		{Context: "slow / integration", State: "pending"},
+	}
+	manager := NewManager(api)
+	failed, pending, err := manager.checkStates(t.Context(), repository, mergeablePullRequest(21, nil), []BranchProtection{{
+		RuleName:          "main",
+		EnableStatusCheck: true,
+		Contexts:          []string{"build / test", "slow / integration"},
+	}})
+	if err != nil {
+		t.Fatalf("checkStates() error = %v", err)
+	}
+	if len(failed) != 1 || failed[0].Context != "build / test" {
+		t.Errorf("failed = %+v, want only build / test", failed)
+	}
+	if len(pending) != 1 || pending[0].Context != "slow / integration" {
+		t.Errorf("pending = %+v, want only slow / integration", pending)
+	}
+}
+
+// 未配置分支保护时回退为「任何失败 context 即阻塞」，但排除 assistant 自己的
+// sync 工作流 context：排队运行被取消会留下 failure 状态（"Canceled after 0s"），
+// bot 自身的运行结果不是 PR 的质量信号。
+func TestCheckStatesFallbackExcludesSelfWorkflow(t *testing.T) {
+	repository := Repository{Owner: "acme", Name: "video"}
+	api := newFakeAPI(repository, nil)
+	api.statuses["head"] = []CheckStatus{
+		{Context: "Gitea Assistant / run (pull_request)", State: "failure"},
+		{Context: "Gitea Assistant Build / build (pull_request)", State: "failure"},
+	}
+	manager := NewManager(api)
+	failed, _, err := manager.checkStates(t.Context(), repository, mergeablePullRequest(21, nil), nil)
+	if err != nil {
+		t.Fatalf("checkStates() error = %v", err)
+	}
+	if len(failed) != 1 || failed[0].Context != "Gitea Assistant Build / build (pull_request)" {
+		t.Errorf("failed = %+v, want only build context", failed)
 	}
 }
 

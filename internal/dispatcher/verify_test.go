@@ -84,7 +84,7 @@ func TestVerifyIssueTriage(t *testing.T) {
 		t.Errorf("verdict = %+v, want completed", verdict)
 	}
 
-	pending := &fakeAPI{labels: []status.Label{{Name: triageLabel}, {Name: "type/bug"}}}
+	pending := &fakeAPI{labels: []status.Label{{Name: status.LabelTriage}, {Name: "type/bug"}}}
 	verdict, err = VerifyIssueTriage(context.Background(), pending, testRepo, 62)
 	if err != nil {
 		t.Fatalf("VerifyIssueTriage() error = %v", err)
