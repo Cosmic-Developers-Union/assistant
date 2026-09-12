@@ -20,6 +20,9 @@ import (
 
 const (
 	adminTokenName = "assistant-admin"
+	// botTokenName 是机器人令牌的固定名称：同一账号只保留一个令牌（唯一性由
+	// ConvergeToken 收敛），名称固定便于识别与人工排障。
+	botTokenName = "assistant"
 	// 机器人令牌的最小权限集：仓库读写（分支/协作者/合并）、Issue 读写
 	// （标签、评论、PR review）与读取自身账号（完成判定的身份校验）。
 	botTokenScopes = "read:repository,write:repository,read:issue,write:issue,read:user"
@@ -37,7 +40,9 @@ type giteaAdmin struct {
 	dryRun        bool
 	// ephemeral 表示令牌来自 OAuth 登录（会过期），不应写入配置。
 	ephemeral bool
-	log       func(string, ...any)
+	// oauth 是 OAuth 登录留下的刷新凭据（可落盘，运行期换取 access token）。
+	oauth *instances.OAuthCredential
+	log   func(string, ...any)
 	// passwords 记录本次创建的机器人账号随机密码，用于令牌创建失败时以
 	// Basic Auth 回退（不写盘）。
 	passwords map[string]string
@@ -72,6 +77,9 @@ func NewAdmin(ctx context.Context, options Options) (*giteaAdmin, error) {
 	if options.OAuth != nil {
 		oauthOptions := *options.OAuth
 		oauthOptions.Host = options.Host
+		if oauthOptions.ClientID == "" {
+			oauthOptions.ClientID = DefaultOAuthClientID
+		}
 		if oauthOptions.Log == nil {
 			oauthOptions.Log = logf
 		}
@@ -81,6 +89,11 @@ func NewAdmin(ctx context.Context, options Options) (*giteaAdmin, error) {
 		}
 		admin.token = result.Token
 		admin.ephemeral = true
+		admin.oauth = &instances.OAuthCredential{
+			ClientID:     oauthOptions.ClientID,
+			ClientSecret: oauthOptions.ClientSecret,
+			RefreshToken: result.RefreshToken,
+		}
 		login, isAdmin = result.Login, result.IsAdmin
 	} else {
 		if admin.token == "" && !admin.dryRun {
@@ -125,6 +138,15 @@ func (a *giteaAdmin) PersistentToken() string {
 		return ""
 	}
 	return a.token
+}
+
+// AdminOAuth 返回 OAuth 刷新凭据（非 OAuth 登录时为 nil）。
+func (a *giteaAdmin) AdminOAuth() *instances.OAuthCredential {
+	if a.oauth == nil {
+		return nil
+	}
+	copied := *a.oauth
+	return &copied
 }
 
 func (a *giteaAdmin) AuthenticatedUser(ctx context.Context) (string, bool, error) {
@@ -173,32 +195,77 @@ func (a *giteaAdmin) CreateUser(ctx context.Context, name, email string) error {
 	return nil
 }
 
-func (a *giteaAdmin) CreateToken(ctx context.Context, name string) (string, error) {
-	tokenName := fmt.Sprintf("assistant-setup-%d", time.Now().Unix())
-	body := map[string]any{"name": tokenName, "scopes": strings.Split(botTokenScopes, ",")}
+// EnsurePassword 返回机器人账号的可用密码：本次创建的密码，或由管理员重置
+// （机器人不登录 UI，重置无副作用）。
+func (a *giteaAdmin) EnsurePassword(ctx context.Context, name string) (string, error) {
+	if password := a.passwords[name]; password != "" {
+		return password, nil
+	}
+	return a.resetPassword(ctx, name)
+}
+
+// tokenInfo 是账号令牌的只读视图（令牌值不可回读，只能按末 8 位匹配）。
+type tokenInfo struct {
+	ID             int64  `json:"id"`
+	Name           string `json:"name"`
+	TokenLastEight string `json:"token_last_eight"`
+}
+
+// ConvergeToken 把机器人账号的令牌收敛为唯一一个：保留 keepToken（按末 8 位
+// 匹配）或新建，删除账号下其余所有令牌。同一站点同时只允许一个评审主机
+// （dispatcher 单飞锁是进程内的），令牌唯一从凭据层面强制这一约束。
+func (a *giteaAdmin) ConvergeToken(
+	ctx context.Context,
+	name, password, keepToken string,
+) (token string, created bool, err error) {
+	tokens, err := a.listTokensBasic(ctx, name, password)
+	if err != nil {
+		return "", false, fmt.Errorf("列出 %s 的令牌: %w", name, err)
+	}
+	var keepID int64
+	if keepToken != "" {
+		lastEight := tokenLastEight(keepToken)
+		for _, item := range tokens {
+			if item.TokenLastEight == lastEight {
+				keepID = item.ID
+				break
+			}
+		}
+	}
+	deleted := 0
+	for _, item := range tokens {
+		if item.ID == keepID {
+			continue
+		}
+		if err := a.deleteTokenBasic(ctx, name, password, item.ID); err != nil {
+			return "", false, fmt.Errorf("删除 %s 的历史令牌 %s: %w", name, item.Name, err)
+		}
+		deleted++
+	}
+	if keepID != 0 {
+		token = keepToken
+	} else {
+		token, err = a.createTokenBasic(ctx, name, password)
+		if err != nil {
+			return "", false, err
+		}
+		created = true
+	}
+	if deleted > 0 {
+		a.log("已清理 %s 的 %d 个历史令牌（保证同一账号只有一个评审主机）", name, deleted)
+	}
+	return token, created, nil
+}
+
+// createTokenBasic 以机器人自己的 Basic Auth 建一个固定名称的令牌。
+// Gitea 的建令牌端点只接受 Basic Auth：管理员令牌（含 OAuth 令牌）会 401/403。
+func (a *giteaAdmin) createTokenBasic(ctx context.Context, name, password string) (string, error) {
+	body := map[string]any{"name": botTokenName, "scopes": strings.Split(botTokenScopes, ",")}
 	var payload struct {
 		Token string `json:"sha1"`
 	}
 	path := "/api/v1/users/" + url.PathEscape(name) + "/tokens"
-	_, err := a.do(ctx, http.MethodPost, path, a.auth(), body, &payload)
-	// Gitea 的建令牌端点只接受 Basic Auth：管理员令牌（含 OAuth 令牌）会
-	// 401/403。回退为机器人自己的 Basic Auth——密码来自本次创建；账号已存在
-	// 时由管理员重置一次密码（机器人账号不使用密码，重置无副作用）。
-	if err != nil && (isHTTPStatus(err, http.StatusForbidden) || isHTTPStatus(err, http.StatusUnauthorized)) {
-		password := a.passwords[name]
-		if password == "" {
-			reset, resetErr := a.resetPassword(ctx, name)
-			if resetErr != nil {
-				a.log("无法重置 %s 的密码（%v），尝试直接创建令牌", name, resetErr)
-			} else {
-				password = reset
-			}
-		}
-		if password != "" {
-			_, err = a.do(ctx, http.MethodPost, path, requestAuth{user: name, password: password}, body, &payload)
-		}
-	}
-	if err != nil {
+	if _, err := a.do(ctx, http.MethodPost, path, requestAuth{user: name, password: password}, body, &payload); err != nil {
 		return "", fmt.Errorf("为 %s 创建令牌: %w", name, err)
 	}
 	if payload.Token == "" {
@@ -207,7 +274,41 @@ func (a *giteaAdmin) CreateToken(ctx context.Context, name string) (string, erro
 	return payload.Token, nil
 }
 
-// resetPassword 由管理员重置机器人账号密码（仅用于以 Basic Auth 创建它自己
+func (a *giteaAdmin) listTokensBasic(ctx context.Context, name, password string) ([]tokenInfo, error) {
+	var result []tokenInfo
+	for page := 1; ; page++ {
+		var batch []tokenInfo
+		path := fmt.Sprintf("/api/v1/users/%s/tokens?page=%d&limit=50", url.PathEscape(name), page)
+		if _, err := a.do(ctx, http.MethodGet, path, requestAuth{user: name, password: password}, nil, &batch); err != nil {
+			return nil, err
+		}
+		result = append(result, batch...)
+		if len(batch) < 50 {
+			return result, nil
+		}
+	}
+}
+
+func (a *giteaAdmin) deleteTokenBasic(ctx context.Context, name, password string, id int64) error {
+	path := fmt.Sprintf("/api/v1/users/%s/tokens/%d", url.PathEscape(name), id)
+	if _, err := a.do(ctx, http.MethodDelete, path, requestAuth{user: name, password: password}, nil, nil); err != nil {
+		if isHTTPStatus(err, http.StatusNotFound) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// tokenLastEight 取令牌末 8 位（与 Gitea 的 token_last_eight 对齐）。
+func tokenLastEight(token string) string {
+	if len(token) <= 8 {
+		return token
+	}
+	return token[len(token)-8:]
+}
+
+// resetPassword 由管理员重置机器人账号密码（仅用于以 Basic Auth 管理它自己
 // 的令牌；机器人不登录 UI，重置无副作用）。
 func (a *giteaAdmin) resetPassword(ctx context.Context, name string) (string, error) {
 	if a.sdk == nil {
@@ -228,7 +329,6 @@ func (a *giteaAdmin) resetPassword(ctx context.Context, name string) (string, er
 		return "", err
 	}
 	a.passwords[name] = password
-	a.log("已重置 %s 的密码以生成令牌（机器人账号不使用密码）", name)
 	return password, nil
 }
 

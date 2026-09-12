@@ -40,11 +40,13 @@ type OAuthOptions struct {
 	Timeout     time.Duration
 }
 
-// OAuthResult 是 OAuth 登录结果。
+// OAuthResult 是 OAuth 登录结果。access token 短期有效；refresh token 可
+// 持久化，用于运行期换取新的 access token。
 type OAuthResult struct {
-	Token   string
-	Login   string
-	IsAdmin bool
+	Token        string
+	RefreshToken string
+	Login        string
+	IsAdmin      bool
 }
 
 type oauthCallback struct {
@@ -156,7 +158,7 @@ func OAuthLogin(ctx context.Context, options OAuthOptions) (OAuthResult, error) 
 		return OAuthResult{}, callback.err
 	}
 
-	token, err := exchangeOAuthCode(ctx, httpClient, host, options, redirectURI, callback.code, verifier)
+	token, refreshToken, err := exchangeOAuthCode(ctx, httpClient, host, options, redirectURI, callback.code, verifier)
 	if err != nil {
 		return OAuthResult{}, err
 	}
@@ -165,7 +167,7 @@ func OAuthLogin(ctx context.Context, options OAuthOptions) (OAuthResult, error) 
 		return OAuthResult{}, err
 	}
 	logf("OAuth 登录成功：@%s", login)
-	return OAuthResult{Token: token, Login: login, IsAdmin: isAdmin}, nil
+	return OAuthResult{Token: token, RefreshToken: refreshToken, Login: login, IsAdmin: isAdmin}, nil
 }
 
 func exchangeOAuthCode(
@@ -174,7 +176,7 @@ func exchangeOAuthCode(
 	host string,
 	options OAuthOptions,
 	redirectURI, code, verifier string,
-) (string, error) {
+) (accessToken, refreshToken string, err error) {
 	form := url.Values{
 		"grant_type":    {"authorization_code"},
 		"client_id":     {options.ClientID},
@@ -185,27 +187,74 @@ func exchangeOAuthCode(
 	if options.ClientSecret != "" {
 		form.Set("client_secret", options.ClientSecret)
 	}
+	payload, err := requestOAuthToken(ctx, httpClient, host, form)
+	if err != nil {
+		return "", "", err
+	}
+	return payload.AccessToken, payload.RefreshToken, nil
+}
+
+// RefreshOAuthToken 用 refresh token 换取新的 access token（运行期用于读取
+// 分支保护；refresh token 若被轮换则同时返回新值）。
+func RefreshOAuthToken(
+	ctx context.Context,
+	host, clientID, clientSecret, refreshToken string,
+	httpClient *http.Client,
+) (accessToken, newRefreshToken string, err error) {
+	if clientID == "" || refreshToken == "" {
+		return "", "", fmt.Errorf("缺少 OAuth client_id 或 refresh_token")
+	}
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: httpTimeout}
+	}
+	form := url.Values{
+		"grant_type":    {"refresh_token"},
+		"client_id":     {clientID},
+		"refresh_token": {refreshToken},
+	}
+	if clientSecret != "" {
+		form.Set("client_secret", clientSecret)
+	}
+	payload, err := requestOAuthToken(ctx, httpClient, strings.TrimRight(host, "/"), form)
+	if err != nil {
+		return "", "", err
+	}
+	if payload.RefreshToken == "" {
+		payload.RefreshToken = refreshToken
+	}
+	return payload.AccessToken, payload.RefreshToken, nil
+}
+
+type oauthTokenPayload struct {
+	AccessToken      string `json:"access_token"`
+	RefreshToken     string `json:"refresh_token"`
+	Error            string `json:"error"`
+	ErrorDescription string `json:"error_description"`
+}
+
+func requestOAuthToken(
+	ctx context.Context,
+	httpClient *http.Client,
+	host string,
+	form url.Values,
+) (oauthTokenPayload, error) {
 	request, err := http.NewRequestWithContext(
 		ctx, http.MethodPost, host+"/login/oauth/access_token", strings.NewReader(form.Encode()),
 	)
 	if err != nil {
-		return "", err
+		return oauthTokenPayload{}, err
 	}
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("Accept", "application/json")
 	response, err := httpClient.Do(request)
 	if err != nil {
-		return "", fmt.Errorf("兑换 OAuth 令牌：%w", err)
+		return oauthTokenPayload{}, fmt.Errorf("请求 OAuth 令牌：%w", err)
 	}
 	defer response.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-	var payload struct {
-		AccessToken      string `json:"access_token"`
-		Error            string `json:"error"`
-		ErrorDescription string `json:"error_description"`
-	}
+	var payload oauthTokenPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return "", fmt.Errorf("解析 OAuth 令牌响应：%w", err)
+		return oauthTokenPayload{}, fmt.Errorf("解析 OAuth 令牌响应：%w", err)
 	}
 	if payload.AccessToken == "" {
 		message := payload.ErrorDescription
@@ -215,9 +264,9 @@ func exchangeOAuthCode(
 		if message == "" {
 			message = strings.TrimSpace(string(body))
 		}
-		return "", fmt.Errorf("OAuth 令牌兑换失败（HTTP %d）：%s", response.StatusCode, message)
+		return oauthTokenPayload{}, fmt.Errorf("OAuth 令牌请求失败（HTTP %d）：%s", response.StatusCode, message)
 	}
-	return payload.AccessToken, nil
+	return payload, nil
 }
 
 func oauthUserInfo(ctx context.Context, httpClient *http.Client, host, token string) (string, bool, error) {

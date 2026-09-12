@@ -101,6 +101,9 @@ func TestSetupWithOAuthEndToEnd(t *testing.T) {
 	if instance.AdminToken != "" {
 		t.Errorf("AdminToken = %q, want empty (OAuth 令牌不落盘)", instance.AdminToken)
 	}
+	if instance.AdminOAuth == nil || instance.AdminOAuth.RefreshToken == "" || instance.AdminOAuth.ClientID != clientID {
+		t.Fatalf("AdminOAuth = %+v, want persisted refresh credential", instance.AdminOAuth)
+	}
 	if instance.Reviewer.Token == "" || instance.Merger.Token == "" {
 		t.Fatalf("bot tokens missing: %+v", instance)
 	}
@@ -123,12 +126,23 @@ func TestSetupWithOAuthEndToEnd(t *testing.T) {
 		}
 	}
 
-	// 分支保护同样配置完成
+	// 分支保护同样配置完成；运行期不需要 admin_token——用 refresh token 换取
+	// 短期 access token 读取（对应 check/sync/automerge 的实际路径）。
+	accessToken, newRefresh, err := setup.RefreshOAuthToken(
+		ctx, env.Host, instance.AdminOAuth.ClientID, instance.AdminOAuth.ClientSecret,
+		instance.AdminOAuth.RefreshToken, nil,
+	)
+	if err != nil {
+		t.Fatalf("RefreshOAuthToken() error = %v", err)
+	}
+	if accessToken == "" || newRefresh == "" {
+		t.Fatalf("refresh returned empty tokens: %q %q", accessToken, newRefresh)
+	}
 	reviewerClient, err := status.NewClient(env.Host, instance.Reviewer.Token)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := reviewerClient.UseBranchProtectionToken(env.AdminToken); err != nil {
+	if err := reviewerClient.UseBranchProtectionToken(accessToken); err != nil {
 		t.Fatal(err)
 	}
 	protections, err := reviewerClient.ListBranchProtections(ctx, status.Repository{Owner: adminLogin, Name: repositoryName})
@@ -147,7 +161,7 @@ func TestSetupWithOAuthEndToEnd(t *testing.T) {
 
 	// 第二次初始化（不传 Existing）：机器人账号已存在、密码未知，管理员只有
 	// OAuth 令牌（建令牌端点 401）——校验「重置机器人密码 + BasicAuth 建令牌」
-	// 回退链路在真实 Gitea 上成立。
+	// 回退链路；同时令牌唯一性收敛应使第一次的令牌失效。
 	secondRepo := fmt.Sprintf("e2e-oauth2-%d", time.Now().Unix())
 	secondOptions := options
 	secondOptions.Repos = []string{adminLogin + "/" + secondRepo}
@@ -165,6 +179,14 @@ func TestSetupWithOAuthEndToEnd(t *testing.T) {
 	}
 	if login, err := secondClient.AuthenticatedUser(ctx); err != nil || login != second.Reviewer.Name {
 		t.Errorf("fresh token login = %q, err = %v", login, err)
+	}
+	// 唯一性：第一次的令牌已被收敛删除
+	oldClient, err := status.NewClient(env.Host, instance.Reviewer.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if login, err := oldClient.AuthenticatedUser(ctx); err == nil {
+		t.Errorf("stale token still valid (login %q), uniqueness convergence failed", login)
 	}
 }
 

@@ -43,23 +43,40 @@ func fakeOAuthProvider(t *testing.T, wantSecret string) *httptest.Server {
 	})
 	mux.HandleFunc("/login/oauth/access_token", func(writer http.ResponseWriter, request *http.Request) {
 		_ = request.ParseForm()
-		mu.Lock()
-		wantChallenge := challenge
-		mu.Unlock()
-		digest := sha256.Sum256([]byte(request.FormValue("code_verifier")))
-		if base64.RawURLEncoding.EncodeToString(digest[:]) != wantChallenge {
-			http.Error(writer, "bad code_verifier", http.StatusBadRequest)
-			return
-		}
-		if request.FormValue("client_id") != "client-1" || request.FormValue("code") != "code-1" {
-			http.Error(writer, "bad request", http.StatusBadRequest)
-			return
-		}
 		if request.FormValue("client_secret") != wantSecret {
 			http.Error(writer, "bad client_secret", http.StatusUnauthorized)
 			return
 		}
-		_ = json.NewEncoder(writer).Encode(map[string]string{"access_token": "token-1"})
+		switch request.FormValue("grant_type") {
+		case "authorization_code":
+			mu.Lock()
+			wantChallenge := challenge
+			mu.Unlock()
+			digest := sha256.Sum256([]byte(request.FormValue("code_verifier")))
+			if base64.RawURLEncoding.EncodeToString(digest[:]) != wantChallenge {
+				http.Error(writer, "bad code_verifier", http.StatusBadRequest)
+				return
+			}
+			if request.FormValue("client_id") != "client-1" || request.FormValue("code") != "code-1" {
+				http.Error(writer, "bad request", http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]string{
+				"access_token":  "token-1",
+				"refresh_token": "refresh-1",
+			})
+		case "refresh_token":
+			if request.FormValue("client_id") != "client-1" || request.FormValue("refresh_token") != "refresh-1" {
+				http.Error(writer, "bad refresh", http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]string{
+				"access_token":  "token-2",
+				"refresh_token": "refresh-2",
+			})
+		default:
+			http.Error(writer, "unsupported grant", http.StatusBadRequest)
+		}
 	})
 	mux.HandleFunc("/api/v1/user", func(writer http.ResponseWriter, request *http.Request) {
 		if request.Header.Get("Authorization") != "Bearer token-1" {
@@ -91,6 +108,27 @@ func TestOAuthLoginPublicClient(t *testing.T) {
 	}
 	if result.Token != "token-1" || result.Login != "admin" || !result.IsAdmin {
 		t.Errorf("result = %+v", result)
+	}
+	if result.RefreshToken != "refresh-1" {
+		t.Errorf("RefreshToken = %q, want refresh-1", result.RefreshToken)
+	}
+}
+
+func TestRefreshOAuthToken(t *testing.T) {
+	server := fakeOAuthProvider(t, "")
+	access, refresh, err := RefreshOAuthToken(
+		context.Background(), server.URL, "client-1", "", "refresh-1", server.Client(),
+	)
+	if err != nil {
+		t.Fatalf("RefreshOAuthToken() error = %v", err)
+	}
+	if access != "token-2" || refresh != "refresh-2" {
+		t.Errorf("access = %q refresh = %q", access, refresh)
+	}
+	if _, _, err := RefreshOAuthToken(
+		context.Background(), server.URL, "client-1", "", "wrong", server.Client(),
+	); err == nil {
+		t.Error("RefreshOAuthToken(wrong refresh) error = nil, want error")
 	}
 }
 

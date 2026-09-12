@@ -14,12 +14,14 @@ type fakeAdmin struct {
 	adminToken    string
 	users         map[string]bool
 	tokens        map[string]string
+	passwords     map[string]string
 	tokenSeq      int
 	repos         map[string]RepoInfo
 	createdRepos  []string
 	collaborators map[string][]string
 	protections   map[string]string
 	labels        map[string]bool
+	oauth         *instances.OAuthCredential
 }
 
 func newFakeAdmin(repos ...string) *fakeAdmin {
@@ -28,6 +30,7 @@ func newFakeAdmin(repos ...string) *fakeAdmin {
 		adminToken:    "admin-token",
 		users:         map[string]bool{"admin": true},
 		tokens:        map[string]string{},
+		passwords:     map[string]string{},
 		repos:         map[string]RepoInfo{},
 		collaborators: map[string][]string{},
 		protections:   map[string]string{},
@@ -47,6 +50,14 @@ func (f *fakeAdmin) AdminToken() string { return f.adminToken }
 
 func (f *fakeAdmin) PersistentToken() string { return f.adminToken }
 
+func (f *fakeAdmin) AdminOAuth() *instances.OAuthCredential {
+	if f.oauth == nil {
+		return nil
+	}
+	copied := *f.oauth
+	return &copied
+}
+
 func (f *fakeAdmin) UserExists(_ context.Context, name string) (bool, error) {
 	return f.users[name], nil
 }
@@ -56,11 +67,25 @@ func (f *fakeAdmin) CreateUser(_ context.Context, name, _ string) error {
 	return nil
 }
 
-func (f *fakeAdmin) CreateToken(_ context.Context, name string) (string, error) {
+func (f *fakeAdmin) EnsurePassword(_ context.Context, name string) (string, error) {
+	if f.passwords == nil {
+		f.passwords = map[string]string{}
+	}
+	if f.passwords[name] == "" {
+		f.passwords[name] = "generated-password"
+	}
+	return f.passwords[name], nil
+}
+
+// ConvergeToken 模拟真实实现的收敛语义：保留有效令牌或新建，账号下至多一个。
+func (f *fakeAdmin) ConvergeToken(_ context.Context, name, _ /*password*/, keepToken string) (string, bool, error) {
+	if keepToken != "" && f.tokens[name] == keepToken {
+		return keepToken, false, nil
+	}
 	f.tokenSeq++
 	token := fmt.Sprintf("token-%s-%d", name, f.tokenSeq)
 	f.tokens[name] = token
-	return token, nil
+	return token, true, nil
 }
 
 func (f *fakeAdmin) ValidateToken(_ context.Context, name, token string) (bool, error) {

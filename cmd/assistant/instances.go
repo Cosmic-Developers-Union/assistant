@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"assistant/internal/instances"
+	"assistant/internal/setup"
 	"assistant/internal/status"
 )
 
@@ -41,7 +42,12 @@ func resolveInstanceFile(options commandOptions) (string, *instances.File, error
 
 // instanceManagers 按 instance × repo 构造 Manager。repoFilter 为空时，仓库
 // 清单为空的 instance 不限定仓库（同步令牌可见的全部仓库）；否则逐个仓库限定。
-func instanceManagers(file *instances.File, repoFilter string, stderr io.Writer) ([]*status.Manager, error) {
+func instanceManagers(
+	ctx context.Context,
+	file *instances.File,
+	repoFilter string,
+	stderr io.Writer,
+) ([]*status.Manager, error) {
 	var managers []*status.Manager
 	matchedFilter := repoFilter == ""
 	for _, instance := range file.Instances {
@@ -57,7 +63,7 @@ func instanceManagers(file *instances.File, repoFilter string, stderr io.Writer)
 			matchedFilter = true
 		}
 		if len(repos) == 0 {
-			manager, err := newInstanceManager(instance, "", logf)
+			manager, err := newInstanceManager(ctx, instance, "", logf)
 			if err != nil {
 				return nil, err
 			}
@@ -65,7 +71,7 @@ func instanceManagers(file *instances.File, repoFilter string, stderr io.Writer)
 			continue
 		}
 		for _, repo := range repos {
-			manager, err := newInstanceManager(instance, repo, logf)
+			manager, err := newInstanceManager(ctx, instance, repo, logf)
 			if err != nil {
 				return nil, err
 			}
@@ -82,6 +88,7 @@ func instanceManagers(file *instances.File, repoFilter string, stderr io.Writer)
 }
 
 func newInstanceManager(
+	ctx context.Context,
 	instance instances.Instance,
 	repo string,
 	logf func(string, ...any),
@@ -97,8 +104,22 @@ func newInstanceManager(
 	if err != nil {
 		return nil, err
 	}
-	if instance.AdminToken != "" && instance.AdminToken != baseToken {
-		if err := client.UseBranchProtectionToken(instance.AdminToken); err != nil {
+	adminToken := instance.AdminToken
+	if adminToken == "" && instance.AdminOAuth != nil {
+		// OAuth access token 短期有效：按需用 refresh token 换一个（不落盘）
+		access, _, refreshErr := setup.RefreshOAuthToken(
+			ctx, instance.Host,
+			instance.AdminOAuth.ClientID, instance.AdminOAuth.ClientSecret, instance.AdminOAuth.RefreshToken,
+			nil,
+		)
+		if refreshErr != nil {
+			logf("OAuth 凭据刷新失败（%v），分支保护读取回退严格模式", refreshErr)
+		} else {
+			adminToken = access
+		}
+	}
+	if adminToken != "" && adminToken != baseToken {
+		if err := client.UseBranchProtectionToken(adminToken); err != nil {
 			return nil, err
 		}
 	}
@@ -127,7 +148,7 @@ func runManagerAction(
 	file *instances.File,
 	action func(context.Context, *status.Manager) error,
 ) error {
-	managers, err := instanceManagers(file, options.Repository, stderr)
+	managers, err := instanceManagers(ctx, file, options.Repository, stderr)
 	if err != nil {
 		return err
 	}

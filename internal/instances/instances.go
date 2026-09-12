@@ -32,10 +32,20 @@ type Instance struct {
 	Host string `json:"host"`
 	// AdminToken 是高权限令牌：读取分支保护需要 repo admin；setup 也用它建
 	// 账号与令牌。留空时运行期分支保护读取自动回退严格模式。
-	AdminToken string  `json:"admin_token,omitempty"`
-	Reviewer   Account `json:"reviewer,omitempty"`
-	Merger     Account `json:"merger,omitempty"`
-	Repos      []Repo  `json:"repos"`
+	AdminToken string `json:"admin_token,omitempty"`
+	// AdminOAuth 是 OAuth 登录留下的刷新凭据：access token 短期有效不落盘，
+	// refresh token 长期有效，运行期按需换取（用 OAuth 初始化时写入）。
+	AdminOAuth *OAuthCredential `json:"admin_oauth,omitempty"`
+	Reviewer   Account          `json:"reviewer,omitempty"`
+	Merger     Account          `json:"merger,omitempty"`
+	Repos      []Repo           `json:"repos"`
+}
+
+// OAuthCredential 是 OAuth2 刷新凭据。
+type OAuthCredential struct {
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret,omitempty"`
+	RefreshToken string `json:"refresh_token"`
 }
 
 // Account 是一个机器人账号及其访问令牌。
@@ -192,6 +202,11 @@ func (i Instance) Validate() error {
 	}
 	if i.Reviewer.Name == i.Merger.Name {
 		return fmt.Errorf("reviewer 与 merger 不能是同一账号（%s）", i.Reviewer.Name)
+	}
+	if i.AdminOAuth != nil {
+		if i.AdminOAuth.ClientID == "" || i.AdminOAuth.RefreshToken == "" {
+			return fmt.Errorf("admin_oauth 需要 client_id 与 refresh_token")
+		}
 	}
 	for _, repo := range i.Repos {
 		if _, _, err := ParseRepoName(repo.Name); err != nil {

@@ -55,6 +55,8 @@ func TestLoadRejectsInvalidConfig(t *testing.T) {
 		"bad repository": `{"instances": [{"host": "https://a.example.com", "repos": ["nope"]}]}`,
 		"same account": `{"instances": [{"host": "https://a.example.com", "repos": [],
 			"reviewer": {"name": "bot"}, "merger": {"name": "bot"}}]}`,
+		"oauth without refresh": `{"instances": [{"host": "https://a.example.com", "repos": [],
+			"admin_oauth": {"client_id": "c1"}}]}`,
 		"unknown field": `{"instances": [{"host": "https://a.example.com", "repos": [], "token": "x"}]}`,
 	}
 	for name, content := range tests {
@@ -75,6 +77,7 @@ func TestSaveWritesRestrictedFileAndRoundTrips(t *testing.T) {
 	file := &File{Instances: []Instance{{
 		Host:       "https://gitea.example.com",
 		AdminToken: "admin",
+		AdminOAuth: &OAuthCredential{ClientID: "client-1", ClientSecret: "secret-1", RefreshToken: "refresh-1"},
 		Reviewer:   Account{Name: "ai", Token: "reviewer-token"},
 		Merger:     Account{Name: "merge", Token: "merger-token"},
 		Repos:      []Repo{{Name: "owner/repo"}, {Name: "owner/another", Dir: "/srv/another"}},
@@ -95,6 +98,9 @@ func TestSaveWritesRestrictedFileAndRoundTrips(t *testing.T) {
 	}
 	if loaded.Instances[0].Reviewer.Token != "reviewer-token" {
 		t.Errorf("token round-trip failed: %+v", loaded.Instances[0].Reviewer)
+	}
+	if loaded.Instances[0].AdminOAuth == nil || loaded.Instances[0].AdminOAuth.RefreshToken != "refresh-1" {
+		t.Errorf("admin_oauth round-trip failed: %+v", loaded.Instances[0].AdminOAuth)
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {

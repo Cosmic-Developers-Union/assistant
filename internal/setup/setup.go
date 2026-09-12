@@ -59,9 +59,15 @@ type Admin interface {
 	// PersistentToken 返回可写入配置长期使用的管理员令牌；OAuth 令牌会过期，
 	// 返回空表示不应落盘。
 	PersistentToken() string
+	// AdminOAuth 返回 OAuth 刷新凭据（可落盘）；非 OAuth 登录时为 nil。
+	AdminOAuth() *instances.OAuthCredential
 	UserExists(ctx context.Context, name string) (bool, error)
 	CreateUser(ctx context.Context, name, email string) error
-	CreateToken(ctx context.Context, name string) (string, error)
+	// EnsurePassword 返回账号可用密码（本次创建或管理员重置）。
+	EnsurePassword(ctx context.Context, name string) (string, error)
+	// ConvergeToken 把账号令牌收敛为唯一一个：保留 keepToken（末 8 位匹配）
+	// 或新建，删除其余全部。
+	ConvergeToken(ctx context.Context, name, password, keepToken string) (token string, created bool, err error)
 	// ValidateToken 确认 token 属于 name 账号（用于复用已有令牌）。
 	ValidateToken(ctx context.Context, name, token string) (bool, error)
 	GetRepo(ctx context.Context, fullName string) (RepoInfo, bool, error)
@@ -126,6 +132,7 @@ func Run(ctx context.Context, options Options, admin Admin) (instances.Instance,
 	if instance.AdminToken == "" {
 		instance.AdminToken = options.AdminToken
 	}
+	instance.AdminOAuth = admin.AdminOAuth()
 	instance.Reviewer = instances.Account{Name: options.ReviewerName, Token: reviewerToken}
 	instance.Merger = instances.Account{Name: options.MergerName, Token: mergerToken}
 	instance.Repos = make([]instances.Repo, 0, len(options.Repos))
@@ -208,8 +215,9 @@ func setupRepository(
 	return nil
 }
 
-// ensureAccount 保证账号与令牌可用：已有有效令牌直接复用；缺账号则创建；
-// 缺令牌则生成。dry-run 下只输出计划，不做任何写操作。
+// ensureAccount 保证账号与唯一令牌可用：账号缺失则创建；令牌以「保留现有
+// 有效令牌或新建，删除其余全部」的方式收敛——同一账号只允许一个令牌，从
+// 凭据层面保证同一站点只有一个评审主机。dry-run 下只输出计划。
 func ensureAccount(
 	ctx context.Context,
 	admin Admin,
@@ -217,16 +225,17 @@ func ensureAccount(
 	logf func(string, ...any),
 	name, existingToken string,
 ) (token string, created bool, err error) {
+	valid := false
 	if existingToken != "" {
-		valid, err := admin.ValidateToken(ctx, name, existingToken)
-		if err == nil && valid {
+		ok, validateErr := admin.ValidateToken(ctx, name, existingToken)
+		switch {
+		case validateErr != nil:
+			logf("%s 的现有令牌校验失败（%v），将重建", name, validateErr)
+		case ok:
+			valid = true
 			logf("复用 %s 的现有令牌", name)
-			return existingToken, false, nil
-		}
-		if err != nil {
-			logf("%s 的现有令牌校验失败（%v），将生成新令牌", name, err)
-		} else {
-			logf("%s 的现有令牌已失效，将生成新令牌", name)
+		default:
+			logf("%s 的现有令牌已失效，将重建", name)
 		}
 	}
 	exists, err := admin.UserExists(ctx, name)
@@ -243,15 +252,32 @@ func ensureAccount(
 	} else {
 		logf("账号 %s 已存在", name)
 	}
-	logf("为 %s 生成访问令牌", name)
 	if options.DryRun {
+		if valid {
+			logf("dry-run：保留 %s 的现有令牌，删除账号下其余令牌", name)
+		} else {
+			logf("dry-run：为 %s 生成新令牌，删除账号下其余令牌", name)
+		}
 		return existingToken, false, nil
 	}
-	token, err = admin.CreateToken(ctx, name)
+	password, err := admin.EnsurePassword(ctx, name)
+	if err != nil {
+		return "", false, fmt.Errorf("准备 %s 的密码: %w", name, err)
+	}
+	keep := ""
+	if valid {
+		keep = existingToken
+	}
+	token, created, err = admin.ConvergeToken(ctx, name, password, keep)
 	if err != nil {
 		return "", false, err
 	}
-	return token, true, nil
+	if created {
+		logf("已为 %s 生成访问令牌（账号下仅此一个）", name)
+	} else {
+		logf("%s 的令牌已收敛为唯一一个", name)
+	}
+	return token, created, nil
 }
 
 func existingToken(account instances.Account, name string) string {

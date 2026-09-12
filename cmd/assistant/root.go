@@ -143,7 +143,7 @@ func runCheck(ctx context.Context, stdout, stderr io.Writer, options commandOpti
 			return waitForReport(ctx, stdout, manager, options.Wait, options.Timeout, options.Interval)
 		})
 	}
-	managers, err := instanceManagers(file, options.Repository, stderr)
+	managers, err := instanceManagers(ctx, file, options.Repository, stderr)
 	if err != nil {
 		return err
 	}
