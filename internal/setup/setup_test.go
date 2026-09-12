@@ -22,6 +22,8 @@ type fakeAdmin struct {
 	protections   map[string]string
 	labels        map[string]bool
 	oauth         *instances.OAuthCredential
+	variables     map[string]string
+	secrets       map[string]string
 }
 
 func newFakeAdmin(repos ...string) *fakeAdmin {
@@ -35,6 +37,8 @@ func newFakeAdmin(repos ...string) *fakeAdmin {
 		collaborators: map[string][]string{},
 		protections:   map[string]string{},
 		labels:        map[string]bool{},
+		variables:     map[string]string{},
+		secrets:       map[string]string{},
 	}
 	for _, repo := range repos {
 		fake.repos[repo] = RepoInfo{DefaultBranch: "main"}
@@ -116,6 +120,71 @@ func (f *fakeAdmin) EnsureBranchProtection(_ context.Context, fullName, branch s
 func (f *fakeAdmin) ReconcileLabels(_ context.Context, fullName, _ string) error {
 	f.labels[fullName] = true
 	return nil
+}
+
+func (f *fakeAdmin) SetRepoVariable(_ context.Context, fullName, name, value string) error {
+	f.variables[fullName+"/"+name] = value
+	return nil
+}
+
+func (f *fakeAdmin) SetRepoSecret(_ context.Context, fullName, name, value string) error {
+	f.secrets[fullName+"/"+name] = value
+	return nil
+}
+
+func TestConfigureActionsWritesExpectedRepoConfig(t *testing.T) {
+	admin := newFakeAdmin("acme/repo")
+	instance := instances.Instance{
+		Host:       "https://gitea.example.com",
+		AdminToken: "admin-token",
+		Merger:     instances.Account{Name: "merge", Token: "merger-token"},
+		Repos:      []instances.Repo{{Name: "acme/repo"}},
+	}
+	if err := ConfigureActions(context.Background(), admin, instance, false, nil); err != nil {
+		t.Fatalf("ConfigureActions() error = %v", err)
+	}
+	if got := admin.variables["acme/repo/"+ActionsVariableStateReviewer]; got != "merge" {
+		t.Errorf("variable = %q, want merge", got)
+	}
+	if got := admin.secrets["acme/repo/"+ActionsSecretStateToken]; got != "merger-token" {
+		t.Errorf("state secret = %q", got)
+	}
+	if got := admin.secrets["acme/repo/"+ActionsSecretBranchProtectionToken]; got != "admin-token" {
+		t.Errorf("branch protection secret = %q", got)
+	}
+}
+
+func TestConfigureActionsSkipsBranchProtectionWithoutStaticAdminToken(t *testing.T) {
+	admin := newFakeAdmin("acme/repo")
+	instance := instances.Instance{
+		Host:   "https://gitea.example.com",
+		Merger: instances.Account{Name: "merge", Token: "merger-token"},
+		Repos:  []instances.Repo{{Name: "acme/repo"}},
+	}
+	if err := ConfigureActions(context.Background(), admin, instance, false, nil); err != nil {
+		t.Fatalf("ConfigureActions() error = %v", err)
+	}
+	if _, ok := admin.secrets["acme/repo/"+ActionsSecretBranchProtectionToken]; ok {
+		t.Error("branch protection secret should be skipped without static admin token")
+	}
+	if got := admin.variables["acme/repo/"+ActionsVariableStateReviewer]; got != "merge" {
+		t.Errorf("variable = %q, want merge", got)
+	}
+}
+
+func TestConfigureActionsDryRunMakesNoWrites(t *testing.T) {
+	admin := newFakeAdmin("acme/repo")
+	instance := instances.Instance{
+		Host:   "https://gitea.example.com",
+		Merger: instances.Account{Name: "merge", Token: "merger-token"},
+		Repos:  []instances.Repo{{Name: "acme/repo"}},
+	}
+	if err := ConfigureActions(context.Background(), admin, instance, true, nil); err != nil {
+		t.Fatalf("ConfigureActions() error = %v", err)
+	}
+	if len(admin.variables) != 0 || len(admin.secrets) != 0 {
+		t.Errorf("dry-run mutated: %+v %+v", admin.variables, admin.secrets)
+	}
 }
 
 func testOptions() Options {
@@ -219,12 +288,31 @@ func TestRunMissingRepoNeedsCreateRepos(t *testing.T) {
 	}
 }
 
+func TestRunWithoutReposInitializesInstanceOnly(t *testing.T) {
+	admin := newFakeAdmin()
+	options := testOptions()
+	options.Repos = nil
+	instance, err := Run(context.Background(), options, admin)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(instance.Repos) != 0 {
+		t.Errorf("Repos = %+v, want empty", instance.Repos)
+	}
+	if instance.Reviewer.Token == "" || instance.Merger.Token == "" {
+		t.Errorf("tokens missing: %+v", instance)
+	}
+	if len(admin.collaborators) != 0 || len(admin.protections) != 0 || len(admin.labels) != 0 {
+		t.Errorf("repo-level mutations with no repos: %+v %+v %+v",
+			admin.collaborators, admin.protections, admin.labels)
+	}
+}
+
 func TestRunValidatesOptions(t *testing.T) {
 	admin := newFakeAdmin("acme/repo")
 	tests := map[string]func(*Options){
 		"no host":              func(o *Options) { o.Host = "" },
 		"no admin credentials": func(o *Options) { o.AdminToken = "" },
-		"no repos":             func(o *Options) { o.Repos = nil },
 		"bad repo":             func(o *Options) { o.Repos = []string{"nope"} },
 		"same account":         func(o *Options) { o.ReviewerName, o.MergerName = "bot", "bot" },
 		"bad account name":     func(o *Options) { o.ReviewerName = "bad name" },

@@ -11,6 +11,9 @@ LDFLAGS = -w -s
 # 手动发布的 package registry 命名空间（generic package 归属于 owner）
 GITEA_OWNER ?= owner
 
+# 容器镜像名（供 CI / 仓库级 Actions 使用）
+IMAGE ?= assistant:dev
+
 .PHONY: help
 help: ## 显示帮助信息
 	@echo "assistant Makefile"
@@ -46,6 +49,12 @@ build-local: ## 构建本地平台二进制 (用于开发测试)
 test: ## 运行测试
 	@echo "==> 运行测试..."
 	go test -v ./...
+
+.PHONY: image
+image: ## 构建容器镜像（仓库级 Actions 用；推送到 registry 由 CI 完成）
+	@echo "==> 构建容器镜像 $(IMAGE)..."
+	docker build --build-arg VERSION="$$(git describe --tags --always 2>/dev/null || echo dev)" -t $(IMAGE) .
+	@echo "==> 构建完成: $(IMAGE)"
 
 .PHONY: test-e2e
 test-e2e: ## 起临时 Gitea（docker compose）并运行端到端测试

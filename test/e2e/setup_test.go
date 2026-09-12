@@ -11,7 +11,10 @@ package e2e
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -266,6 +269,25 @@ func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 		t.Errorf("review queue = %+v, want pull #%d", queue, pull.Index)
 	}
 
+	// Actions 配置：写 variable/secret 并回读校验（secret 只写不可读，只能
+	// 校验列表里存在；variable 可读回比对值）。
+	actionsAdmin, err := setup.NewAdmin(ctx, setup.Options{Host: host, AdminToken: adminToken})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := setup.ConfigureActions(ctx, actionsAdmin, instance, false, t.Logf); err != nil {
+		t.Fatalf("ConfigureActions() error = %v", err)
+	}
+	if value := getActionVariable(t, host, adminToken, adminLogin, repositoryName, setup.ActionsVariableStateReviewer); value != instance.Merger.Name {
+		t.Errorf("GITEA_STATE_REVIEWER = %q, want %q", value, instance.Merger.Name)
+	}
+	secrets := listActionSecrets(t, host, adminToken, adminLogin, repositoryName)
+	for _, want := range []string{setup.ActionsSecretStateToken, setup.ActionsSecretBranchProtectionToken} {
+		if !slices.Contains(secrets, want) {
+			t.Errorf("secrets = %v, want %s", secrets, want)
+		}
+	}
+
 	// 幂等：重复 setup 复用令牌
 	rerunOptions := options
 	rerunOptions.Existing = &instance
@@ -294,4 +316,56 @@ func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 	if loaded.Instances[0].Reviewer.Token != instance.Reviewer.Token {
 		t.Errorf("config round-trip lost token")
 	}
+}
+
+// getActionVariable 读回仓库级 Actions variable（可读；响应字段是 data）。
+func getActionVariable(t *testing.T, host, token, owner, repo, name string) string {
+	t.Helper()
+	body := apiGet(t, host+"/api/v1/repos/"+owner+"/"+repo+"/actions/variables/"+name, token)
+	var payload struct {
+		Data string `json:"data"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("解析 variable 响应: %v（%s）", err, body)
+	}
+	return payload.Data
+}
+
+// listActionSecrets 列出仓库级 Actions secret 名（值只写不可读；响应是数组）。
+func listActionSecrets(t *testing.T, host, token, owner, repo string) []string {
+	t.Helper()
+	body := apiGet(t, host+"/api/v1/repos/"+owner+"/"+repo+"/actions/secrets", token)
+	var payload []struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("解析 secrets 响应: %v（%s）", err, body)
+	}
+	names := make([]string, 0, len(payload))
+	for _, secret := range payload {
+		names = append(names, secret.Name)
+	}
+	return names
+}
+
+func apiGet(t *testing.T, url, token string) []byte {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "token "+token)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode/100 != 2 {
+		t.Fatalf("GET %s: HTTP %d: %s", url, response.StatusCode, body)
+	}
+	return body
 }

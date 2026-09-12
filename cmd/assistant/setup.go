@@ -53,6 +53,8 @@ func newSetupCommand(configFlag *string) *cobra.Command {
 			"  3. 把两个账号加为仓库协作者（write），并补齐与 sync 相同口径的标签体系；\n" +
 			"  4. 在默认分支配置分支保护（required approvals、驳回阻塞、过期批准作废、落后分支阻塞）；\n" +
 			"  5. 把结果写回 config.json（0600）。\n\n" +
+			"仓库清单可省略（--repos 与配置文件都为空时只初始化实例：建号与令牌，\n" +
+			"不触碰任何仓库），之后再次运行 setup 补齐仓库即可。\n" +
 			"管理员凭据支持多种方式：--admin-token、--admin-token-file、\n" +
 			"--oauth（浏览器 OAuth2 登录，令牌不落盘）或 --admin-user/--admin-password。\n" +
 			"全流程幂等，可重复执行。",
@@ -76,7 +78,7 @@ func newSetupCommand(configFlag *string) *cobra.Command {
 	)
 	flags.StringVar(&options.OAuthClientSecret, "oauth-client-secret", "", "OAuth2 Client Secret（公共客户端留空）")
 	flags.IntVar(&options.OAuthPort, "oauth-port", 0, "OAuth 本地回调端口（缺省随机空闲端口；confidential 客户端需与注册的重定向 URI 端口一致）")
-	flags.StringSliceVar(&options.Repos, "repos", nil, "仓库 owner/name（逗号分隔可多个；缺省取配置文件中的 repos）")
+	flags.StringSliceVar(&options.Repos, "repos", nil, "仓库 owner/name（逗号分隔可多个；缺省取配置文件；两者皆空时只初始化账号与令牌）")
 	flags.StringVar(&options.ReviewerName, "reviewer", "", "内容评审账号名（缺省 ai）")
 	flags.StringVar(&options.MergerName, "merger", "", "状态评审/会签账号名（缺省 merge）")
 	flags.StringVar(&options.EmailDomain, "email-domain", "", "机器人邮箱域名（缺省从 host 推导）")
@@ -140,9 +142,8 @@ func runSetup(command *cobra.Command, configPath string, options *setupOptions) 
 	if len(repos) == 0 && existing != nil {
 		repos = existing.RepoNames()
 	}
-	if len(repos) == 0 {
-		return fmt.Errorf("缺少仓库：--repos owner/name[,...]")
-	}
+	// 允许空仓库清单：只初始化实例（账号/令牌/OAuth 凭据），仓库配置留给
+	// 之后的 setup 运行补齐。
 
 	// 管理员凭据优先级：--admin-token > --admin-token-file > --oauth >
 	// 配置文件 admin_token > GITEA_ACCESS_TOKEN > --admin-user/--admin-password。

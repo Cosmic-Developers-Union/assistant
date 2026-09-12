@@ -10,7 +10,7 @@ import (
 	"assistant/internal/status"
 )
 
-const version = "dev"
+var version = "dev"
 
 // exitCodeAuthFailure 遵循 sysexits(3) 的 EX_CONFIG：配置类致命错误（认证被拒、
 // Gitea 地址不正确）。CI 与本地调用方据此区分配置错误与瞬时错误。

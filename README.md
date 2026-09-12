@@ -12,6 +12,7 @@
 | 命令 | 角色 | 说明 |
 | --- | --- | --- |
 | `assistant setup` | 初始化 | 建机器人账号/令牌、配协作者与分支保护、补齐标签，并写入 `config.json` |
+| `assistant actions` | 初始化 | 为配置中的仓库写入 Actions variables/secrets（状态评审者令牌等） |
 | `assistant check` | 机器人 | 按标签检索待 triage 的 Issue 和待 review 的 PR（只读） |
 | `assistant sync` | 机器人 | 规范 Issue 标签并把 PR 原生评审状态同步为状态标签（单次执行） |
 | `assistant automerge` | 机器人 | 合并门禁全绿的已批准 PR（一次至多一个，squash） |
@@ -75,6 +76,8 @@ assistant setup --host https://gitea.example.com \
 OAuth 登录说明：默认使用 Gitea 内置的 `tea` 公共客户端；内置客户端在部分已发布版本上仍是 confidential（会提示 Unregistered Redirect URI），此时在 Gitea「设置 → 应用 → 创建 OAuth2 应用」建一个**公共**客户端（重定向 URI 填 `http://127.0.0.1`，或与 `--oauth-port` 完全一致的 `http://127.0.0.1:<端口>`），再用
 `--oauth --oauth-client-id <Client ID>`（如有密钥再给 `--oauth-client-secret`）重跑。access token 不落盘，`refresh_token` 会写入 `admin_oauth` 供运行期刷新。
 
+仓库清单可省略：`--repos` 与配置文件里都没有仓库时，只初始化实例（建号、令牌、OAuth 凭据），不触碰任何仓库；之后再次运行 `setup` 补齐仓库即可。
+
 流程：
 
 1. 校验管理员身份；
@@ -114,6 +117,50 @@ OAuth 登录说明：默认使用 Gitea 内置的 `tea` 公共客户端；内置
 - `GITEA_REPOSITORY`: 指定仓库（可选，格式: owner/name，用于 CI 环境锁定仓库）
 
 优先级: `--repo` 命令行参数 > `GITEA_REPOSITORY` 环境变量。
+
+## 仓库级 Actions 与容器镜像
+
+合并（automerge）按设计跑在**每个仓库自己的 Actions workflow** 里（schedule 驱动），因此需要仓库级 Actions 配置。`assistant setup` 只负责实例与仓库本身（账号/令牌/协作者/分支保护/标签）；仓库 Actions 配置由独立命令写入：
+
+```bash
+assistant actions --config /etc/assistant/config.json [--dry-run]
+```
+
+每个仓库写入（名称不带 `GITEA_` 前缀——Gitea 保留前缀禁止用于 secret/variable 名，workflow 里再映射为 `GITEA_*` 环境变量）：
+
+| 名称 | 类型 | 值 | workflow 中的环境变量 |
+| --- | --- | --- | --- |
+| `STATE_REVIEWER` | variable | merger 账号名（如 `merge`） | `GITEA_STATE_REVIEWER` |
+| `STATE_TOKEN` | secret | merger 令牌（会签/门禁驳回的官方身份） | `GITEA_STATE_TOKEN` |
+| `BRANCH_PROTECTION_TOKEN` | secret | 静态 `admin_token`（OAuth-only 实例跳过，workflow 回退严格门禁） | `GITEA_BRANCH_PROTECTION_TOKEN` |
+
+管理员凭据取自 `config.json`（`admin_token`，或 `admin_oauth` 刷新出的短期令牌）。
+
+**令牌轮换与 secret 同步**：Gitea 的 Actions secret 值**只写不可读**，无法读取仓库里现有值来比对差异，所以本命令每次运行都幂等覆写全部 secret（唯一代价是审计记录）。这很重要：当 `setup` 因为配置丢失等原因重建了机器人令牌（旧令牌会被唯一性收敛删除）时，仓库里的旧 secret 会立即失效——**必须重新运行 `assistant actions`**，否则仓库 workflow 会以陈旧令牌静默 401。
+
+### 容器镜像
+
+`Dockerfile` 打出静态单二进制镜像，适合直接作为仓库 workflow 的执行环境（免去每步下载二进制）：
+
+```yaml
+# 仓库内 .gitea/workflows/automerge.yml（示意）
+jobs:
+  automerge:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/<owner>/assistant:latest
+    steps:
+      - run: assistant automerge --verbose
+        env:
+          GITEA_HOST: ${{ github.server_url }}
+          GITEA_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITEA_STATE_REVIEWER: ${{ vars.STATE_REVIEWER }}
+          GITEA_STATE_TOKEN: ${{ secrets.STATE_TOKEN }}
+          GITEA_BRANCH_PROTECTION_TOKEN: ${{ secrets.BRANCH_PROTECTION_TOKEN }}
+```
+
+- 本地构建：`make image`（`IMAGE=ghcr.io/<owner>/assistant:dev` 可指定标签）
+- 发布：`.github/workflows/publish-image.yml` 在 GitHub 上把镜像推送到 `ghcr.io/<owner>/assistant`（main 推 `latest`，tag 推语义化版本，另附 `sha-*`）
 
 ## 评审会话调度引擎
 

@@ -75,6 +75,9 @@ type Admin interface {
 	AddCollaborator(ctx context.Context, fullName, user string) error
 	EnsureBranchProtection(ctx context.Context, fullName, branch string, requiredApprovals int64) error
 	ReconcileLabels(ctx context.Context, fullName, reviewerToken string) error
+	// SetRepoVariable / SetRepoSecret 写仓库级 Actions 配置（幂等覆盖）。
+	SetRepoVariable(ctx context.Context, fullName, name, value string) error
+	SetRepoSecret(ctx context.Context, fullName, name, value string) error
 }
 
 var accountNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
@@ -321,9 +324,6 @@ func (o Options) validate() error {
 	}
 	if o.AdminToken == "" && o.OAuth == nil && (o.AdminUser == "" || o.AdminPassword == "") {
 		return fmt.Errorf("缺少管理员凭据：--admin-token / --admin-token-file / --oauth，或 --admin-user/--admin-password")
-	}
-	if len(o.Repos) == 0 {
-		return fmt.Errorf("缺少仓库：--repo owner/name（可重复）")
 	}
 	for _, name := range []string{o.ReviewerName, o.MergerName} {
 		if !accountNamePattern.MatchString(name) {

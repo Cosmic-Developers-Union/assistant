@@ -112,6 +112,7 @@ func newRootCommand(stdout, stderr io.Writer, checker, syncer, merger managerRun
 	command.AddCommand(checkCommand, syncCommand, autoMergeCommand)
 	command.AddCommand(newDispatcherCommands(&options.Repository, &options.ConfigPath)...)
 	command.AddCommand(newSetupCommand(&options.ConfigPath))
+	command.AddCommand(newActionsCommand(&options.ConfigPath))
 	return command
 }
 

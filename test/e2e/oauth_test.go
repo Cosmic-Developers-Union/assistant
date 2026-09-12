@@ -159,6 +159,18 @@ func TestSetupWithOAuthEndToEnd(t *testing.T) {
 		t.Errorf("protections = %+v, want main with 2 approvals", protections)
 	}
 
+	// OAuth 换取的短期令牌同样能写仓库 Actions 配置（`assistant actions` 的路径）
+	oauthAdmin, err := setup.NewAdmin(ctx, setup.Options{Host: env.Host, AdminToken: accessToken})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := setup.ConfigureActions(ctx, oauthAdmin, instance, false, t.Logf); err != nil {
+		t.Fatalf("ConfigureActions(oauth) error = %v", err)
+	}
+	if value := getActionVariable(t, env.Host, accessToken, adminLogin, repositoryName, setup.ActionsVariableStateReviewer); value != instance.Merger.Name {
+		t.Errorf("OAuth wrote GITEA_STATE_REVIEWER = %q, want %q", value, instance.Merger.Name)
+	}
+
 	// 第二次初始化（不传 Existing）：机器人账号已存在、密码未知，管理员只有
 	// OAuth 令牌（建令牌端点 401）——校验「重置机器人密码 + BasicAuth 建令牌」
 	// 回退链路；同时令牌唯一性收敛应使第一次的令牌失效。

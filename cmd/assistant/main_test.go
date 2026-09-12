@@ -40,6 +40,7 @@ func TestRootCommandShowsHelpWithoutArguments(t *testing.T) {
 		!strings.Contains(output, "sync") ||
 		!strings.Contains(output, "automerge") ||
 		!strings.Contains(output, "setup") ||
+		!strings.Contains(output, "actions") ||
 		!strings.Contains(output, "run") ||
 		!strings.Contains(output, "list") ||
 		!strings.Contains(output, "review") ||
