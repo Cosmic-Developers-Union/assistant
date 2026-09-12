@@ -7,9 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"assistant/internal/dispatcher"
+	"assistant/internal/instances"
 	"assistant/internal/status"
 
 	"github.com/spf13/cobra"
@@ -33,16 +35,25 @@ type dispatcherOptions struct {
 	DryRun       bool
 }
 
+// dispatchTarget 是一个 (instance, 仓库) 的完整运行上下文。
+type dispatchTarget struct {
+	instance instances.Instance
+	repo     instances.Repo
+	config   dispatcher.Config
+	client   *status.Client
+	repoDir  string
+}
+
 // newDispatcherCommands 构造调度引擎子命令：run（常驻）/ list（只读列出）/
 // review（立即评审单个 PR）/ triage（立即分诊单个 Issue）。
-func newDispatcherCommands(repoFlag *string) []*cobra.Command {
+func newDispatcherCommands(repoFlag, configFlag *string) []*cobra.Command {
 	runOptions := &dispatcherOptions{}
 	runCommand := &cobra.Command{
 		Use:   "run",
 		Short: "长驻主循环：检测待办 → 每待办一个会话 → 验证 → 清理（部署形态）",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			return runDispatchLoop(command, *repoFlag, runOptions)
+			return runDispatchLoop(command, *repoFlag, *configFlag, runOptions)
 		},
 	}
 	addDispatcherConnectionFlags(runCommand, runOptions)
@@ -67,7 +78,7 @@ func newDispatcherCommands(repoFlag *string) []*cobra.Command {
 		Short: "只读列出当前待办（快速验证 host/仓库/令牌/标签链路）",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			return runDispatchList(command, *repoFlag, listOptions)
+			return runDispatchList(command, *repoFlag, *configFlag, listOptions)
 		},
 	}
 	addDispatcherConnectionFlags(listCommand, listOptions)
@@ -82,7 +93,7 @@ func newDispatcherCommands(repoFlag *string) []*cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runDispatchOneShot(command, *repoFlag, reviewOptions, dispatcher.KindPull, number)
+			return runDispatchOneShot(command, *repoFlag, *configFlag, reviewOptions, dispatcher.KindPull, number)
 		},
 	}
 	addDispatcherConnectionFlags(reviewCommand, reviewOptions)
@@ -98,7 +109,7 @@ func newDispatcherCommands(repoFlag *string) []*cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runDispatchOneShot(command, *repoFlag, triageOptions, dispatcher.KindIssue, number)
+			return runDispatchOneShot(command, *repoFlag, *configFlag, triageOptions, dispatcher.KindIssue, number)
 		},
 	}
 	addDispatcherConnectionFlags(triageCommand, triageOptions)
@@ -114,14 +125,14 @@ func addDispatcherConnectionFlags(command *cobra.Command, options *dispatcherOpt
 	flags.StringVar(&options.Reviewer, "reviewer", "", "完成判定匹配的 reviewer 账号（缺省 ai）")
 	flags.StringVar(&options.Model, "model", "", "会话模型（缺省用账号默认）")
 	flags.StringVar(&options.ClaudeBin, "claude-bin", "", "claude 可执行文件（缺省 PATH 上的 claude）")
-	flags.StringVar(&options.LogDir, "log-dir", "", "会话日志目录（缺省 <仓库根>/logs）")
+	flags.StringVar(&options.LogDir, "log-dir", "", "会话日志目录（缺省 <仓库检出>/logs）")
 	flags.StringVar(
 		&options.WorktreeRoot,
 		"worktree-root",
 		"",
-		"PR worktree 根目录（缺省系统临时目录下 agent-dispatcher/worktrees）",
+		"PR worktree 根目录（缺省系统临时目录下 agent-dispatcher/<owner>-<repo>/worktrees）",
 	)
-	flags.StringVar(&options.LockFile, "lock-file", "", "单飞锁文件（缺省 <仓库根>/dispatcher.lock）")
+	flags.StringVar(&options.LockFile, "lock-file", "", "单飞锁文件（缺省 <仓库检出>/dispatcher.lock）")
 	flags.StringVar(
 		&options.BaseBranch,
 		"base-branch",
@@ -144,9 +155,9 @@ func parseItemNumber(raw string) (int64, error) {
 	return number, nil
 }
 
-// resolveDispatcher 完成调度命令的配置装配：host/仓库缺省时从 cwd 的 origin
-// remote 推导，日志/锁默认值锚定宿主检出根。
-func resolveDispatcher(
+// resolveEnvDispatcher 是环境变量单实例模式的配置装配：host/仓库缺省时从 cwd
+// 的 origin remote 推导，日志/锁默认值锚定宿主检出根。
+func resolveEnvDispatcher(
 	command *cobra.Command,
 	repoFlag string,
 	options *dispatcherOptions,
@@ -159,6 +170,24 @@ func resolveDispatcher(
 	if root, ok := dispatcher.RepoRoot(cwd); ok {
 		repoDir = root
 	}
+	config, err := dispatcher.ResolveConfig(
+		dispatcherFlags(command, repoFlag, options),
+		repoDir, os.Getenv,
+		func() (dispatcher.GitRemote, bool) {
+			url, ok := dispatcher.OriginRemote(cwd)
+			if !ok {
+				return dispatcher.GitRemote{}, false
+			}
+			return dispatcher.ParseGitRemoteURL(url)
+		},
+	)
+	if err != nil {
+		return dispatcher.Config{}, "", err
+	}
+	return config, repoDir, nil
+}
+
+func dispatcherFlags(command *cobra.Command, repoFlag string, options *dispatcherOptions) dispatcher.Flags {
 	flags := dispatcher.Flags{
 		Host:         options.Host,
 		Repository:   repoFlag,
@@ -179,21 +208,190 @@ func resolveDispatcher(
 		value := options.SyncMirror
 		flags.SyncMirror = &value
 	}
-	config, err := dispatcher.ResolveConfig(flags, repoDir, os.Getenv, func() (dispatcher.GitRemote, bool) {
-		url, ok := dispatcher.OriginRemote(cwd)
-		if !ok {
-			return dispatcher.GitRemote{}, false
+	return flags
+}
+
+// resolveDispatchTargets 解析运行目标：有配置文件时按 instance × repo 展开，
+// 否则退回环境变量单实例模式。
+func resolveDispatchTargets(
+	command *cobra.Command,
+	repoFlag, configPath string,
+	options *dispatcherOptions,
+) ([]dispatchTarget, error) {
+	_, file, err := resolveInstanceFile(commandOptions{ConfigPath: configPath})
+	if err != nil {
+		return nil, err
+	}
+	if file == nil {
+		config, repoDir, err := resolveEnvDispatcher(command, repoFlag, options)
+		if err != nil {
+			return nil, err
 		}
-		return dispatcher.ParseGitRemoteURL(url)
+		client, err := newDispatchClient(config)
+		if err != nil {
+			return nil, err
+		}
+		return []dispatchTarget{{config: config, client: client, repoDir: repoDir}}, nil
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("获取当前目录: %w", err)
+	}
+	var targets []dispatchTarget
+	matchedFilter := repoFlag == ""
+	for _, instance := range file.Instances {
+		repos := instance.Repos
+		if repoFlag != "" {
+			repos = nil
+			for _, repo := range instance.Repos {
+				if repo.Name == repoFlag {
+					repos = append(repos, repo)
+				}
+			}
+			if len(repos) == 0 {
+				continue
+			}
+			matchedFilter = true
+		}
+		if len(repos) == 0 {
+			return nil, fmt.Errorf("instance %s 未配置仓库（assistant setup 后写入 repos）", instance.Host)
+		}
+		for _, repo := range repos {
+			target, err := resolveInstanceTarget(command, instance, repo, cwd, options)
+			if err != nil {
+				return nil, err
+			}
+			targets = append(targets, target)
+		}
+	}
+	if !matchedFilter {
+		return nil, fmt.Errorf("仓库 %s 不在配置文件的 instances[].repos 中", repoFlag)
+	}
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("配置文件没有可运行的仓库")
+	}
+	return targets, nil
+}
+
+func resolveInstanceTarget(
+	command *cobra.Command,
+	instance instances.Instance,
+	repo instances.Repo,
+	cwd string,
+	options *dispatcherOptions,
+) (dispatchTarget, error) {
+	repoDir := repo.Dir
+	if repoDir == "" {
+		// 单仓库且未配置 dir：沿用启动目录的检出（历史行为）；多仓库必须显式配置
+		repoDir = cwd
+		if root, ok := dispatcher.RepoRoot(cwd); ok {
+			repoDir = root
+		}
+	}
+	flags := dispatcherFlags(command, repo.Name, options)
+	flags.Host = instance.Host
+	flags.Repository = repo.Name
+	flags.AccessToken = firstNonEmpty(instance.Reviewer.Token, instance.AdminToken)
+	if flags.Reviewer == "" {
+		flags.Reviewer = instance.Reviewer.Name
+	}
+	if flags.WorktreeRoot == "" && strings.TrimSpace(os.Getenv("DISPATCH_WORKTREE_ROOT")) == "" {
+		// 多仓库共用同一 worktree 根会撞 `pr-<N>` 目录名，按仓库隔离
+		flags.WorktreeRoot = filepath.Join(
+			os.TempDir(), "agent-dispatcher", strings.ReplaceAll(repo.Name, "/", "-"), "worktrees",
+		)
+	}
+	config, err := dispatcher.ResolveConfig(flags, repoDir, os.Getenv, func() (dispatcher.GitRemote, bool) {
+		return dispatcher.GitRemote{Host: instance.Host, Repository: repo.Name}, true
 	})
 	if err != nil {
-		return dispatcher.Config{}, "", err
+		return dispatchTarget{}, err
 	}
-	return config, repoDir, nil
+	client, err := newDispatchClient(config)
+	if err != nil {
+		return dispatchTarget{}, err
+	}
+	return dispatchTarget{instance: instance, repo: repo, config: config, client: client, repoDir: repoDir}, nil
+}
+
+// checkTargetsHealth 在 run 启动前逐 instance 检查服务可用性（版本端点 + 各
+// 角色令牌认证）；任一不可用即拒绝启动，不带病运行。
+func checkTargetsHealth(ctx context.Context, targets []dispatchTarget, log func(string)) error {
+	checked := make(map[string]bool)
+	for _, target := range targets {
+		host := target.instance.Host
+		if host == "" {
+			host = target.config.Host
+		}
+		if checked[host] {
+			continue
+		}
+		checked[host] = true
+		version, err := target.client.CheckHealth(ctx)
+		if err != nil {
+			return fmt.Errorf("instance %s 不可用: %w", host, err)
+		}
+		login, err := target.client.AuthenticatedUser(ctx)
+		if err != nil {
+			return fmt.Errorf("instance %s reviewer 令牌校验失败: %w", host, err)
+		}
+		log(fmt.Sprintf("instance %s 可用（Gitea %s，reviewer @%s）", host, version, login))
+		if target.instance.Merger.Token != "" {
+			mergerClient, err := status.NewClient(host, target.instance.Merger.Token)
+			if err != nil {
+				return err
+			}
+			mergerLogin, err := mergerClient.AuthenticatedUser(ctx)
+			if err != nil {
+				return fmt.Errorf("instance %s merger 令牌校验失败: %w", host, err)
+			}
+			log(fmt.Sprintf("instance %s merger @%s 可用", host, mergerLogin))
+		}
+		if target.instance.AdminToken != "" {
+			adminClient, err := status.NewClient(host, target.instance.AdminToken)
+			if err != nil {
+				return err
+			}
+			if adminLogin, err := adminClient.AuthenticatedUser(ctx); err != nil {
+				log(fmt.Sprintf("警告：instance %s admin 令牌校验失败（%v），分支保护读取将回退严格模式", host, err))
+			} else {
+				log(fmt.Sprintf("instance %s admin @%s 可用", host, adminLogin))
+			}
+		}
+	}
+	return nil
 }
 
 func newDispatchClient(config dispatcher.Config) (*status.Client, error) {
 	return status.NewClient(config.Host, config.AccessToken)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+// requireRepoDirs 多仓库时每个仓库都必须有本地检出：共用启动目录会让多个循环
+// 抢同一把锁、同一批 worktree。
+func requireRepoDirs(targets []dispatchTarget) error {
+	if len(targets) <= 1 {
+		return nil
+	}
+	var missing []string
+	for _, target := range targets {
+		if target.repo.Dir == "" {
+			missing = append(missing, target.repo.Name)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("多仓库运行需在 config.json 为每个仓库配置本地检出 dir：%s", strings.Join(missing, ", "))
+	}
+	return nil
 }
 
 func dispatchLogger(w io.Writer) func(string) {
@@ -202,10 +400,12 @@ func dispatchLogger(w io.Writer) func(string) {
 	}
 }
 
-func newDispatchDeps(config dispatcher.Config, repoDir string, client *status.Client, w io.Writer) dispatcher.Deps {
+func newDispatchDeps(target dispatchTarget, w io.Writer) dispatcher.Deps {
+	config := target.config
+	repoDir := target.repoDir
 	deps := dispatcher.Deps{
 		Config:  config,
-		API:     client,
+		API:     target.client,
 		RepoDir: repoDir,
 		Log:     dispatchLogger(w),
 		BuildPrompt: func(kind string, number int64, extra dispatcher.PromptContext) string {
@@ -213,7 +413,7 @@ func newDispatchDeps(config dispatcher.Config, repoDir string, client *status.Cl
 			return dispatcher.BuildPrompt(kind, number, extra)
 		},
 		CurrentLogin: func(ctx context.Context) (string, error) {
-			return client.AuthenticatedUser(ctx)
+			return target.client.AuthenticatedUser(ctx)
 		},
 		PrepareWorktree: func(pullNumber int64) (string, error) {
 			worktreeDir := filepath.Join(config.WorktreeRoot, fmt.Sprintf("pr-%d", pullNumber))
@@ -240,43 +440,57 @@ func newDispatchDeps(config dispatcher.Config, repoDir string, client *status.Cl
 	return deps
 }
 
-func runDispatchLoop(command *cobra.Command, repoFlag string, options *dispatcherOptions) error {
-	config, repoDir, err := resolveDispatcher(command, repoFlag, options)
+func runDispatchLoop(command *cobra.Command, repoFlag, configPath string, options *dispatcherOptions) error {
+	targets, err := resolveDispatchTargets(command, repoFlag, configPath, options)
 	if err != nil {
 		return err
 	}
-	client, err := newDispatchClient(config)
-	if err != nil {
+	if err := requireRepoDirs(targets); err != nil {
 		return err
 	}
-	deps := newDispatchDeps(config, repoDir, client, command.OutOrStdout())
+	log := dispatchLogger(command.OutOrStdout())
+	if err := checkTargetsHealth(command.Context(), targets, log); err != nil {
+		return err
+	}
+	depsList := make([]dispatcher.Deps, 0, len(targets))
+	for _, target := range targets {
+		depsList = append(depsList, newDispatchDeps(target, command.OutOrStdout()))
+	}
 	if options.DryRun {
-		return dispatcher.DryRunPass(command.Context(), deps)
+		for _, deps := range depsList {
+			if err := dispatcher.DryRunPass(command.Context(), deps); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
-	return dispatcher.RunLoop(command.Context(), deps)
+	return dispatcher.RunAll(command.Context(), depsList)
 }
 
-func runDispatchList(command *cobra.Command, repoFlag string, options *dispatcherOptions) error {
-	config, _, err := resolveDispatcher(command, repoFlag, options)
-	if err != nil {
-		return err
-	}
-	client, err := newDispatchClient(config)
-	if err != nil {
-		return err
-	}
-	work, err := dispatcher.ListWork(command.Context(), client, config.Repository)
+func runDispatchList(command *cobra.Command, repoFlag, configPath string, options *dispatcherOptions) error {
+	targets, err := resolveDispatchTargets(command, repoFlag, configPath, options)
 	if err != nil {
 		return err
 	}
 	stdout := command.OutOrStdout()
-	for _, item := range work {
-		fmt.Fprintf(stdout, "%s#%d  %s\n", item.Kind, item.Number, item.Title)
+	work := 0
+	for _, target := range targets {
+		items, err := dispatcher.ListWork(command.Context(), target.client, target.config.Repository)
+		if err != nil {
+			return fmt.Errorf("%s %s: %w", target.config.Host, target.config.Repository.FullName(), err)
+		}
+		if len(targets) > 1 {
+			fmt.Fprintf(stdout, "%s %s\n", target.config.Host, target.config.Repository.FullName())
+		}
+		for _, item := range items {
+			fmt.Fprintf(stdout, "%s#%d  %s\n", item.Kind, item.Number, item.Title)
+		}
+		work += len(items)
 	}
-	if len(work) == 0 {
+	if work == 0 {
 		fmt.Fprintln(stdout, "当前无待办")
 	} else {
-		fmt.Fprintf(stdout, "共 %d 个待办\n", len(work))
+		fmt.Fprintf(stdout, "共 %d 个待办\n", work)
 	}
 	return nil
 }
@@ -285,26 +499,27 @@ func runDispatchList(command *cobra.Command, repoFlag string, options *dispatche
 // 与常驻实例互斥（共单飞锁），且与常驻实例同口径先对齐基线（fail-closed）。
 func runDispatchOneShot(
 	command *cobra.Command,
-	repoFlag string,
+	repoFlag, configPath string,
 	options *dispatcherOptions,
 	kind string,
 	number int64,
 ) error {
-	config, repoDir, err := resolveDispatcher(command, repoFlag, options)
+	targets, err := resolveDispatchTargets(command, repoFlag, configPath, options)
 	if err != nil {
 		return err
 	}
-	client, err := newDispatchClient(config)
-	if err != nil {
-		return err
+	if len(targets) != 1 {
+		return fmt.Errorf("匹配到 %d 个仓库，请用 --repo owner/name 指定要处理的仓库", len(targets))
 	}
-	deps := newDispatchDeps(config, repoDir, client, command.OutOrStdout())
+	target := targets[0]
+	config := target.config
+	log := dispatchLogger(command.OutOrStdout())
 	// 一次性命令同样亮明身份：review 以该账号落库
-	if login, err := client.AuthenticatedUser(command.Context()); err == nil {
-		deps.Log(fmt.Sprintf("当前账户：@%s（reviewer=%s）", login, config.Reviewer))
+	if login, err := target.client.AuthenticatedUser(command.Context()); err == nil {
+		log(fmt.Sprintf("当前账户：@%s（reviewer=%s）", login, config.Reviewer))
 	}
 	if config.SyncMirror {
-		if _, err := dispatcher.SyncMirror(repoDir, config.BaseBranch); err != nil {
+		if _, err := dispatcher.SyncMirror(target.repoDir, config.BaseBranch); err != nil {
 			return err
 		}
 	}
@@ -314,10 +529,11 @@ func runDispatchOneShot(
 	if err := os.MkdirAll(config.WorktreeRoot, 0o755); err != nil {
 		return err
 	}
-	if err := dispatcher.AcquireLock(config.LockFile, deps.Log); err != nil {
+	if err := dispatcher.AcquireLock(config.LockFile, log); err != nil {
 		return err
 	}
 	defer dispatcher.ReleaseLock(config.LockFile)
+	deps := newDispatchDeps(target, command.OutOrStdout())
 	dispatcher.ProcessItem(command.Context(), deps, dispatcher.WorkItem{Kind: kind, Number: number})
 	return nil
 }

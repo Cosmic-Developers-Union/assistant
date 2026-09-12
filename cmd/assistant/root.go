@@ -23,6 +23,8 @@ type commandOptions struct {
 	Wait       bool
 	Timeout    time.Duration
 	Interval   time.Duration
+	// ConfigPath 是多实例配置文件路径（--config / ASSISTANT_CONFIG / ./config.json）
+	ConfigPath string
 }
 
 func newRootCommand(stdout, stderr io.Writer, checker, syncer, merger managerRunner) *cobra.Command {
@@ -49,6 +51,12 @@ func newRootCommand(stdout, stderr io.Writer, checker, syncer, merger managerRun
 	flags := command.PersistentFlags()
 	flags.BoolVarP(&options.Verbose, "verbose", "v", false, "显示扫描和状态修改过程（不适用于调度命令）")
 	flags.StringVar(&options.Repository, "repo", "", "只扫描 owner/name 指定的仓库")
+	flags.StringVar(
+		&options.ConfigPath,
+		"config",
+		"",
+		"多实例配置文件（缺省 ASSISTANT_CONFIG 或当前目录 config.json；都缺省时用环境变量单实例模式）",
+	)
 	command.CompletionOptions.DisableDefaultCmd = true
 
 	checkCommand := &cobra.Command{
@@ -102,7 +110,8 @@ func newRootCommand(stdout, stderr io.Writer, checker, syncer, merger managerRun
 		},
 	}
 	command.AddCommand(checkCommand, syncCommand, autoMergeCommand)
-	command.AddCommand(newDispatcherCommands(&options.Repository)...)
+	command.AddCommand(newDispatcherCommands(&options.Repository, &options.ConfigPath)...)
+	command.AddCommand(newSetupCommand(&options.ConfigPath))
 	return command
 }
 
@@ -125,9 +134,20 @@ func (options commandOptions) validate() error {
 }
 
 func runCheck(ctx context.Context, stdout, stderr io.Writer, options commandOptions) error {
-	return withManager(ctx, stderr, options, func(ctx context.Context, manager *status.Manager) error {
-		return waitForReport(ctx, stdout, manager, options.Wait, options.Timeout, options.Interval)
-	})
+	_, file, err := resolveInstanceFile(options)
+	if err != nil {
+		return err
+	}
+	if file == nil {
+		return withManager(ctx, stderr, options, func(ctx context.Context, manager *status.Manager) error {
+			return waitForReport(ctx, stdout, manager, options.Wait, options.Timeout, options.Interval)
+		})
+	}
+	managers, err := instanceManagers(file, options.Repository, stderr)
+	if err != nil {
+		return err
+	}
+	return waitForReport(ctx, stdout, &instanceChecker{managers: managers}, options.Wait, options.Timeout, options.Interval)
 }
 
 // workChecker 抽象 *status.Manager 的检索能力，便于为等待逻辑写单元测试。
@@ -182,13 +202,31 @@ func waitForReport(
 }
 
 func runSync(ctx context.Context, _, stderr io.Writer, options commandOptions) error {
-	return withManager(ctx, stderr, options, func(ctx context.Context, manager *status.Manager) error {
+	_, file, err := resolveInstanceFile(options)
+	if err != nil {
+		return err
+	}
+	if file == nil {
+		return withManager(ctx, stderr, options, func(ctx context.Context, manager *status.Manager) error {
+			return manager.Sync(ctx)
+		})
+	}
+	return runManagerAction(ctx, stderr, options, file, func(ctx context.Context, manager *status.Manager) error {
 		return manager.Sync(ctx)
 	})
 }
 
 func runAutoMerge(ctx context.Context, _, stderr io.Writer, options commandOptions) error {
-	return withManager(ctx, stderr, options, func(ctx context.Context, manager *status.Manager) error {
+	_, file, err := resolveInstanceFile(options)
+	if err != nil {
+		return err
+	}
+	if file == nil {
+		return withManager(ctx, stderr, options, func(ctx context.Context, manager *status.Manager) error {
+			return manager.AutoMerge(ctx)
+		})
+	}
+	return runManagerAction(ctx, stderr, options, file, func(ctx context.Context, manager *status.Manager) error {
 		return manager.AutoMerge(ctx)
 	})
 }

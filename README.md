@@ -11,6 +11,7 @@
 
 | 命令 | 角色 | 说明 |
 | --- | --- | --- |
+| `assistant setup` | 初始化 | 建机器人账号/令牌、配协作者与分支保护、补齐标签，并写入 `config.json` |
 | `assistant check` | 机器人 | 按标签检索待 triage 的 Issue 和待 review 的 PR（只读） |
 | `assistant sync` | 机器人 | 规范 Issue 标签并把 PR 原生评审状态同步为状态标签（单次执行） |
 | `assistant automerge` | 机器人 | 合并门禁全绿的已批准 PR（一次至多一个，squash） |
@@ -20,6 +21,60 @@
 | `assistant triage <n>` | 调度引擎 | 立即分诊单个 Issue（跳过检测） |
 
 `assistant --help` 查看全部选项。
+
+## 多实例配置（config.json）
+
+不指定配置文件时，所有命令维持环境变量单实例模式（`GITEA_HOST` / `GITEA_ACCESS_TOKEN` / `GITEA_REPOSITORY`）。要同时管理多台 Gitea、多个仓库，写一份 `config.json`（`--config` / `ASSISTANT_CONFIG` / 当前目录 `config.json` 依次生效，示例见 `config.example.json`），机器人命令与调度命令都会按 instance × repo 迭代：
+
+```json
+{
+  "instances": [
+    {
+      "host": "https://gitea.example.com",
+      "admin_token": "admin-personal-access-token",
+      "reviewer": { "name": "ai", "token": "created-by-assistant-setup" },
+      "merger": { "name": "merge", "token": "created-by-assistant-setup" },
+      "repos": [
+        "owner/repo",
+        { "name": "owner/another", "dir": "/srv/another" }
+      ]
+    }
+  ]
+}
+```
+
+- `admin_token`：高权限令牌（repo admin），用于读取分支保护；`setup` 也用它建号建令牌。可以留空占位，由 `setup` 写入。
+- `reviewer` / `merger`：两个机器人账号与令牌；`name` 缺省 `ai` / `merge`，`token` 由 `setup` 生成。reviewer 是内容评审者（dispatcher 的完成判定与 `awaiting/reviewer` 检测都按它匹配），merger 是状态评审者（会签/合并）。
+- `repos`：仓库清单。字符串是 `owner/name` 简写；调度引擎的 `review`/`triage` 会话需要本地检出，多仓库时用对象形式给出 `dir`（单仓库可省略，退回启动目录的检出）。
+- 路径默认值按仓库隔离：日志 `<检出>/logs`、锁 `<检出>/dispatcher.lock`、worktree `<临时目录>/agent-dispatcher/<owner>-<repo>/worktrees`。
+- 文件含令牌，`setup` 以 0600 写入；请勿提交到版本库（`.gitignore` 已忽略常见位置，建议自行确认）。
+
+### 初始化：assistant setup
+
+`setup` 把「评审 → 批准 → 会签 → 自动合并」闭环需要的一切配置好，幂等可重跑：
+
+```bash
+# 管理员令牌
+assistant setup --host https://gitea.example.com \
+  --admin-token <管理员令牌> \
+  --repos owner/repo[,owner/another] --create-repos
+
+# 或用管理员账号密码现场换取令牌（密码不落盘）
+assistant setup --host https://gitea.example.com \
+  --admin-user <管理员账号> --admin-password <密码> \
+  --repos owner/repo
+```
+
+流程：
+
+1. 校验管理员身份；
+2. 复用/创建 `reviewer`（默认 `ai`）与 `merger`（默认 `merge`）账号（随机密码不落盘）；
+3. 生成最小权限访问令牌（已配置且有效的令牌直接复用）；
+4. 把两个账号加为仓库协作者（write），并补齐与 `sync` 完全相同口径的标签体系；
+5. 在默认分支配置分支保护：`required approvals=2`（内容批准 + 状态会签）、驳回阻塞、过期批准作废、落后分支阻塞；
+6. 把结果写回 `config.json`（0600）。`--create-repos` 会在仓库不存在时自动创建私有仓库（auto_init，默认分支 main）。
+
+常用开关：`--dry-run`（只输出计划）、`--reviewer` / `--merger`（账号名）、`--required-approvals`、`--email-domain`。
 
 ## 仓库辅助机器人
 
@@ -67,6 +122,7 @@ status/triage     Issue ───────▶  triage issue #N               
 - **验证失败重试一次，head 漂移即作废**：每个 PR 会话开工时钉定当时的 head；完成后若 reviewer 提交了新 review 但 head 已被作者推进，本轮评审视为作废——直接放行等下一轮以新 head 重开。head 未变仅缺 review 才重试；两个会话后仍无完成动作则记录放行。
 - **有界并发（`--concurrency` / `DISPATCH_CONCURRENCY`，缺省 1）**：一轮待办至多同时跑 N 个会话；轮与轮之间是天然 barrier——同一 PR/Issue 同一时刻至多一个会话。
 - **单飞**：`dispatcher.lock` 记 PID（原子创建），同机第二实例拒绝启动，死 PID 残留自动接管（`review`/`triage` 一次性命令共用此锁）。
+- **多实例**：使用 `config.json` 时，`run` 为每个 instance × repo 启动一个独立循环（各自加锁、各自 worktree 根），任一循环失败即整体退出。启动前逐 instance 做健康检查：版本端点可达 + reviewer/merger/admin 令牌认证通过，任一不可用则拒绝启动（不带病运行）。
 - **优雅退出**：首个 SIGINT/SIGTERM 等当前待办处理完；二次信号强杀。
 
 ### 命令行
@@ -83,9 +139,9 @@ assistant triage <n>      立即分诊单个 Issue
 
 配置优先级：**命令行参数 > 环境变量 > git remote 自动检测 / 默认值**。
 
-- **host 与仓库缺省从 origin remote 推导**：http(s) remote（如 `http://gitea.example.com:3000/owner/repo.git`）可完整推出 API 根地址与 owner/repo；ssh/scp remote 只可靠推出仓库，host 以 `http://<主机名>` 尽力猜测，此时用 `--host` / `GITEA_HOST` 显式指定。
+- **host 与仓库缺省从 origin remote 推导**（环境变量单实例模式）：http(s) remote（如 `http://gitea.example.com:3000/owner/repo.git`）可完整推出 API 根地址与 owner/repo；ssh/scp remote 只可靠推出仓库，host 以 `http://<主机名>` 尽力猜测，此时用 `--host` / `GITEA_HOST` 显式指定。
 - 时长参数（`--interval` / `--timeout` 及对应 `DISPATCH_*_MS` 环境变量）接受 `30s` / `10m` / `1h` / `2d` 或毫秒裸数字。
-- 路径默认值锚定宿主检出根（`git rev-parse --show-toplevel`），与启动 cwd 无关：日志 `<检出根>/logs`、锁 `<检出根>/dispatcher.lock`；worktree 在系统临时目录。
+- 路径默认值锚定宿主检出根（`git rev-parse --show-toplevel`），与启动 cwd 无关：日志 `<检出根>/logs`、锁 `<检出根>/dispatcher.lock`；worktree 在系统临时目录（多仓库时按 `<owner>-<repo>` 隔离）。
 - 其余环境变量：`DISPATCH_LOG_DIR`、`DISPATCH_WORKTREE_ROOT`、`DISPATCH_LOCK_FILE`、`DISPATCH_MODEL`、`DISPATCH_REVIEWER`、`DISPATCH_CLAUDE_BIN`。
 
 ### 访问令牌的作用
@@ -95,7 +151,7 @@ assistant triage <n>      立即分诊单个 Issue
 1. **dispatcher 自身**：按标签检测待办、完成判定验证（读 review 与标签），只需读权限。
 2. **评审会话**：gitea MCP 子进程继承同一组 `GITEA_HOST` / `GITEA_ACCESS_TOKEN`，会话提交的 Pull Request Review 以该令牌的账号身份落库——「reviewer 名下出现新 review」正是完成判定的依据。
 
-因此令牌必须是 reviewer 账号（默认 `ai`）的令牌：换成其他账号，检测与验证照常工作，但提交的 review 不再匹配 `--reviewer`，PR 会被反复重开会话。令牌无法自动检测，必须显式提供（命令行传参可见于进程列表，推荐环境变量）。
+因此令牌必须是 reviewer 账号（默认 `ai`）的令牌：换成其他账号，检测与验证照常工作，但提交的 review 不再匹配 `--reviewer`，PR 会被反复重开会话。令牌无法自动检测，必须显式提供（命令行传参可见于进程列表，推荐环境变量或 `config.json`）；`assistant setup` 会自动生成。
 
 ### 部署（专用开发机）
 
@@ -103,9 +159,13 @@ assistant triage <n>      立即分诊单个 Issue
 
 ```bash
 make build                        # 或 make push 发布到 generic package registry
+# 单实例（环境变量）
 export GITEA_ACCESS_TOKEN=<ai 账号令牌>
 export DISPATCH_SYNC_MIRROR=1     # 每轮把宿主检出强制对齐 origin/main（评审标准的数据源）
 ./assistant run                   # 在仓库检出内任意目录启动（路径默认值锚定检出根）
+
+# 多实例（config.json，由 assistant setup 生成；仓库 dir 需为本地检出）
+./assistant run --config /etc/assistant/config.json
 ```
 
 systemd 示例（`WorkingDirectory` 建议仓库检出根；systemd 的最小 PATH 通常不含 claude 安装目录，`--claude-bin` 用绝对路径）：
@@ -129,7 +189,7 @@ TimeoutStopSec=1800
 WantedBy=multi-user.target
 ```
 
-`/etc/assistant.env` 至少包含 `GITEA_ACCESS_TOKEN=<ai 账号令牌>`。
+`/etc/assistant.env` 至少包含 `GITEA_ACCESS_TOKEN=<ai 账号令牌>`；多实例形态改用 `--config /etc/assistant/config.json`（文件含令牌，注意 0600 权限）。
 
 ### 日志
 
@@ -156,6 +216,18 @@ make build         # 构建 Linux/amd64 静态二进制（与 CI 发布产物相
 make push          # 手动发布 latest 到 generic package registry（引导/紧急修复；需要 GITEA_HOST / GITEA_ACCESS_TOKEN）
 make clean         # 清理构建产物
 ```
+
+### 端到端测试（临时 Gitea）
+
+`test/gitea/docker-compose.yaml` 提供一次性 Gitea（SQLite，HTTP `127.0.0.1:3300`），用于真实验证 `setup` 全流程（建号、令牌、协作者、分支保护、标签、sync 闭环）与多实例命令：
+
+```bash
+make test-e2e      # 起临时 Gitea → 跑 go test -tags e2e ./test/e2e/... → 清理
+make gitea-up      # 只启动，保留现场手动调试（凭据写入 test/e2e/.env）
+make gitea-down    # 停止并清除数据卷
+```
+
+需要 Docker；e2e 测试在缺少凭据时自动跳过（`go test ./...` 不受影响）。
 
 发布的是统一二进制 `assistant`。仓库内的 Gitea Actions 工作流（发布、`sync`、`automerge`）需相应把下载/执行目标从旧的 `gitea-assistant` 改为 `assistant`；发布步骤仍使用带 `write:package` scope 的 PAT secret。
 

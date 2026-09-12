@@ -1,0 +1,23 @@
+{
+  "instances": [
+    {
+      "host": "https://gitea.example.com",
+      "admin_token": "admin-personal-access-token",
+      "reviewer": {
+        "name": "ai",
+        "token": "created-by-assistant-setup"
+      },
+      "merger": {
+        "name": "merge",
+        "token": "created-by-assistant-setup"
+      },
+      "repos": [
+        "owner/repo",
+        {
+          "name": "owner/another",
+          "dir": "/srv/another"
+        }
+      ]
+    }
+  ]
+}

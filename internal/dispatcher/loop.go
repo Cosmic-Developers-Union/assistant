@@ -2,8 +2,8 @@
 //
 //   - 单飞：同一时刻至多一个评审会话；lockfile 记 PID，宿主 PID 存活时拒绝
 //     启动第二实例，死 PID（上次崩溃残留）自动接管。
-//   - 优雅退出：首个 SIGINT/SIGTERM 置 stopping——sleep 立即返回、当前待办
-//     处理完即退出；二次信号视为强杀（进程退出，残留锁下次启动接管）。
+//   - 优雅退出：ctx 取消（首个 SIGINT/SIGTERM，由 main 统一处理）——sleep
+//     立即返回、当前待办处理完即退出；二次信号由 main 强杀。
 //   - 验证失败重试一次（每待办至多两个会话），仍失败则记录并放行，等待下一轮
 //     检测（标签未变意味着待办仍在列表里，循环天然重试）。
 package dispatcher
@@ -11,14 +11,13 @@ package dispatcher
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -38,6 +37,36 @@ type Deps struct {
 	PrepareWorktree func(pullNumber int64) (string, error)
 	RemoveWorktree  func(dir string) error
 	RunSession      func(prompt, cwd string, onProgress func(string)) SessionOutcome
+}
+
+// RunAll 监督多个仓库的常驻循环：各自独立加锁（锁在各自检出内），任一循环
+// 失败即取消其余循环并聚合返回；ctx 取消（首个 SIGINT/SIGTERM 由 main 触发）
+// 时所有循环处理完当前待办后优雅退出。
+func RunAll(ctx context.Context, depsList []Deps) error {
+	if len(depsList) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var waitGroup sync.WaitGroup
+	errorsChannel := make(chan error, len(depsList))
+	for _, deps := range depsList {
+		waitGroup.Add(1)
+		go func(deps Deps) {
+			defer waitGroup.Done()
+			if err := RunLoop(ctx, deps); err != nil {
+				errorsChannel <- err
+				cancel()
+			}
+		}(deps)
+	}
+	waitGroup.Wait()
+	close(errorsChannel)
+	var runErrors []error
+	for err := range errorsChannel {
+		runErrors = append(runErrors, err)
+	}
+	return errors.Join(runErrors...)
 }
 
 // AcquireLock 单飞锁：已存活实例在跑则报错，死 PID 残留则接管。锁文件写入用
@@ -93,38 +122,20 @@ func stamp(now time.Time) string {
 	return now.Format("20060102-150405")
 }
 
-func signalLabel(sig os.Signal) string {
-	switch sig {
-	case syscall.SIGINT:
-		return "SIGINT"
-	case syscall.SIGTERM:
-		return "SIGTERM"
+// ctxDone 返回 ctx 是否已取消（优雅退出信号由 main 统一处理）。
+func ctxDone(ctx context.Context) bool {
+	select {
+	case <-ctx.Done():
+		return true
+	default:
+		return false
 	}
-	return sig.String()
 }
 
-// RunLoop 是常驻主循环（部署形态）。
+// RunLoop 是常驻主循环（部署形态）。退出由 ctx 取消驱动：当前待办处理完即
+// 退出，不中断进行中的会话。
 func RunLoop(ctx context.Context, deps Deps) error {
 	config := deps.Config
-	var stopping atomic.Bool
-	stopCh := make(chan struct{})
-	signals := make(chan os.Signal, 2)
-	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
-	defer signal.Stop(signals)
-	go func() {
-		count := 0
-		for sig := range signals {
-			count++
-			if count == 1 {
-				stopping.Store(true)
-				deps.Log(fmt.Sprintf("收到 %s，处理完当前待办后退出（再次发送将立即强杀）", signalLabel(sig)))
-				close(stopCh)
-				continue
-			}
-			deps.Log(fmt.Sprintf("再次收到 %s，强杀退出", signalLabel(sig)))
-			os.Exit(1)
-		}
-	}()
 
 	if err := AcquireLock(config.LockFile, deps.Log); err != nil {
 		return err
@@ -144,7 +155,7 @@ func RunLoop(ctx context.Context, deps Deps) error {
 		defer timer.Stop()
 		select {
 		case <-timer.C:
-		case <-stopCh:
+		case <-ctx.Done():
 		}
 	}
 
@@ -190,7 +201,7 @@ func RunLoop(ctx context.Context, deps Deps) error {
 		config.BaseBranch, mirror,
 	))
 
-	for !stopping.Load() {
+	for !ctxDone(ctx) {
 		// 镜像同步先行（fail-closed）：检出是评审标准与分诊的数据源，与其带着
 		// 陈旧基线评审，不如跳过本轮等待重试
 		if deps.SyncMirror != nil {
@@ -231,7 +242,7 @@ func RunLoop(ctx context.Context, deps Deps) error {
 		var mutex sync.Mutex
 		worker := func() {
 			defer wg.Done()
-			for !stopping.Load() {
+			for !ctxDone(ctx) {
 				mutex.Lock()
 				if next >= len(work) {
 					mutex.Unlock()

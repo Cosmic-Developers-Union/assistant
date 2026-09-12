@@ -17,8 +17,24 @@ const version = "dev"
 const exitCodeAuthFailure = 78
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// 首个信号：取消 ctx，各命令优雅收尾（run 处理完当前待办）；再次信号：强杀。
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		count := 0
+		for sig := range signals {
+			count++
+			if count == 1 {
+				fmt.Fprintf(os.Stderr, "收到 %s，等待当前操作完成后退出（再次发送将立即强杀）\n", sig)
+				cancel()
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "再次收到 %s，强杀退出\n", sig)
+			os.Exit(1)
+		}
+	}()
 
 	command := newRootCommand(os.Stdout, os.Stderr, runCheck, runSync, runAutoMerge)
 	if err := command.ExecuteContext(ctx); err != nil {

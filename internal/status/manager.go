@@ -209,6 +209,19 @@ func (m *Manager) prepareLabels(ctx context.Context, repository Repository) (map
 	return byName, nil
 }
 
+// LabelDefinitions 返回规范标签体系的副本：sync 的补齐流程与 setup 的初始化
+// 共用同一份定义，保证「同一套标签、同一条流程」。
+func LabelDefinitions() []LabelDefinition {
+	return slices.Clone(labelDefinitions)
+}
+
+// ReconcileLabels 只执行标签体系补齐（创建缺失标签、把 scoped 标签设为互斥），
+// 不触碰 Issue/PR；setup 复用它，与 sync 完全同口径。
+func (m *Manager) ReconcileLabels(ctx context.Context, repository Repository) error {
+	_, err := m.prepareLabels(ctx, repository)
+	return err
+}
+
 func isScopedLabel(name string) bool {
 	return strings.HasPrefix(name, typeLabelPrefix) ||
 		strings.HasPrefix(name, priorityLabelPrefix) ||

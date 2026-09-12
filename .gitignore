@@ -326,6 +326,7 @@ cython_debug/
 /assistant.exe
 /dispatcher.lock
 /worktrees/
+/test/e2e/.env
 
 # IDE
 .idea/

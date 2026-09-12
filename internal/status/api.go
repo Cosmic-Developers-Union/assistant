@@ -106,6 +106,8 @@ type BranchProtection struct {
 	RuleName          string
 	EnableStatusCheck bool
 	Contexts          []string
+	// RequiredApprovals 是合并所需批准数（setup/e2e 校验用）。
+	RequiredApprovals int64
 }
 
 type ReviewInput struct {
@@ -567,6 +569,7 @@ func (c *Client) ListBranchProtections(ctx context.Context, repository Repositor
 				RuleName:          protection.RuleName,
 				EnableStatusCheck: protection.EnableStatusCheck,
 				Contexts:          protection.StatusCheckContexts,
+				RequiredApprovals: protection.RequiredApprovals,
 			})
 		}
 		next, ok := nextPage(response, page, len(protections))
@@ -594,6 +597,31 @@ func (c *Client) ListRepositoryLabels(ctx context.Context, repository Repository
 			result = append(result, labelFromSDK(label))
 		}
 		next, ok := nextPage(response, page, len(labels))
+		if !ok {
+			break
+		}
+		page = next
+	}
+	return result, nil
+}
+
+// ListCollaboratorLogins 返回仓库协作者的登录名（setup/e2e 校验用）。
+func (c *Client) ListCollaboratorLogins(ctx context.Context, repository Repository) ([]string, error) {
+	var result []string
+	for page := 1; ; {
+		collaborators, response, err := c.sdk.Repositories.ListCollaborators(
+			ctx,
+			repository.Owner,
+			repository.Name,
+			gitea.ListCollaboratorsOptions{ListOptions: gitea.ListOptions{Page: page, PageSize: pageSize}},
+		)
+		if err != nil {
+			return nil, fmt.Errorf("list collaborators for %s page %d: %w", repository.FullName(), page, err)
+		}
+		for _, collaborator := range collaborators {
+			result = append(result, collaborator.UserName)
+		}
+		next, ok := nextPage(response, page, len(collaborators))
 		if !ok {
 			break
 		}
