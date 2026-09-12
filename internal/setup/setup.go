@@ -30,6 +30,7 @@ type Options struct {
 	AdminToken        string
 	AdminUser         string
 	AdminPassword     string
+	OAuth             *OAuthOptions
 	Repos             []string
 	ReviewerName      string
 	MergerName        string
@@ -52,9 +53,12 @@ type RepoInfo struct {
 type Admin interface {
 	// AuthenticatedUser 返回当前管理员登录名并确认管理员身份。
 	AuthenticatedUser(ctx context.Context) (login string, isAdmin bool, err error)
-	// AdminToken 返回实际生效的管理员令牌（用户提供或新生成的）；dry-run 且
-	// 仅有账号密码时可能为空。
+	// AdminToken 返回实际生效的管理员令牌（用户提供、OAuth 换取或新生成的）；
+	// dry-run 且仅有账号密码时可能为空。
 	AdminToken() string
+	// PersistentToken 返回可写入配置长期使用的管理员令牌；OAuth 令牌会过期，
+	// 返回空表示不应落盘。
+	PersistentToken() string
 	UserExists(ctx context.Context, name string) (bool, error)
 	CreateUser(ctx context.Context, name, email string) error
 	CreateToken(ctx context.Context, name string) (string, error)
@@ -113,8 +117,9 @@ func Run(ctx context.Context, options Options, admin Admin) (instances.Instance,
 	}
 
 	// 管理令牌：本次实际生效的优先（用户显式提供或由账号密码新生成），
-	// 其次保留 config 里的旧值。
-	instance.AdminToken = admin.AdminToken()
+	// 其次保留 config 里的旧值。OAuth 令牌会过期（PersistentToken 为空），
+	// 只用于本次 setup，不落盘。
+	instance.AdminToken = admin.PersistentToken()
 	if instance.AdminToken == "" {
 		instance.AdminToken = options.existingAdminToken()
 	}
@@ -288,8 +293,8 @@ func (o Options) validate() error {
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return fmt.Errorf("host 必须是绝对 HTTP(S) URL：%q", o.Host)
 	}
-	if o.AdminToken == "" && (o.AdminUser == "" || o.AdminPassword == "") {
-		return fmt.Errorf("缺少管理员凭据：--admin-token 或 --admin-user/--admin-password")
+	if o.AdminToken == "" && o.OAuth == nil && (o.AdminUser == "" || o.AdminPassword == "") {
+		return fmt.Errorf("缺少管理员凭据：--admin-token / --admin-token-file / --oauth，或 --admin-user/--admin-password")
 	}
 	if len(o.Repos) == 0 {
 		return fmt.Errorf("缺少仓库：--repo owner/name（可重复）")

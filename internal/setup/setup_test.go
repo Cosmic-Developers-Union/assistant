@@ -45,6 +45,8 @@ func (f *fakeAdmin) AuthenticatedUser(context.Context) (string, bool, error) {
 
 func (f *fakeAdmin) AdminToken() string { return f.adminToken }
 
+func (f *fakeAdmin) PersistentToken() string { return f.adminToken }
+
 func (f *fakeAdmin) UserExists(_ context.Context, name string) (bool, error) {
 	return f.users[name], nil
 }

@@ -26,36 +26,57 @@ import (
 	"assistant/internal/status"
 )
 
-func environment(t *testing.T) (host, adminToken string) {
+type e2eEnv struct {
+	Host          string
+	AdminUser     string
+	AdminPassword string
+	AdminToken    string
+}
+
+func environment(t *testing.T) e2eEnv {
 	t.Helper()
-	host = os.Getenv("ASSISTANT_E2E_HOST")
-	adminToken = os.Getenv("ASSISTANT_E2E_ADMIN_TOKEN")
-	if host != "" && adminToken != "" {
-		return host, adminToken
+	env := e2eEnv{
+		Host:          os.Getenv("ASSISTANT_E2E_HOST"),
+		AdminUser:     os.Getenv("ASSISTANT_E2E_ADMIN_USER"),
+		AdminPassword: os.Getenv("ASSISTANT_E2E_ADMIN_PASSWORD"),
+		AdminToken:    os.Getenv("ASSISTANT_E2E_ADMIN_TOKEN"),
 	}
 	// up.sh 会把凭据写到包目录下的 .env
-	if data, err := os.ReadFile(".env"); err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
-			if !ok {
-				continue
-			}
-			switch key {
-			case "ASSISTANT_E2E_HOST":
-				host = value
-			case "ASSISTANT_E2E_ADMIN_TOKEN":
-				adminToken = value
+	if env.Host == "" || env.AdminToken == "" {
+		if data, err := os.ReadFile(".env"); err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
+				if !ok {
+					continue
+				}
+				switch key {
+				case "ASSISTANT_E2E_HOST":
+					env.Host = value
+				case "ASSISTANT_E2E_ADMIN_USER":
+					env.AdminUser = value
+				case "ASSISTANT_E2E_ADMIN_PASSWORD":
+					env.AdminPassword = value
+				case "ASSISTANT_E2E_ADMIN_TOKEN":
+					env.AdminToken = value
+				}
 			}
 		}
 	}
-	if host == "" || adminToken == "" {
+	if env.AdminUser == "" {
+		env.AdminUser = "e2eadmin"
+	}
+	if env.AdminPassword == "" {
+		env.AdminPassword = "admin-e2e-password"
+	}
+	if env.Host == "" || env.AdminToken == "" {
 		t.Skip("缺少 ASSISTANT_E2E_HOST / ASSISTANT_E2E_ADMIN_TOKEN（先运行 test/gitea/up.sh）")
 	}
-	return host, adminToken
+	return env
 }
 
 func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
-	host, adminToken := environment(t)
+	env := environment(t)
+	host, adminToken := env.Host, env.AdminToken
 	ctx := context.Background()
 	adminClient, err := status.NewClient(host, adminToken)
 	if err != nil {

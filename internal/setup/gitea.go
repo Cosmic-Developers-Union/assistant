@@ -35,14 +35,18 @@ type giteaAdmin struct {
 	http          *http.Client
 	sdk           *gitea.Client
 	dryRun        bool
-	log           func(string, ...any)
+	// ephemeral 表示令牌来自 OAuth 登录（会过期），不应写入配置。
+	ephemeral bool
+	log       func(string, ...any)
 	// passwords 记录本次创建的机器人账号随机密码，用于令牌创建失败时以
 	// Basic Auth 回退（不写盘）。
 	passwords map[string]string
 }
 
-// NewAdmin 构造高权限操作面：校验管理员身份；未提供 --admin-token 时，用
-// --admin-user/--admin-password 生成一个管理员令牌（dry-run 不生成）。
+// NewAdmin 构造高权限操作面：校验管理员身份。凭据来源：
+//   - --oauth：OAuth2 授权码 + PKCE 浏览器登录（令牌不落盘）；
+//   - --admin-token / 已有配置：直接校验；
+//   - --admin-user/--admin-password：用它换取一个长期管理员令牌。
 func NewAdmin(ctx context.Context, options Options) (*giteaAdmin, error) {
 	options.applyDefaults()
 	if err := options.validate(); err != nil {
@@ -63,17 +67,35 @@ func NewAdmin(ctx context.Context, options Options) (*giteaAdmin, error) {
 		log:           logf,
 		passwords:     map[string]string{},
 	}
-	if admin.token == "" && !admin.dryRun {
-		token, err := admin.createTokenWithBasic(ctx, options.AdminUser, options.AdminPassword, adminTokenName)
-		if err != nil {
-			return nil, fmt.Errorf("用管理员账号生成令牌: %w", err)
+	var login string
+	var isAdmin bool
+	if options.OAuth != nil {
+		oauthOptions := *options.OAuth
+		oauthOptions.Host = options.Host
+		if oauthOptions.Log == nil {
+			oauthOptions.Log = logf
 		}
-		admin.token = token
-		logf("已为管理员账号 @%s 生成访问令牌", options.AdminUser)
-	}
-	login, isAdmin, err := admin.AuthenticatedUser(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("校验管理员凭据: %w", err)
+		result, err := OAuthLogin(ctx, oauthOptions)
+		if err != nil {
+			return nil, err
+		}
+		admin.token = result.Token
+		admin.ephemeral = true
+		login, isAdmin = result.Login, result.IsAdmin
+	} else {
+		if admin.token == "" && !admin.dryRun {
+			token, err := admin.createTokenWithBasic(ctx, options.AdminUser, options.AdminPassword, adminTokenName)
+			if err != nil {
+				return nil, fmt.Errorf("用管理员账号生成令牌: %w", err)
+			}
+			admin.token = token
+			logf("已为管理员账号 @%s 生成访问令牌", options.AdminUser)
+		}
+		var err error
+		login, isAdmin, err = admin.AuthenticatedUser(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("校验管理员凭据: %w", err)
+		}
 	}
 	if !isAdmin {
 		return nil, fmt.Errorf("账号 @%s 不是管理员，setup 需要管理员权限", login)
@@ -94,6 +116,14 @@ func NewAdmin(ctx context.Context, options Options) (*giteaAdmin, error) {
 }
 
 func (a *giteaAdmin) AdminToken() string {
+	return a.token
+}
+
+// PersistentToken 返回可长期使用的管理员令牌；OAuth 令牌会过期，返回空。
+func (a *giteaAdmin) PersistentToken() string {
+	if a.ephemeral {
+		return ""
+	}
 	return a.token
 }
 
@@ -151,10 +181,20 @@ func (a *giteaAdmin) CreateToken(ctx context.Context, name string) (string, erro
 	}
 	path := "/api/v1/users/" + url.PathEscape(name) + "/tokens"
 	_, err := a.do(ctx, http.MethodPost, path, a.auth(), body, &payload)
-	// 部分 Gitea 版本不允许管理员令牌代建他人令牌，回退用机器人自己的
-	// Basic Auth（仅当本次创建了该账号、密码在手）。
+	// Gitea 的建令牌端点只接受 Basic Auth：管理员令牌（含 OAuth 令牌）会
+	// 401/403。回退为机器人自己的 Basic Auth——密码来自本次创建；账号已存在
+	// 时由管理员重置一次密码（机器人账号不使用密码，重置无副作用）。
 	if err != nil && (isHTTPStatus(err, http.StatusForbidden) || isHTTPStatus(err, http.StatusUnauthorized)) {
-		if password := a.passwords[name]; password != "" {
+		password := a.passwords[name]
+		if password == "" {
+			reset, resetErr := a.resetPassword(ctx, name)
+			if resetErr != nil {
+				a.log("无法重置 %s 的密码（%v），尝试直接创建令牌", name, resetErr)
+			} else {
+				password = reset
+			}
+		}
+		if password != "" {
 			_, err = a.do(ctx, http.MethodPost, path, requestAuth{user: name, password: password}, body, &payload)
 		}
 	}
@@ -165,6 +205,31 @@ func (a *giteaAdmin) CreateToken(ctx context.Context, name string) (string, erro
 		return "", fmt.Errorf("为 %s 创建令牌: Gitea 未返回令牌", name)
 	}
 	return payload.Token, nil
+}
+
+// resetPassword 由管理员重置机器人账号密码（仅用于以 Basic Auth 创建它自己
+// 的令牌；机器人不登录 UI，重置无副作用）。
+func (a *giteaAdmin) resetPassword(ctx context.Context, name string) (string, error) {
+	if a.sdk == nil {
+		return "", fmt.Errorf("缺少管理员令牌")
+	}
+	password, err := RandomPassword()
+	if err != nil {
+		return "", err
+	}
+	mustChange := false
+	// login_name 是 Gitea 1.22 PATCH /admin/users 的必填绑定字段（本地账号
+	// 与用户名一致），缺失会 422 [LoginName]: Required。
+	if _, err := a.sdk.Admin.EditUser(ctx, name, gitea.EditUserOption{
+		LoginName:          name,
+		Password:           password,
+		MustChangePassword: &mustChange,
+	}); err != nil {
+		return "", err
+	}
+	a.passwords[name] = password
+	a.log("已重置 %s 的密码以生成令牌（机器人账号不使用密码）", name)
+	return password, nil
 }
 
 func (a *giteaAdmin) ValidateToken(ctx context.Context, name, token string) (bool, error) {

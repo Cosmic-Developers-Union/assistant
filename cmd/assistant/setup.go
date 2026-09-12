@@ -9,13 +9,30 @@ import (
 	"assistant/internal/setup"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
+
+// promptPassword 在 TTY 上读取密码（不回显）。
+func promptPassword(prompt string) (string, error) {
+	fmt.Fprint(os.Stderr, prompt)
+	password, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(password)), nil
+}
 
 type setupOptions struct {
 	Host              string
 	AdminToken        string
+	AdminTokenFile    string
 	AdminUser         string
 	AdminPassword     string
+	OAuth             bool
+	OAuthClientID     string
+	OAuthClientSecret string
+	OAuthPort         int
 	Repos             []string
 	ReviewerName      string
 	MergerName        string
@@ -36,7 +53,9 @@ func newSetupCommand(configFlag *string) *cobra.Command {
 			"  3. 把两个账号加为仓库协作者（write），并补齐与 sync 相同口径的标签体系；\n" +
 			"  4. 在默认分支配置分支保护（required approvals、驳回阻塞、过期批准作废、落后分支阻塞）；\n" +
 			"  5. 把结果写回 config.json（0600）。\n\n" +
-			"全流程幂等，可重复执行。管理员凭据用 --admin-token，或用 --admin-user/--admin-password 现场换取令牌。",
+			"管理员凭据支持多种方式：--admin-token、--admin-token-file、\n" +
+			"--oauth（浏览器 OAuth2 登录，令牌不落盘）或 --admin-user/--admin-password。\n" +
+			"全流程幂等，可重复执行。",
 		Args: cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			return runSetup(command, *configFlag, options)
@@ -44,9 +63,19 @@ func newSetupCommand(configFlag *string) *cobra.Command {
 	}
 	flags := command.Flags()
 	flags.StringVar(&options.Host, "host", "", "Gitea 站点根地址（缺省取配置文件中的 instance）")
-	flags.StringVar(&options.AdminToken, "admin-token", "", "管理员访问令牌")
-	flags.StringVar(&options.AdminUser, "admin-user", "", "管理员账号（与 --admin-password 搭配生成令牌）")
-	flags.StringVar(&options.AdminPassword, "admin-password", "", "管理员密码（仅用于生成令牌，不落盘）")
+	flags.StringVar(&options.AdminToken, "admin-token", "", "管理员访问令牌（可选，见 --oauth / --admin-user）")
+	flags.StringVar(&options.AdminTokenFile, "admin-token-file", "", "从文件读取管理员令牌（避免 shell 历史/进程参数泄露）")
+	flags.StringVar(&options.AdminUser, "admin-user", "", "管理员账号（换取长期令牌；缺密码时交互式输入）")
+	flags.StringVar(&options.AdminPassword, "admin-password", "", "管理员密码（仅用于换取令牌，不落盘）")
+	flags.BoolVar(&options.OAuth, "oauth", false, "用浏览器 OAuth2 登录（授权码 + PKCE；令牌不写入配置）")
+	flags.StringVar(
+		&options.OAuthClientID,
+		"oauth-client-id",
+		"",
+		"OAuth2 Client ID（缺省用 Gitea 内置 tea 公共客户端；旧版 Gitea 需自建公共应用）",
+	)
+	flags.StringVar(&options.OAuthClientSecret, "oauth-client-secret", "", "OAuth2 Client Secret（公共客户端留空）")
+	flags.IntVar(&options.OAuthPort, "oauth-port", 0, "OAuth 本地回调端口（缺省随机空闲端口；confidential 客户端需与注册的重定向 URI 端口一致）")
 	flags.StringSliceVar(&options.Repos, "repos", nil, "仓库 owner/name（逗号分隔可多个；缺省取配置文件中的 repos）")
 	flags.StringVar(&options.ReviewerName, "reviewer", "", "内容评审账号名（缺省 ai）")
 	flags.StringVar(&options.MergerName, "merger", "", "状态评审/会签账号名（缺省 merge）")
@@ -115,20 +144,58 @@ func runSetup(command *cobra.Command, configPath string, options *setupOptions) 
 		return fmt.Errorf("缺少仓库：--repos owner/name[,...]")
 	}
 
-	// 管理员令牌优先级：--admin-token > 配置文件 admin_token > GITEA_ACCESS_TOKEN
+	// 管理员凭据优先级：--admin-token > --admin-token-file > --oauth >
+	// 配置文件 admin_token > GITEA_ACCESS_TOKEN > --admin-user/--admin-password。
 	adminToken := strings.TrimSpace(options.AdminToken)
-	if adminToken == "" && existing != nil {
+	if adminToken == "" && strings.TrimSpace(options.AdminTokenFile) != "" {
+		data, readErr := os.ReadFile(options.AdminTokenFile)
+		if readErr != nil {
+			return fmt.Errorf("读取令牌文件: %w", readErr)
+		}
+		adminToken = strings.TrimSpace(string(data))
+		if adminToken == "" {
+			return fmt.Errorf("令牌文件为空：%s", options.AdminTokenFile)
+		}
+	}
+	useOAuth := options.OAuth
+	if adminToken == "" && !useOAuth && existing != nil {
 		adminToken = existing.AdminToken
 	}
-	if adminToken == "" {
+	if adminToken == "" && !useOAuth {
 		adminToken = strings.TrimSpace(os.Getenv("GITEA_ACCESS_TOKEN"))
+	}
+	adminPassword := options.AdminPassword
+	if adminToken == "" && !useOAuth && options.AdminUser != "" && adminPassword == "" {
+		if !term.IsTerminal(int(os.Stdin.Fd())) {
+			return fmt.Errorf("缺少管理员密码：--admin-password（非交互环境）")
+		}
+		adminPassword, err = promptPassword(fmt.Sprintf("请输入管理员 @%s 的密码：", options.AdminUser))
+		if err != nil {
+			return fmt.Errorf("读取密码: %w", err)
+		}
+	}
+	if adminToken == "" && !useOAuth && options.AdminUser == "" {
+		return fmt.Errorf(
+			"缺少管理员凭据：--admin-token / --admin-token-file / --oauth，或 --admin-user/--admin-password")
+	}
+
+	var oauth *setup.OAuthOptions
+	if useOAuth {
+		oauth = &setup.OAuthOptions{
+			Host:         host,
+			ClientID:     options.OAuthClientID,
+			ClientSecret: options.OAuthClientSecret,
+			Port:         options.OAuthPort,
+			Log:          logf,
+		}
 	}
 
 	setupOptions := setup.Options{
 		Host:              host,
 		AdminToken:        adminToken,
 		AdminUser:         options.AdminUser,
-		AdminPassword:     options.AdminPassword,
+		AdminPassword:     adminPassword,
+		OAuth:             oauth,
 		Repos:             repos,
 		ReviewerName:      options.ReviewerName,
 		MergerName:        options.MergerName,
@@ -146,6 +213,9 @@ func runSetup(command *cobra.Command, configPath string, options *setupOptions) 
 	instance, err := setup.Run(command.Context(), setupOptions, admin)
 	if err != nil {
 		return err
+	}
+	if useOAuth && instance.AdminToken == "" {
+		logf("提示：OAuth 令牌不写入配置（会过期）；automerge 的必要检查门禁将回退为严格模式")
 	}
 
 	if file == nil {
