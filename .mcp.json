@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "gitea": {
+      "args": [
+        "mcp",
+        "gitea"
+      ],
+      "command": "assistant"
+    }
+  }
+}

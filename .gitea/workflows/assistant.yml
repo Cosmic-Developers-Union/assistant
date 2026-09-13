@@ -1,0 +1,36 @@
+# managed-by: assistant
+name: Gitea Assistant
+on:
+  issues:
+    types: [opened, edited, closed, reopened, labeled, unlabeled]
+  pull_request:
+    types: [opened, edited, closed, reopened, labeled, unlabeled, synchronize]
+  pull_request_review:
+    types: [submitted]
+  issue_comment:
+    types: [created]
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/cosmic-developers-union/assistant:latest
+    steps:
+      - run: assistant sync --verbose
+        env:
+          GITEA_HOST: ${{ github.server_url }}
+          GITEA_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITEA_REPOSITORY: ${{ github.repository }}
+  automerge:
+    needs: sync
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/cosmic-developers-union/assistant:latest
+    steps:
+      - run: assistant automerge --verbose
+        env:
+          GITEA_HOST: ${{ github.server_url }}
+          GITEA_ACCESS_TOKEN: ${{ secrets.MERGE_TOKEN }}
+          GITEA_REPOSITORY: ${{ github.repository }}

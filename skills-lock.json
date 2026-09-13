@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "review": {
+      "source": "Cosmic-Developers-Union/assistant",
+      "sourceType": "github",
+      "skillPath": "skills/review/SKILL.md",
+      "computedHash": "55af6e0c94e09c1f924a5b568b901e5a22cf36fd01d10df66a86fb01425637a0"
+    }
+  }
+}
