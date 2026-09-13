@@ -13,6 +13,9 @@
 | --- | --- | --- |
 | `assistant setup` | 初始化 | 建机器人账号/令牌、配协作者与分支保护、补齐标签，并写入 `config.json` |
 | `assistant actions` | 初始化 | 为配置中的仓库写入 Actions variables/secrets（状态评审者令牌等） |
+| `assistant install` | 开发者 | 在仓库检出内配置 skills / AGENTS.md / workflows / 各 AI CLI 的 MCP |
+| `assistant uninstall` | 开发者 | 移除 `install` 写入的内容（只触碰带 marker 的） |
+| `assistant mcp gitea` | 开发者 | MCP 包装层：自动检测项目站点与开发者令牌后拉起 gitea-mcp |
 | `assistant check` | 机器人 | 按标签检索待 triage 的 Issue 和待 review 的 PR（只读） |
 | `assistant sync` | 机器人 | 规范 Issue 标签并把 PR 原生评审状态同步为状态标签（单次执行） |
 | `assistant automerge` | 机器人 | 合并门禁全绿的已批准 PR（一次至多一个，squash） |
@@ -190,6 +193,32 @@ jobs:
 
 - 本地构建：`make image`（`IMAGE=ghcr.io/<owner>/assistant:dev` 可指定标签）
 - 发布：`.github/workflows/publish-image.yml` 在 GitHub 上把镜像推送到 `ghcr.io/<owner>/assistant`（main 推 `latest`，tag 推语义化版本，另附 `sha-*`）
+
+## 开发者仓库配置（assistant install）
+
+在仓库检出内运行：
+
+```bash
+assistant install              # 配置全部（claude/opencode/codex）
+assistant install --dry-run    # 只输出将要写入的内容
+assistant uninstall            # 移除 assistant 生成的内容
+```
+
+写入内容全部带 marker、可重复执行、可精确卸载：
+
+- `.claude/skills/review/SKILL.md`：PR 审查与 Issue 分诊协议；
+- `AGENTS.md`：assistant 段落（追加，不覆盖用户已有内容）；
+- `.gitea/workflows/assistant.yml`、`automerge.yml`：容器镜像驱动的标签同步与自动合并；
+- MCP：Claude（`.mcp.json` + `.claude/settings.json` 放行 `mcp__gitea*`）、opencode（`opencode.json`，`gitea_*` 放行）、Codex（全局 `~/.codex/config.toml`，`approval_policy = "never"` 自动放行；若你已配置该键则保留并提示）。zcode 暂不支持。
+
+### MCP 包装层与开发者令牌
+
+所有 MCP 配置都指向 `assistant mcp gitea`（不写死 token）：
+
+- host：`--host` > `GITEA_HOST` > `origin remote` 推导；
+- token：`--token` > `GITEA_ACCESS_TOKEN` > `GITEA_ACCESS_TOKEN_FILE` > `~/.config/Cosmic-Developers-Union/assistant/token` > `~/.config/mmc/gitea-token`。
+
+与当前开发者绑定，与管理员/实例配置无关：换项目自动换 host，换人自动换 token。gitea-mcp 默认以 `go run gitea.com/gitea/gitea-mcp@latest -t stdio -S ...` 启动，可用 `GITEA_MCP_BIN` 指已安装的二进制、`GITEA_MCP_SCOPES` 调整 scope 列表。
 
 ## 评审会话调度引擎
 

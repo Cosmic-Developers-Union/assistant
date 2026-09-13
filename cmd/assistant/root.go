@@ -115,6 +115,7 @@ func newRootCommand(stdout, stderr io.Writer, checker, syncer, merger managerRun
 	command.AddCommand(newDispatcherCommands(&options.Repository, &options.ConfigPath)...)
 	command.AddCommand(newSetupCommand(&options.ConfigPath))
 	command.AddCommand(newActionsCommand(&options.ConfigPath))
+	command.AddCommand(newInstallCommand(), newUninstallCommand(), newMCPCommand())
 	return command
 }
 
