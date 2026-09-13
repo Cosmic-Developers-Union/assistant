@@ -87,12 +87,12 @@ assistant completion fish > ~/.config/fish/completions/assistant.fish
 `login` 只负责平台条目与 OAuth 凭据，不做账号/仓库初始化（那是 `setup`）：
 
 ```bash
-assistant login https://gitea.example.com     # OAuth 登录，写入/刷新 admin_oauth（不落 access token）
+assistant login https://gitea.example.com     # 优先复用 tea CLI 登录（--token 可显式指定），否则 OAuth 写入/刷新 admin_oauth
 assistant login list                          # 列出平台：凭据类型（oauth/token/none）、仓库数、ai/merge 账号
 assistant login remove https://gitea.example.com   # 移除平台条目（不触碰 Gitea 侧账号/仓库）
 ```
 
-host 可省略：取配置中唯一实例，否则在带 Gitea remote 的检出内探测（`/api/v1/version`，多 remote 逐个尝试）。OAuth 默认复用 Gitea 内置 `tea` 公共客户端（回调 `http://127.0.0.1:<随机端口>`，公共客户端允许任意 loopback 端口）；`--oauth-client-id/--oauth-client-secret` 可换成自建应用（confidential 应用需提供密钥），`--oauth-scope` 指定授权 scope（缺省不带）。Gitea 会拒绝与已有授权记录 scope 不一致的请求（`a grant exists with different scope`）：到 `<host>/user/settings/applications` 撤销旧授权，或用 `--oauth-scope` 与旧记录对齐。
+host 可省略：取配置中唯一实例，否则在带 Gitea remote 的检出内探测（`/api/v1/version`，多 remote 逐个尝试）。**登录优先复用本机 tea CLI 在该站点的登录令牌**（读 `~/.config/tea/config.yml`，可用 `TEA_CONFIG` 覆盖；只读，不做网络探测），没有时走 OAuth。OAuth 默认复用 Gitea 内置 `tea` 公共客户端（回调 `http://127.0.0.1:<随机端口>`，公共客户端允许任意 loopback 端口）；`--oauth-client-id/--oauth-client-secret` 可换成自建应用（confidential 应用需提供密钥），`--oauth-scope` 指定授权 scope（缺省不带）。Gitea 会拒绝与已有授权记录 scope 不一致的请求（`a grant exists with different scope`）：到 `<host>/user/settings/applications` 撤销旧授权，或用 `--oauth-scope` 与旧记录对齐。
 
 ### 仓库初始化：assistant init
 
@@ -259,7 +259,7 @@ assistant uninstall            # 移除 assistant 生成的内容
 所有 MCP 配置都指向 `assistant mcp gitea`（不写死 token）：
 
 - host：`--host` > `GITEA_HOST` > 多 remote 探测（origin 优先，`/api/v1/version` 判定 Gitea）；
-- token：`--token` > `GITEA_ACCESS_TOKEN` > `GITEA_ACCESS_TOKEN_FILE` > `~/.config/Cosmic-Developers-Union/assistant/token` > `~/.config/mmc/gitea-token`。
+- token：`--token` > `GITEA_ACCESS_TOKEN` > `GITEA_ACCESS_TOKEN_FILE` > `~/.config/Cosmic-Developers-Union/assistant/token` > `~/.config/mmc/gitea-token` > tea CLI 配置（`~/.config/tea/config.yml` 中同站点登录）。
 
 与当前开发者绑定，与管理员/实例配置无关：换项目自动换 host，换人自动换 token。gitea-mcp 默认以 `go run gitea.com/gitea/gitea-mcp@latest -t stdio -S ...` 启动，可用 `GITEA_MCP_BIN` 指已安装的二进制、`GITEA_MCP_SCOPES` 调整 scope 列表。
 

@@ -8,6 +8,7 @@ import (
 
 	"assistant/internal/dispatcher"
 	"assistant/internal/instances"
+	"assistant/internal/repoinstall"
 	"assistant/internal/setup"
 	"assistant/internal/status"
 
@@ -16,6 +17,7 @@ import (
 
 type loginOptions struct {
 	Host          string
+	Token         string
 	OAuthClientID string
 	OAuthSecret   string
 	OAuthScope    string
@@ -28,9 +30,10 @@ func newLoginCommand(configFlag *string) *cobra.Command {
 	options := &loginOptions{}
 	command := &cobra.Command{
 		Use:   "login [host]",
-		Short: "OAuth 登录并登记平台（写入 admin_oauth）；login list/remove 管理平台",
+		Short: "登录并登记平台（优先复用 tea CLI 登录，其次 OAuth）；list/remove 管理平台",
 		Long: "平台登记与管理：\n" +
-			"  assistant login <host>       OAuth 登录，把 refresh 凭据写入 config.json\n" +
+			"  assistant login <host>       优先复用 tea CLI 的登录令牌（--token 可显式指定），\n" +
+			"                               否则 OAuth 登录并把 refresh 凭据写入 config.json\n" +
 			"  assistant login list         列出已登记平台（凭据类型/仓库数/账号名）\n" +
 			"  assistant login remove <host> 移除平台（不触碰 Gitea 侧账号/仓库）\n\n" +
 			"配置落点：--config / ASSISTANT_CONFIG，否则平台标准配置目录；不写当前目录。\n" +
@@ -46,6 +49,7 @@ func newLoginCommand(configFlag *string) *cobra.Command {
 	}
 	flags := command.Flags()
 	flags.StringVar(&options.Host, "host", "", "平台地址（与位置参数二选一）")
+	flags.StringVar(&options.Token, "token", "", "访问令牌（跳过 OAuth；缺省先尝试复用 tea CLI 在站点的登录）")
 	flags.StringVar(&options.OAuthClientID, "oauth-client-id", "",
 		"OAuth2 Client ID（缺省用 Gitea 内置 tea 公共客户端）")
 	flags.StringVar(&options.OAuthSecret, "oauth-client-secret", "", "OAuth2 客户端密钥（confidential 客户端才需要）")
@@ -65,6 +69,37 @@ func runLogin(command *cobra.Command, configPath, argHost string, options *login
 	if err != nil {
 		return err
 	}
+	writePath, file, err := loadInstanceFileForSetup(configPath)
+	if err != nil {
+		return err
+	}
+	if file == nil {
+		file = &instances.File{}
+	}
+
+	// 令牌登录：显式 --token，或复用 tea CLI 在本站点的登录（本地配置，只读）
+	if token, source := resolveLoginToken(host, options.Token, os.Getenv); token != "" {
+		client, err := status.NewClient(host, token)
+		if err != nil {
+			return err
+		}
+		login, authErr := client.AuthenticatedUser(ctx)
+		if authErr != nil && strings.TrimSpace(options.Token) != "" {
+			return fmt.Errorf("--token 不可用（%s）: %w", source, authErr)
+		}
+		if authErr == nil {
+			upsertLoginInstance(file, host, func(instance *instances.Instance) {
+				instance.AdminToken = token
+			})
+			if err := saveLoginFile(file, writePath); err != nil {
+				return err
+			}
+			logf("平台 %s 已登录 @%s（令牌来源：%s），写入 %s", host, login, source, writePath)
+			return nil
+		}
+		logf("检测到 tea CLI 登录但令牌不可用（%v），改用 OAuth 登录", authErr)
+	}
+
 	result, err := setup.OAuthLogin(ctx, setup.OAuthOptions{
 		Host:         host,
 		ClientID:     options.OAuthClientID,
@@ -76,39 +111,53 @@ func runLogin(command *cobra.Command, configPath, argHost string, options *login
 	if err != nil {
 		return err
 	}
-	writePath, file, err := loadInstanceFileForSetup(configPath)
-	if err != nil {
-		return err
-	}
-	if file == nil {
-		file = &instances.File{}
-	}
 	credential := &instances.OAuthCredential{
 		ClientID:     firstNonEmpty(options.OAuthClientID, setup.DefaultOAuthClientID),
 		ClientSecret: strings.TrimSpace(options.OAuthSecret),
 		RefreshToken: result.RefreshToken,
 	}
-	replaced := false
+	upsertLoginInstance(file, host, func(instance *instances.Instance) {
+		instance.AdminOAuth = credential
+	})
+	if err := saveLoginFile(file, writePath); err != nil {
+		return err
+	}
+	logf("平台 %s 已登录 @%s（凭据写入 %s）", host, result.Login, writePath)
+	return nil
+}
+
+// resolveLoginToken 解析登录令牌：显式 --token 优先，否则复用 tea CLI 配置中
+// 本站点的登录；返回来源描述（空表示没有可用令牌）。
+func resolveLoginToken(host, explicitToken string, getenv func(string) string) (token, source string) {
+	if value := strings.TrimSpace(explicitToken); value != "" {
+		return value, "--token"
+	}
+	if value, path, ok := repoinstall.DetectTeaToken(host, getenv); ok {
+		return value, "tea config（" + path + "）"
+	}
+	return "", ""
+}
+
+// upsertLoginInstance 按 host 更新/新增实例条目；保留未触碰的字段。
+func upsertLoginInstance(file *instances.File, host string, mutate func(*instances.Instance)) {
 	for index := range file.Instances {
 		if sameHost(file.Instances[index].Host, host) {
 			file.Instances[index].Host = host
-			file.Instances[index].AdminOAuth = credential
-			replaced = true
-			break
+			mutate(&file.Instances[index])
+			return
 		}
 	}
-	if !replaced {
-		file.Instances = append(file.Instances, instances.Instance{Host: host, AdminOAuth: credential})
-	}
+	instance := instances.Instance{Host: host}
+	mutate(&instance)
+	file.Instances = append(file.Instances, instance)
+}
+
+func saveLoginFile(file *instances.File, path string) error {
 	file.Normalize()
 	if err := file.Validate(); err != nil {
 		return err
 	}
-	if err := instances.Save(writePath, file); err != nil {
-		return err
-	}
-	logf("平台 %s 已登录 @%s，凭据写入 %s", host, result.Login, writePath)
-	return nil
+	return instances.Save(path, file)
 }
 
 // resolveLoginHost 决定登录哪个平台：显式地址 > 配置中唯一实例 > Gitea remote 探测。

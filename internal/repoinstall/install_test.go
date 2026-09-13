@@ -258,8 +258,9 @@ func TestInstallSkipsSkillsWithNoneSource(t *testing.T) {
 func TestDetectTokenOrder(t *testing.T) {
 	configDir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", configDir)
+	t.Setenv("TEA_CONFIG", filepath.Join(configDir, "tea-config.yml"))
 	t.Setenv("GITEA_ACCESS_TOKEN", "env-token")
-	if token, source, ok := DetectToken(os.Getenv); !ok || token != "env-token" || source != "GITEA_ACCESS_TOKEN" {
+	if token, source, ok := DetectToken("https://gitea.example.com", os.Getenv); !ok || token != "env-token" || source != "GITEA_ACCESS_TOKEN" {
 		t.Errorf("DetectToken() = %q %q %v, want env token", token, source, ok)
 	}
 	t.Setenv("GITEA_ACCESS_TOKEN", "")
@@ -270,8 +271,48 @@ func TestDetectTokenOrder(t *testing.T) {
 	if err := os.WriteFile(ours, []byte("file-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if token, source, ok := DetectToken(os.Getenv); !ok || token != "file-token" || source != ours {
+	if token, source, ok := DetectToken("https://gitea.example.com", os.Getenv); !ok || token != "file-token" || source != ours {
 		t.Errorf("DetectToken() = %q %q %v, want file token", token, source, ok)
+	}
+
+	// 兜底：tea CLI 配置里的同站点登录
+	if err := os.Remove(ours); err != nil {
+		t.Fatal(err)
+	}
+	teaConfig := t.TempDir() + "/config.yml"
+	if err := os.WriteFile(teaConfig, []byte("logins:\n  - name: gitea\n    url: https://gitea.example.com\n    token: tea-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TEA_CONFIG", teaConfig)
+	if token, source, ok := DetectToken("https://gitea.example.com", os.Getenv); !ok ||
+		token != "tea-token" || !strings.Contains(source, "tea config") {
+		t.Errorf("DetectToken() = %q %q %v, want tea token", token, source, ok)
+	}
+}
+
+// tea CLI 登录检测：按站点匹配第一条 URL 且令牌非空的登录。
+func TestDetectTeaToken(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	content := `logins:
+    - name: other
+      url: https://other.example.com
+      token: other-token
+    - name: gitea
+      url: https://gitea.example.com
+      token: tea-token
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TEA_CONFIG", path)
+
+	token, source, ok := DetectTeaToken("https://gitea.example.com/", os.Getenv)
+	if !ok || token != "tea-token" || source != path {
+		t.Errorf("DetectTeaToken() = %q %q %v, want tea-token", token, source, ok)
+	}
+	if _, _, ok := DetectTeaToken("https://none.example.com", os.Getenv); ok {
+		t.Error("未登录站点不应命中")
 	}
 }
 

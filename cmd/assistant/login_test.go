@@ -107,3 +107,29 @@ func TestConfigResolutionIgnoresWorkingDirectory(t *testing.T) {
 		t.Fatalf("写配置落点 = %q, want %q", writePath, want)
 	}
 }
+
+// 登录令牌解析：显式 --token 优先，其次 tea CLI 配置，无匹配则为空。
+func TestResolveLoginToken(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	content := `logins:
+    - name: gitea
+      url: https://gitea.example.com
+      token: tea-token
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TEA_CONFIG", path)
+
+	if token, source := resolveLoginToken("https://gitea.example.com", "explicit-token", os.Getenv); token != "explicit-token" || source != "--token" {
+		t.Errorf("显式令牌 = %q %q", token, source)
+	}
+	token, source := resolveLoginToken("https://gitea.example.com/", "", os.Getenv)
+	if token != "tea-token" || !strings.Contains(source, "tea config") {
+		t.Errorf("tea 复用 = %q %q, want tea-token", token, source)
+	}
+	if token, _ := resolveLoginToken("https://other.example.com", "", os.Getenv); token != "" {
+		t.Errorf("未登录站点不应命中：%q", token)
+	}
+}

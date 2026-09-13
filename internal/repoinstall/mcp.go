@@ -87,19 +87,21 @@ func ResolveMCP(ctx context.Context, options MCPOptions) (MCPSpec, error) {
 	// token
 	if options.Token != "" {
 		spec.Token, spec.TokenSource = strings.TrimSpace(options.Token), "--token"
-	} else if token, source, ok := DetectToken(getenv); ok {
+	} else if token, source, ok := DetectToken(spec.Host, getenv); ok {
 		spec.Token, spec.TokenSource = token, source
 	}
 	if spec.Token == "" {
 		return MCPSpec{}, fmt.Errorf(
 			"无法检测访问令牌：设置 GITEA_ACCESS_TOKEN / GITEA_ACCESS_TOKEN_FILE，" +
-				"或写入 ~/.config/Cosmic-Developers-Union/assistant/token、~/.config/mmc/gitea-token")
+				"或写入 ~/.config/Cosmic-Developers-Union/assistant/token、~/.config/mmc/gitea-token、" +
+				"或用 tea CLI 登录对应站点")
 	}
 	return spec, nil
 }
 
 // DetectToken 按候选顺序探测当前开发者的令牌，返回令牌与来源描述。
-func DetectToken(getenv func(string) string) (token, source string, ok bool) {
+// host 用于匹配 tea CLI 配置里的登录站点。
+func DetectToken(host string, getenv func(string) string) (token, source string, ok bool) {
 	if value := strings.TrimSpace(getenv("GITEA_ACCESS_TOKEN")); value != "" {
 		return value, "GITEA_ACCESS_TOKEN", true
 	}
@@ -121,6 +123,10 @@ func DetectToken(getenv func(string) string) (token, source string, ok bool) {
 		if value := strings.TrimSpace(string(data)); value != "" {
 			return value, path, true
 		}
+	}
+	// 兜底：tea CLI 已登录同站点时复用其令牌
+	if token, source, ok := DetectTeaToken(host, getenv); ok {
+		return token, "tea config (" + source + ")", true
 	}
 	return "", "", false
 }
