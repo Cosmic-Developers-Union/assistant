@@ -258,6 +258,7 @@ func resolveDispatchTargets(
 		return nil, fmt.Errorf("获取当前目录: %w", err)
 	}
 	var targets []dispatchTarget
+	var skipped []string
 	matchedFilter := repoFlag == ""
 	for _, instance := range file.Instances {
 		repos := instance.Repos
@@ -274,7 +275,10 @@ func resolveDispatchTargets(
 			matchedFilter = true
 		}
 		if len(repos) == 0 {
-			return nil, fmt.Errorf("instance %s 未配置仓库（assistant setup 后写入 repos）", instance.Host)
+			// 已登记但未 setup 的实例（如仅 login）：跳过，不阻断其他实例
+			fmt.Fprintf(command.ErrOrStderr(), "跳过 %s：未配置仓库（assistant setup 后写入 repos）\n", instance.Host)
+			skipped = append(skipped, instance.Host)
+			continue
 		}
 		for _, repo := range repos {
 			target, err := resolveInstanceTarget(command, instance, repo, cwd, options)
@@ -288,6 +292,11 @@ func resolveDispatchTargets(
 		return nil, fmt.Errorf("仓库 %s 不在配置文件的 instances[].repos 中", repoFlag)
 	}
 	if len(targets) == 0 {
+		if len(skipped) > 0 {
+			return nil, fmt.Errorf(
+				"配置文件没有可运行的仓库（%s 未配置 repos，先 assistant setup）",
+				strings.Join(skipped, "、"))
+		}
 		return nil, fmt.Errorf("配置文件没有可运行的仓库")
 	}
 	return targets, nil
