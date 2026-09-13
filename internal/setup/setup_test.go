@@ -171,11 +171,11 @@ func TestConfigureActionsWritesExpectedRepoConfig(t *testing.T) {
 	if err := ConfigureActions(context.Background(), admin, instance, false, nil); err != nil {
 		t.Fatalf("ConfigureActions() error = %v", err)
 	}
-	if got := admin.secrets["acme/repo/"+ActionsSecretStateToken]; got != "merger-token" {
+	if got := admin.secrets["acme/repo/"+ActionsSecretMergeToken]; got != "merger-token" {
 		t.Errorf("state secret = %q", got)
 	}
 	if len(admin.secrets) != 1 {
-		t.Errorf("secrets = %+v, want only %s", admin.secrets, ActionsSecretStateToken)
+		t.Errorf("secrets = %+v, want only %s", admin.secrets, ActionsSecretMergeToken)
 	}
 }
 

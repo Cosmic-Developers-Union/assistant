@@ -15,6 +15,7 @@
 | `assistant actions` | 初始化 | 为配置中的仓库写入 Actions secrets（merge 令牌等；身份约定 ai/merge，无需 variable） |
 | `assistant install` | 开发者 | 在仓库检出内配置 skills / AGENTS.md / workflow / 各 AI CLI 的 MCP |
 | `assistant uninstall` | 开发者 | 移除 `install` 写入的内容（只触碰带 marker 的） |
+| `assistant doctor` | 开发者 | 检测当前仓库的 assistant 配置状态（缺失/过期/非托管/遗留，只读） |
 | `assistant mcp gitea` | 开发者 | MCP 包装层：自动检测项目站点与开发者令牌后拉起 gitea-mcp |
 | `assistant check` | 机器人 | 按标签检索待 triage 的 Issue 和待 review 的 PR（只读） |
 | `assistant sync` | 机器人 | 规范 Issue 标签并把 PR 原生评审状态同步为状态标签（单次执行） |
@@ -160,7 +161,7 @@ assistant actions --config /etc/assistant/config.json [--dry-run]
 
 | 名称 | 类型 | 值 | workflow 中的环境变量 |
 | --- | --- | --- | --- |
-| `STATE_TOKEN` | secret | merge 令牌（评审请求维护/分支保护读取/会签/合并） | automerge job 的 `GITEA_ACCESS_TOKEN` |
+| `MERGE_TOKEN` | secret | merge 令牌（评审请求维护/分支保护读取/会签/合并） | automerge job 的 `GITEA_ACCESS_TOKEN` |
 
 管理员凭据取自 `config.json`（`admin_token`，或 `admin_oauth` 刷新出的短期令牌）。
 
@@ -190,7 +191,7 @@ jobs:
       - run: assistant automerge --verbose
         env:
           GITEA_HOST: ${{ github.server_url }}
-          GITEA_ACCESS_TOKEN: ${{ secrets.STATE_TOKEN }}
+          GITEA_ACCESS_TOKEN: ${{ secrets.MERGE_TOKEN }}
           GITEA_REPOSITORY: ${{ github.repository }}
 ```
 
@@ -207,6 +208,7 @@ jobs:
 assistant install              # 配置全部（claude/opencode/codex）
 assistant install --dry-run    # 只输出将要写入的内容
 assistant install --image ...  # 覆盖 workflow 容器镜像
+assistant doctor               # 体检：对照当前模板/镜像检查缺失、过期、非托管、遗留
 assistant uninstall            # 移除 assistant 生成的内容
 ```
 
@@ -216,6 +218,8 @@ assistant uninstall            # 移除 assistant 生成的内容
 - `AGENTS.md`：assistant 段落（追加，不覆盖用户已有内容）；
 - `.gitea/workflows/assistant.yml`：单文件两个 job——sync（内置令牌）与 automerge（merge 令牌）；旧版 `automerge.yml` 带 marker 时自动清理；
 - MCP：Claude（`.mcp.json` + `.claude/settings.json` 放行 `mcp__gitea*`）、opencode（`opencode.json`，`gitea_*` 放行）、Codex（全局 `~/.codex/config.toml`，`approval_policy = "never"` 自动放行；若你已配置该键则保留）。zcode 暂不支持。
+
+`assistant doctor` 逐项输出 `OK / MISSING / OUTDATED / UNMANAGED / LEGACY`（缺失、与当前模板/镜像不一致、文件非 assistant 生成、旧版遗留），有问题时退出码 1；重新 `install` 即可修复。
 
 ### MCP 包装层与开发者令牌
 

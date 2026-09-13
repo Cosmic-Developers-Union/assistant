@@ -1,4 +1,4 @@
-# managed-by: assistant（assistant install 生成，可重复安装覆盖）
+# managed-by: assistant
 name: Gitea Assistant
 on:
   issues:
@@ -13,9 +13,6 @@ on:
     - cron: "*/5 * * * *"
   workflow_dispatch:
 jobs:
-  # 标准 sync：只做标签/评审请求意图维护，用 Actions 内置令牌
-  # （gitea-actions 权限模型）。身份是约定：内容评审者 ai、状态评审/合并 merge，
-  # 代码内置默认，无需配置。
   sync:
     runs-on: ubuntu-latest
     container:
@@ -26,10 +23,6 @@ jobs:
           GITEA_HOST: ${{ github.server_url }}
           GITEA_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITEA_REPOSITORY: ${{ github.repository }}
-  # 合并与官方评审请求维护：只需要 merge 令牌（STATE_TOKEN secret）——Gitea 只
-  # 允许 PR 作者或仓库管理员选择 reviewer（gitea-actions 会被拒），而 merge 是
-  # 仓库管理员协作者，分支保护读取/会签/合并都用自己的令牌完成。事件驱动下
-  # sync 之后立即执行：登记评论意图为官方请求、撤回遗留请求、门禁满足则合并。
   automerge:
     needs: sync
     runs-on: ubuntu-latest
@@ -39,5 +32,5 @@ jobs:
       - run: assistant automerge --verbose
         env:
           GITEA_HOST: ${{ github.server_url }}
-          GITEA_ACCESS_TOKEN: ${{ secrets.STATE_TOKEN }}
+          GITEA_ACCESS_TOKEN: ${{ secrets.MERGE_TOKEN }}
           GITEA_REPOSITORY: ${{ github.repository }}

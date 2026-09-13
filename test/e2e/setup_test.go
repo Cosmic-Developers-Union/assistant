@@ -380,8 +380,8 @@ func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 		t.Fatalf("ConfigureActions() error = %v", err)
 	}
 	secrets := listActionSecrets(t, host, adminToken, adminLogin, repositoryName)
-	if !slices.Contains(secrets, setup.ActionsSecretStateToken) {
-		t.Errorf("secrets = %v, want %s", secrets, setup.ActionsSecretStateToken)
+	if !slices.Contains(secrets, setup.ActionsSecretMergeToken) {
+		t.Errorf("secrets = %v, want %s", secrets, setup.ActionsSecretMergeToken)
 	}
 
 	// 幂等：重复 setup 复用令牌

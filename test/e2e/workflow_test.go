@@ -94,7 +94,7 @@ func TestInstalledWorkflowRunsOnGiteaRunner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	// 2) Actions 配置：唯一需要的是 merge 令牌（STATE_TOKEN）
+	// 2) Actions 配置：唯一需要的是 merge 令牌（MERGE_TOKEN）
 	actionsAdmin, err := setup.NewAdmin(ctx, setup.Options{Host: host, AdminToken: adminToken})
 	if err != nil {
 		t.Fatal(err)
@@ -338,14 +338,25 @@ func installAssetsToMain(
 	ctx := context.Background()
 	fullName := owner + "/" + repo
 	dir := t.TempDir()
-	if err := repoinstall.Install(ctx, repoinstall.Options{
+	installOptions := repoinstall.Options{
 		Dir:             dir,
 		Tools:           []string{"claude"},
 		CodexConfigPath: filepath.Join(dir, "codex.toml"),
 		Image:           image,
 		Log:             t.Logf,
-	}); err != nil {
+	}
+	if err := repoinstall.Install(ctx, installOptions); err != nil {
 		t.Fatalf("repoinstall.Install() error = %v", err)
+	}
+	// install 后 doctor 必须全绿（对照当前模板/镜像）
+	findings, err := repoinstall.Doctor(installOptions)
+	if err != nil {
+		t.Fatalf("repoinstall.Doctor() error = %v", err)
+	}
+	for _, finding := range findings {
+		if !finding.OK() {
+			t.Errorf("doctor 应报告配置正常: %+v", finding)
+		}
 	}
 	const branch = "e2e-install"
 	assets := append([]string{repoinstall.ManagedSkillPath(), repoinstall.ManagedAgentPath()}, repoinstall.ManagedWorkflowPaths()...)

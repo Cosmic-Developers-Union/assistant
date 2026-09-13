@@ -23,11 +23,11 @@ func newActionsCommand(configFlag *string) *cobra.Command {
 		Use:   "actions",
 		Short: "为配置中的仓库写入 Actions secrets（merge 令牌）",
 		Long: "为 config.json 中的每个仓库幂等写入仓库级 Actions 配置：\n" +
-			"  - secret STATE_TOKEN = 该项目专属 merge 令牌（唯一必需项）\n\n" +
+			"  - secret MERGE_TOKEN = 该项目专属 merge 令牌（唯一必需项）\n\n" +
 			"身份是约定（内容评审 ai、状态评审/合并 merge），sync 用 Actions 内置\n" +
 			"令牌，分支保护读取/评审请求维护/会签/合并都用 merge 令牌，因此无需\n" +
 			"variable 或额外的管理员令牌。名称不带 GITEA_ 前缀（Gitea 保留前缀），\n" +
-			"workflow 里映射到 GITEA_STATE_TOKEN。Gitea 的 secret 值只写不可读、\n" +
+			"workflow 里作为 automerge job 的 GITEA_ACCESS_TOKEN。Gitea 的 secret 值只写不可读、\n" +
 			"无法比对，因此每次运行都会覆盖写入；令牌轮换（如 setup 重建令牌）后\n" +
 			"必须重新运行本命令，否则仓库 workflow 会因陈旧令牌静默失败。",
 		Args: cobra.NoArgs,

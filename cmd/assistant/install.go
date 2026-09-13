@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"assistant/internal/repoinstall"
 
@@ -124,6 +125,53 @@ func newMCPCommand() *cobra.Command {
 	flags.StringVar(&giteaOptions.Dir, "dir", ".", "项目目录（缺省 cwd）")
 	mcpCommand.AddCommand(giteaCommand)
 	return mcpCommand
+}
+
+// newDoctorCommand 检测当前仓库的 assistant 配置状态：install 管理的文件/
+// 段落/MCP 是否缺失、过期、非托管或遗留。只读，发现问题时以非零退出码结束。
+func newDoctorCommand() *cobra.Command {
+	options := &repoToolOptions{}
+	command := &cobra.Command{
+		Use:   "doctor",
+		Short: "检测当前仓库的 assistant 配置状态（缺失/过期/非托管/遗留）",
+		Long: "对照当前版本的模板与镜像，检测仓库里 install 管理的配置：\n" +
+			"  - .claude/skills/review/SKILL.md、AGENTS.md、.gitea/workflows/assistant.yml\n" +
+			"  - MCP 配置（claude/opencode/codex，按 --tools）\n" +
+			"只读；发现问题时以退出码 1 结束，重新运行 assistant install 可修复。",
+		Args: cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			findings, err := repoinstall.Doctor(options.repoOptions(command))
+			if err != nil {
+				return err
+			}
+			stdout := command.OutOrStdout()
+			problems := 0
+			for _, finding := range findings {
+				status := strings.ToUpper(finding.Status)
+				if !finding.OK() {
+					problems++
+				}
+				if finding.Detail != "" {
+					fmt.Fprintf(stdout, "%-9s %s — %s\n", status, finding.Path, finding.Detail)
+				} else {
+					fmt.Fprintf(stdout, "%-9s %s\n", status, finding.Path)
+				}
+			}
+			fmt.Fprintln(stdout, repoinstall.Summary(findings))
+			if problems > 0 {
+				return fmt.Errorf("发现 %d 处配置问题（重新运行 assistant install 可修复）", problems)
+			}
+			return nil
+		},
+	}
+	flags := command.Flags()
+	flags.StringVar(&options.Dir, "dir", ".", "仓库检出目录")
+	flags.StringSliceVar(&options.Tools, "tools", nil,
+		"要检测的 AI CLI（缺省全部："+joinTools()+"; zcode 暂不支持）")
+	flags.StringVar(&options.CodexPath, "codex-config", "", "覆盖 ~/.codex/config.toml 路径")
+	flags.StringVar(&options.Image, "image", "",
+		"workflow 容器镜像（缺省 "+repoinstall.DefaultImage+"）")
+	return command
 }
 
 func joinTools() string {

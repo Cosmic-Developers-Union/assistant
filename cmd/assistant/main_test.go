@@ -44,6 +44,7 @@ func TestRootCommandShowsHelpWithoutArguments(t *testing.T) {
 		!strings.Contains(output, "install") ||
 		!strings.Contains(output, "uninstall") ||
 		!strings.Contains(output, "mcp") ||
+		!strings.Contains(output, "doctor") ||
 		!strings.Contains(output, "run") ||
 		!strings.Contains(output, "list") ||
 		!strings.Contains(output, "review") ||

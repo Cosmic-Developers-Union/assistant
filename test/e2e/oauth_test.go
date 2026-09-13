@@ -169,8 +169,8 @@ func TestSetupWithOAuthEndToEnd(t *testing.T) {
 		t.Fatalf("ConfigureActions(oauth) error = %v", err)
 	}
 	secrets := listActionSecrets(t, env.Host, accessToken, adminLogin, repositoryName)
-	if !slices.Contains(secrets, setup.ActionsSecretStateToken) {
-		t.Errorf("OAuth actions secrets = %v, want %s", secrets, setup.ActionsSecretStateToken)
+	if !slices.Contains(secrets, setup.ActionsSecretMergeToken) {
+		t.Errorf("OAuth actions secrets = %v, want %s", secrets, setup.ActionsSecretMergeToken)
 	}
 
 	// 第二次初始化（不传 Existing）：机器人账号已存在、密码未知，管理员只有
