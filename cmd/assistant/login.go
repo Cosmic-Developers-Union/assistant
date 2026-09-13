@@ -47,12 +47,11 @@ func newLoginCommand(configFlag *string) *cobra.Command {
 	flags := command.Flags()
 	flags.StringVar(&options.Host, "host", "", "平台地址（与位置参数二选一）")
 	flags.StringVar(&options.OAuthClientID, "oauth-client-id", "",
-		"OAuth2 公共客户端 ID（缺省复用配置中已注册的 assistant 应用；没有时先创建公共应用或用管理员令牌运行 setup）")
+		"OAuth2 Client ID（缺省用 Gitea 内置 tea 公共客户端）")
 	flags.StringVar(&options.OAuthSecret, "oauth-client-secret", "", "OAuth2 客户端密钥（confidential 客户端才需要）")
 	flags.StringVar(&options.OAuthScope, "oauth-scope", "",
 		"授权 scope（如 all；缺省不带 scope。已有授权记录换 scope 会被 Gitea 拒绝，需撤销旧授权或用本参数对齐）")
-	flags.IntVar(&options.OAuthPort, "oauth-port", setup.DefaultOAuthPort,
-		"本地回调端口（缺省固定 53682，重定向 URI 为 http://127.0.0.1:53682；0 = 随机端口）")
+	flags.IntVar(&options.OAuthPort, "oauth-port", 0, "本地回调端口（0 = 随机空闲端口；tea 公共客户端允许任意 loopback 端口）")
 	command.AddCommand(newLoginListCommand(configFlag), newLoginRemoveCommand(configFlag))
 	return command
 }
@@ -66,23 +65,9 @@ func runLogin(command *cobra.Command, configPath, argHost string, options *login
 	if err != nil {
 		return err
 	}
-	writePath, file, err := loadInstanceFileForSetup(configPath)
-	if err != nil {
-		return err
-	}
-	if file == nil {
-		file = &instances.File{}
-	}
-	// 独立 OAuth 客户端：显式参数优先，其次配置中 setup 自动注册/上次登录记录
-	clientID := strings.TrimSpace(options.OAuthClientID)
-	if clientID == "" {
-		if stored, ok := findInstanceByHost(file, host); ok {
-			clientID = stored.OAuthClientID
-		}
-	}
 	result, err := setup.OAuthLogin(ctx, setup.OAuthOptions{
 		Host:         host,
-		ClientID:     clientID,
+		ClientID:     options.OAuthClientID,
 		ClientSecret: options.OAuthSecret,
 		Scope:        options.OAuthScope,
 		Port:         options.OAuthPort,
@@ -91,8 +76,15 @@ func runLogin(command *cobra.Command, configPath, argHost string, options *login
 	if err != nil {
 		return err
 	}
+	writePath, file, err := loadInstanceFileForSetup(configPath)
+	if err != nil {
+		return err
+	}
+	if file == nil {
+		file = &instances.File{}
+	}
 	credential := &instances.OAuthCredential{
-		ClientID:     clientID,
+		ClientID:     firstNonEmpty(options.OAuthClientID, setup.DefaultOAuthClientID),
 		ClientSecret: strings.TrimSpace(options.OAuthSecret),
 		RefreshToken: result.RefreshToken,
 	}
@@ -100,18 +92,13 @@ func runLogin(command *cobra.Command, configPath, argHost string, options *login
 	for index := range file.Instances {
 		if sameHost(file.Instances[index].Host, host) {
 			file.Instances[index].Host = host
-			file.Instances[index].OAuthClientID = clientID
 			file.Instances[index].AdminOAuth = credential
 			replaced = true
 			break
 		}
 	}
 	if !replaced {
-		file.Instances = append(file.Instances, instances.Instance{
-			Host:          host,
-			OAuthClientID: clientID,
-			AdminOAuth:    credential,
-		})
+		file.Instances = append(file.Instances, instances.Instance{Host: host, AdminOAuth: credential})
 	}
 	file.Normalize()
 	if err := file.Validate(); err != nil {

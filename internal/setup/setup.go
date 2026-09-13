@@ -28,15 +28,11 @@ import (
 
 // Options 是 setup 的输入。
 type Options struct {
-	Host          string
-	AdminToken    string
-	AdminUser     string
-	AdminPassword string
-	OAuth         *OAuthOptions
-	// OAuthClientID 指定 assistant 使用的 OAuth2 客户端（如管理员在
-	// <host>/-/admin/applications 创建的全局应用）；为空时自动注册/复用当前
-	// 管理员名下的 assistant 公共应用。
-	OAuthClientID     string
+	Host              string
+	AdminToken        string
+	AdminUser         string
+	AdminPassword     string
+	OAuth             *OAuthOptions
 	Repos             []string
 	ReviewerName      string
 	MergerName        string
@@ -96,19 +92,7 @@ type Admin interface {
 	// 身份名是约定（ai/merge），无需 variable。
 	SetRepoSecret(ctx context.Context, fullName, name, value string) error
 	DeleteRepoSecret(ctx context.Context, fullName, name string) error
-	// EnsureOAuthApplication 保证站点上存在名为 name 的公共 OAuth2 应用
-	// （PKCE，重定向 URI redirectURI），返回 client_id；已存在兼容应用时复用。
-	// assistant 使用自己的客户端，不复用内置 tea 客户端。
-	EnsureOAuthApplication(ctx context.Context, name, redirectURI string) (string, error)
 }
-
-// assistant 在 Gitea 上注册的独立 OAuth2 应用（公共客户端 + PKCE）。复用内置
-// tea 客户端会与其他工具的授权记录共享 (user, client_id) grant，scope 不一致
-// 时被 Gitea 拒绝（a grant exists with different scope）。
-const (
-	OAuthApplicationName     = "assistant"
-	OAuthApplicationRedirect = "http://127.0.0.1"
-)
 
 // ProtectionOptions 是 setup 统一写入的分支保护配置。
 type ProtectionOptions struct {
@@ -148,21 +132,6 @@ func Run(ctx context.Context, options Options, admin Admin) (instances.Instance,
 		instance = *options.Existing
 		instance.Host = options.Host
 		instance.Repos = nil
-	}
-	// 注册/复用 assistant 的 OAuth2 公共客户端（login 用）。显式指定时直接采用
-	// （例如管理员在 /-/admin/applications 创建的全局应用）；自动注册失败不阻断
-	// setup（login 可显式 --oauth-client-id）。
-	if explicit := strings.TrimSpace(options.OAuthClientID); explicit != "" {
-		instance.OAuthClientID = explicit
-		logf("使用指定的 OAuth 客户端：%s", explicit)
-	} else if !options.DryRun {
-		clientID, ensureErr := admin.EnsureOAuthApplication(ctx, OAuthApplicationName, OAuthApplicationRedirect)
-		if ensureErr != nil {
-			logf("提示：未注册 assistant OAuth 应用（%v）；assistant login 需 --oauth-client-id", ensureErr)
-		} else {
-			instance.OAuthClientID = clientID
-			logf("OAuth 客户端就绪：%s（客户端 %s）", OAuthApplicationName, clientID)
-		}
 	}
 
 	// reviewer（ai）：单一令牌——同一站点只有一个评审主机，令牌唯一从凭据

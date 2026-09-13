@@ -92,7 +92,7 @@ assistant login list                          # 列出平台：凭据类型（oa
 assistant login remove https://gitea.example.com   # 移除平台条目（不触碰 Gitea 侧账号/仓库）
 ```
 
-host 可省略：取配置中唯一实例，否则在带 Gitea remote 的检出内探测（`/api/v1/version`，多 remote 逐个尝试）。`--oauth-client-id/--oauth-client-secret/--oauth-port` 控制 OAuth 应用与回调端口：回调默认固定在 `http://127.0.0.1:53682`（`--oauth-port 0` 可退回随机端口；confidential 客户端必须与注册的重定向 URI 精确一致，公共客户端只注册 `http://127.0.0.1` 即可匹配任意 loopback 端口）；`--oauth-scope` 指定授权 scope（缺省不带；Gitea 会拒绝与已有授权记录 scope 不一致的请求，报 `a grant exists with different scope` 时在 `<host>/user/settings/applications` 撤销旧授权，或用该参数对齐）。`setup` 未指定 client_id 时会自动注册管理员名下的 `assistant` 公共应用；全局（实例级）应用只能在 `<host>/-/admin/applications` 手动创建后用 `--oauth-client-id` 指定（confidential 应用还需 `--oauth-client-secret`，在 `/-/admin/applications/oauth2/<id>` 查看并复制）。
+host 可省略：取配置中唯一实例，否则在带 Gitea remote 的检出内探测（`/api/v1/version`，多 remote 逐个尝试）。OAuth 默认复用 Gitea 内置 `tea` 公共客户端（回调 `http://127.0.0.1:<随机端口>`，公共客户端允许任意 loopback 端口）；`--oauth-client-id/--oauth-client-secret` 可换成自建应用（confidential 应用需提供密钥），`--oauth-scope` 指定授权 scope（缺省不带）。Gitea 会拒绝与已有授权记录 scope 不一致的请求（`a grant exists with different scope`）：到 `<host>/user/settings/applications` 撤销旧授权，或用 `--oauth-scope` 与旧记录对齐。
 
 ### 仓库初始化：assistant init
 
@@ -110,7 +110,7 @@ assistant deinit --purge       # 同时删除分支保护、移除 ai/merge 协�
 
 ### 初始化：assistant setup
 
-`setup` 把「评审 → 批准 → 会签 → 自动合并」闭环需要的一切配置好，幂等可重跑。管理员凭据支持多种方式（按优先级；OAuth scope 不一致的处理同 `login --oauth-scope`）：
+`setup` 把「评审 → 批准 → 会签 → 自动合并」闭环需要的一切配置好，幂等可重跑。管理员凭据支持多种方式（按优先级）：
 
 ```bash
 # 1. 管理员令牌（最直接；会写入配置供 automerge 使用）
@@ -122,10 +122,7 @@ assistant setup --host https://gitea.example.com \
 assistant setup --host https://gitea.example.com \
   --admin-token-file /run/secrets/gitea-admin-token --repos owner/repo
 
-# 3. OAuth2 浏览器登录（授权码 + PKCE；令牌不落盘）
-#    用管理员令牌跑过的 setup 会自动注册独立的 assistant 公共应用（当前管理员名下）；
-#    要实例级全局应用需管理员在 <host>/-/admin/applications 手动创建（REST API 不支持全局应用），
-#    再用 --oauth-client-id 指定（会写入 config 的 oauth_client_id 供 login 复用）
+# 3. OAuth2 浏览器登录（授权码 + PKCE；令牌不落盘，默认复用内置 tea 公共客户端）
 assistant setup --host https://gitea.example.com --oauth --repos owner/repo
 
 # 4. 管理员账号密码现场换取长期令牌（缺 --admin-password 时交互式输入，不回显）

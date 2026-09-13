@@ -74,6 +74,9 @@ func NewAdmin(ctx context.Context, options Options) (*giteaAdmin, error) {
 	if options.OAuth != nil {
 		oauthOptions := *options.OAuth
 		oauthOptions.Host = options.Host
+		if strings.TrimSpace(oauthOptions.ClientID) == "" {
+			oauthOptions.ClientID = DefaultOAuthClientID
+		}
 		if oauthOptions.Log == nil {
 			oauthOptions.Log = logf
 		}
@@ -414,44 +417,6 @@ func (a *giteaAdmin) DeleteRepoSecret(ctx context.Context, fullName, name string
 		return fmt.Errorf("删除 %s 的 Actions secret %s: %w", fullName, name, err)
 	}
 	return nil
-}
-
-// EnsureOAuthApplication 保证站点上存在名为 name 的公共 OAuth2 应用（PKCE），
-// 返回 client_id；已存在同名公共应用时复用。assistant 使用独立客户端，避免与
-// 内置 tea 客户端共享授权记录导致 scope 冲突。
-func (a *giteaAdmin) EnsureOAuthApplication(ctx context.Context, name, redirectURI string) (string, error) {
-	if a.sdk == nil {
-		return "", fmt.Errorf("缺少管理员令牌，无法注册 OAuth 应用")
-	}
-	applications, _, err := a.sdk.OAuth2.ListApplications(ctx, gitea.ListApplicationsOptions{
-		ListOptions: gitea.ListOptions{Page: 1, PageSize: 50},
-	})
-	if err != nil {
-		return "", fmt.Errorf("列出 OAuth2 应用: %w", err)
-	}
-	for _, application := range applications {
-		if application.Name != name {
-			continue
-		}
-		if application.ConfidentialClient {
-			return "", fmt.Errorf(
-				"已存在同名 confidential 应用 %s（不兼容 PKCE）；请在 %s/user/settings/applications 删除后重试",
-				name, strings.TrimRight(a.host, "/"))
-		}
-		return application.ClientID, nil
-	}
-	created, _, err := a.sdk.OAuth2.CreateApplication(ctx, gitea.CreateApplicationOption{
-		Name:               name,
-		ConfidentialClient: false,
-		RedirectURIs:       []string{redirectURI},
-	})
-	if err != nil {
-		return "", fmt.Errorf("创建 OAuth2 应用 %s: %w", name, err)
-	}
-	if created == nil || created.ClientID == "" {
-		return "", fmt.Errorf("创建 OAuth2 应用 %s 未返回 client_id", name)
-	}
-	return created.ClientID, nil
 }
 
 // resetPassword 由管理员重置机器人账号密码（仅用于以 Basic Auth 管理它自己

@@ -102,7 +102,6 @@ func runInit(command *cobra.Command, configPath string, args []string, options *
 	updated, err := setup.Run(ctx, setup.Options{
 		Host:               target.Host,
 		AdminToken:         adminToken,
-		OAuthClientID:      target.Instance.OAuthClientID,
 		Repos:              []string{target.FullName},
 		RequiredApprovals:  options.RequiredApprovals,
 		AllowAdminOverride: options.AllowAdminOverride,

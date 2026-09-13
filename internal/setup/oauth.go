@@ -18,12 +18,11 @@ import (
 )
 
 const (
+	// DefaultOAuthClientID 是 Gitea 内置的 `tea` 公共客户端（PKCE，无密钥）。
+	// 注册的重定向 URI 为 http://127.0.0.1，公共客户端允许任意 loopback 端口。
+	DefaultOAuthClientID = "d57cb8c4-630c-4168-8324-ec79935e18d4"
 	// oauthTimeout 是等待用户在浏览器完成授权时长。
 	oauthTimeout = 10 * time.Minute
-	// DefaultOAuthPort 是本地回调的固定端口：重定向 URI 稳定为
-	// http://127.0.0.1:53682，confidential 客户端要求精确注册该 URI；
-	// 公共客户端只注册 http://127.0.0.1 也能匹配任意 loopback 端口。
-	DefaultOAuthPort = 53682
 )
 
 // OAuthOptions 是一次 OAuth2 授权码 + PKCE 登录的参数。
@@ -104,13 +103,10 @@ func OAuthLogin(ctx context.Context, options OAuthOptions) (OAuthResult, error) 
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: httpTimeout}
 	}
-	host := strings.TrimRight(strings.TrimSpace(options.Host), "/")
 	if strings.TrimSpace(options.ClientID) == "" {
-		return OAuthResult{}, fmt.Errorf(
-			"缺少 OAuth2 Client ID：在 %s/user/settings/applications 创建公共应用（重定向 URI %s）并用 --oauth-client-id 指定，"+
-				"或先用管理员令牌运行 assistant setup 自动注册 %s 应用",
-			host, OAuthApplicationRedirect, OAuthApplicationName)
+		options.ClientID = DefaultOAuthClientID
 	}
+	host := strings.TrimRight(strings.TrimSpace(options.Host), "/")
 
 	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", options.Port))
 	if err != nil {

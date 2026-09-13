@@ -36,12 +36,9 @@ type Instance struct {
 	// AdminOAuth 是 OAuth 登录留下的刷新凭据：access token 短期有效不落盘，
 	// refresh token 长期有效，运行期按需换取（用 OAuth 初始化时写入）。
 	AdminOAuth *OAuthCredential `json:"admin_oauth,omitempty"`
-	// OAuthClientID 是 assistant 在该站点注册/使用的独立 OAuth2 公共客户端
-	// （setup 自动注册，login 复用），不复用内置 tea 客户端。
-	OAuthClientID string  `json:"oauth_client_id,omitempty"`
-	Reviewer      Account `json:"reviewer,omitempty"`
-	Merger        Account `json:"merger,omitempty"`
-	Repos         []Repo  `json:"repos"`
+	Reviewer   Account          `json:"reviewer,omitempty"`
+	Merger     Account          `json:"merger,omitempty"`
+	Repos      []Repo           `json:"repos"`
 }
 
 // OAuthCredential 是 OAuth2 刷新凭据。
@@ -170,7 +167,6 @@ func (f *File) Normalize() {
 // Normalize 填充 instance 内的默认值并清理空白，幂等。
 func (i *Instance) Normalize() {
 	i.Host = strings.TrimRight(strings.TrimSpace(i.Host), "/")
-	i.OAuthClientID = strings.TrimSpace(i.OAuthClientID)
 	if i.Reviewer.Name == "" {
 		i.Reviewer.Name = DefaultReviewerName
 	}

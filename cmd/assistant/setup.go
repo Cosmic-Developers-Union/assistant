@@ -78,13 +78,12 @@ func newSetupCommand(configFlag *string) *cobra.Command {
 		&options.OAuthClientID,
 		"oauth-client-id",
 		"",
-		"OAuth2 公共客户端 ID（缺省复用配置中已注册的 assistant 应用；没有时先在站点创建公共应用，或用管理员令牌运行 setup 自动注册）",
+		"OAuth2 Client ID（缺省用 Gitea 内置 tea 公共客户端；旧版 Gitea 需自建公共应用）",
 	)
 	flags.StringVar(&options.OAuthClientSecret, "oauth-client-secret", "", "OAuth2 Client Secret（公共客户端留空）")
 	flags.StringVar(&options.OAuthScope, "oauth-scope", "",
 		"授权 scope（如 all 或 read:user,write:repository；缺省不带 scope。已有授权记录换 scope 会被 Gitea 拒绝，需撤销旧授权或用本参数对齐）")
-	flags.IntVar(&options.OAuthPort, "oauth-port", setup.DefaultOAuthPort,
-		"OAuth 本地回调端口（缺省固定 53682，重定向 URI 为 http://127.0.0.1:53682；0 = 随机端口）")
+	flags.IntVar(&options.OAuthPort, "oauth-port", 0, "OAuth 本地回调端口（缺省随机空闲端口）")
 	flags.StringSliceVar(&options.Repos, "repos", nil, "仓库 owner/name（逗号分隔可多个；缺省取配置文件；两者皆空时只初始化账号与令牌）")
 	flags.StringVar(&options.ReviewerName, "reviewer", "", "内容评审账号名（缺省 ai）")
 	flags.StringVar(&options.MergerName, "merger", "", "状态评审/会签账号名（缺省 merge）")
@@ -196,13 +195,9 @@ func runSetup(command *cobra.Command, configPath string, options *setupOptions) 
 
 	var oauth *setup.OAuthOptions
 	if useOAuth {
-		clientID := options.OAuthClientID
-		if clientID == "" && existing != nil {
-			clientID = existing.OAuthClientID
-		}
 		oauth = &setup.OAuthOptions{
 			Host:         host,
-			ClientID:     clientID,
+			ClientID:     options.OAuthClientID,
 			ClientSecret: options.OAuthClientSecret,
 			Scope:        options.OAuthScope,
 			Port:         options.OAuthPort,
@@ -216,7 +211,6 @@ func runSetup(command *cobra.Command, configPath string, options *setupOptions) 
 		AdminUser:          options.AdminUser,
 		AdminPassword:      adminPassword,
 		OAuth:              oauth,
-		OAuthClientID:      options.OAuthClientID,
 		Repos:              repos,
 		ReviewerName:       options.ReviewerName,
 		MergerName:         options.MergerName,
