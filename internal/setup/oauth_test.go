@@ -211,3 +211,15 @@ func TestOAuthErrorHintsOnScopeMismatch(t *testing.T) {
 		t.Errorf("无关错误不应带 scope 提示：%s", plain)
 	}
 }
+
+func TestOAuthTokenErrorHintsOnConfidentialClient(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusUnauthorized)
+		_, _ = writer.Write([]byte(`{"error":"invalid_client","error_description":"invalid client secret"}`))
+	}))
+	defer server.Close()
+	_, err := requestOAuthToken(context.Background(), server.Client(), server.URL, url.Values{"grant_type": {"authorization_code"}})
+	if err == nil || !strings.Contains(err.Error(), "--oauth-client-secret") {
+		t.Errorf("error = %v, want confidential 客户端提示", err)
+	}
+}

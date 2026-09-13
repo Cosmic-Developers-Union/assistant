@@ -92,7 +92,7 @@ assistant login list                          # 列出平台：凭据类型（oa
 assistant login remove https://gitea.example.com   # 移除平台条目（不触碰 Gitea 侧账号/仓库）
 ```
 
-host 可省略：取配置中唯一实例，否则在带 Gitea remote 的检出内探测（`/api/v1/version`，多 remote 逐个尝试）。`--oauth-client-id/--oauth-client-secret/--oauth-port` 控制 OAuth 应用与回调端口；`--oauth-scope` 指定授权 scope（缺省不带；Gitea 会拒绝与已有授权记录 scope 不一致的请求，报 `a grant exists with different scope` 时在 `<host>/user/settings/applications` 撤销旧授权，或用该参数对齐）。`setup` 未指定 client_id 时会自动注册管理员名下的 `assistant` 公共应用；全局（实例级）应用只能在 `<host>/-/admin/applications` 手动创建后用 `--oauth-client-id` 指定。
+host 可省略：取配置中唯一实例，否则在带 Gitea remote 的检出内探测（`/api/v1/version`，多 remote 逐个尝试）。`--oauth-client-id/--oauth-client-secret/--oauth-port` 控制 OAuth 应用与回调端口：回调默认固定在 `http://127.0.0.1:53682`（`--oauth-port 0` 可退回随机端口；confidential 客户端必须与注册的重定向 URI 精确一致，公共客户端只注册 `http://127.0.0.1` 即可匹配任意 loopback 端口）；`--oauth-scope` 指定授权 scope（缺省不带；Gitea 会拒绝与已有授权记录 scope 不一致的请求，报 `a grant exists with different scope` 时在 `<host>/user/settings/applications` 撤销旧授权，或用该参数对齐）。`setup` 未指定 client_id 时会自动注册管理员名下的 `assistant` 公共应用；全局（实例级）应用只能在 `<host>/-/admin/applications` 手动创建后用 `--oauth-client-id` 指定（confidential 应用还需 `--oauth-client-secret`，在 `/-/admin/applications/oauth2/<id>` 查看并复制）。
 
 ### 仓库初始化：assistant init
 

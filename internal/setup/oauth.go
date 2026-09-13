@@ -18,8 +18,12 @@ import (
 )
 
 const (
-	// oauthTimeout 是等待用户在浏览器完成授权的时长。
+	// oauthTimeout 是等待用户在浏览器完成授权时长。
 	oauthTimeout = 10 * time.Minute
+	// DefaultOAuthPort 是本地回调的固定端口：重定向 URI 稳定为
+	// http://127.0.0.1:53682，confidential 客户端要求精确注册该 URI；
+	// 公共客户端只注册 http://127.0.0.1 也能匹配任意 loopback 端口。
+	DefaultOAuthPort = 53682
 )
 
 // OAuthOptions 是一次 OAuth2 授权码 + PKCE 登录的参数。
@@ -289,7 +293,14 @@ func requestOAuthToken(
 		if message == "" {
 			message = strings.TrimSpace(string(body))
 		}
-		return oauthTokenPayload{}, fmt.Errorf("OAuth 令牌请求失败（HTTP %d）：%s", response.StatusCode, message)
+		lower := strings.ToLower(message + " " + payload.Error)
+		hint := ""
+		if strings.Contains(lower, "client") &&
+			(strings.Contains(lower, "secret") || strings.Contains(lower, "invalid_client") ||
+				strings.Contains(lower, "authentication")) {
+			hint = "；若应用是 confidential 客户端，请用 --oauth-client-secret 提供密钥"
+		}
+		return oauthTokenPayload{}, fmt.Errorf("OAuth 令牌请求失败（HTTP %d）：%s%s", response.StatusCode, message, hint)
 	}
 	return payload, nil
 }

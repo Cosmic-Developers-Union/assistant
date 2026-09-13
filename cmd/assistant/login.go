@@ -51,7 +51,8 @@ func newLoginCommand(configFlag *string) *cobra.Command {
 	flags.StringVar(&options.OAuthSecret, "oauth-client-secret", "", "OAuth2 客户端密钥（confidential 客户端才需要）")
 	flags.StringVar(&options.OAuthScope, "oauth-scope", "",
 		"授权 scope（如 all；缺省不带 scope。已有授权记录换 scope 会被 Gitea 拒绝，需撤销旧授权或用本参数对齐）")
-	flags.IntVar(&options.OAuthPort, "oauth-port", 0, "本地回调端口（0 = 随机空闲端口）")
+	flags.IntVar(&options.OAuthPort, "oauth-port", setup.DefaultOAuthPort,
+		"本地回调端口（缺省固定 53682，重定向 URI 为 http://127.0.0.1:53682；0 = 随机端口）")
 	command.AddCommand(newLoginListCommand(configFlag), newLoginRemoveCommand(configFlag))
 	return command
 }
