@@ -17,6 +17,20 @@ IMAGE ?= assistant:dev
 # 安装前缀（make install；DESTDIR 支持打包场景）
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
+INSTALL_DIR := $(DESTDIR)$(BINDIR)
+
+# 安装目标目录当前是否可写（不存在时向上找最近的存在目录）
+INSTALL_WRITABLE := $(shell \
+	if [ -e "$(INSTALL_DIR)" ]; then \
+		[ -w "$(INSTALL_DIR)" ] && echo yes; \
+	else \
+		d="$(INSTALL_DIR)"; \
+		while [ ! -e "$$d" ] && [ "$$d" != "/" ]; do d=$$(dirname "$$d"); done; \
+		[ -w "$$d" ] && echo yes; \
+	fi)
+
+# 非 root 且目标不可写时自动 sudo（已 root 或可写目录如 PREFIX=$HOME/.local 则不 sudo）
+SUDO := $(shell [ "$$(id -u)" != "0" ] && [ "$(INSTALL_WRITABLE)" != "yes" ] && echo sudo)
 
 .PHONY: help
 help: ## 显示帮助信息
@@ -51,11 +65,11 @@ build-local: ## 构建本地平台二进制 (用于开发测试)
 	@echo "==> 构建完成: $(BINARY_NAME)"
 
 .PHONY: install
-install: build-local ## 先构建再安装到本机 (缺省 /usr/local/bin；可 PREFIX=~/.local)
-	@echo "==> 安装 $(BINARY_NAME) 到 $(DESTDIR)$(BINDIR)..."
-	install -d "$(DESTDIR)$(BINDIR)"
-	install -m 0755 $(BINARY_NAME) "$(DESTDIR)$(BINDIR)/$(BINARY_NAME)"
-	@echo "==> 已安装: $(DESTDIR)$(BINDIR)/$(BINARY_NAME)"
+install: build-local ## 先构建再安装到本机 (缺省 /usr/local；非 root 自动 sudo，PREFIX=$HOME/.local 可免)
+	@echo "==> 安装 $(BINARY_NAME) 到 $(INSTALL_DIR)...$(if $(SUDO),（需要 sudo）)"
+	$(SUDO) install -d "$(INSTALL_DIR)"
+	$(SUDO) install -m 0755 $(BINARY_NAME) "$(INSTALL_DIR)/$(BINARY_NAME)"
+	@echo "==> 已安装: $(INSTALL_DIR)/$(BINARY_NAME)"
 	@echo "    shell 补全: source <($(BINARY_NAME) completion bash)（或写入系统补全目录）"
 
 .PHONY: test
