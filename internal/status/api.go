@@ -617,6 +617,9 @@ func (c *Client) ListRepositoryLabels(ctx context.Context, repository Repository
 			gitea.ListLabelsOptions{ListOptions: gitea.ListOptions{Page: page, PageSize: pageSize}},
 		)
 		if err != nil {
+			if response != nil && response.StatusCode == http.StatusForbidden {
+				return nil, &PermissionError{Operation: "list repository labels"}
+			}
 			return nil, fmt.Errorf("list repository labels page %d: %w", page, err)
 		}
 		for _, label := range labels {

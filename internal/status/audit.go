@@ -62,67 +62,72 @@ func (c *Client) AuditRepository(ctx context.Context, repository Repository, opt
 		findings = append(findings, AuditFinding{Path: path, Status: status, Detail: detail})
 	}
 
-	// 分支保护：统一策略（读取需要仓库管理员；权限不足时跳过其余检查）
+	// 每一项检查独立执行：某一项权限不足只标记 SKIPPED，不阻断其余检查。
+	// 分支保护：统一策略
 	protections, err := c.ListBranchProtections(ctx, repository)
-	if IsPermissionError(err) {
-		add("branch protection", AuditStatusSkipped, "读取被拒（需要仓库管理员）")
-		return findings, nil
-	}
-	if err != nil {
+	switch {
+	case IsPermissionError(err):
+		add("branch protection "+options.Branch, AuditStatusSkipped, "读取被拒（需要仓库管理员）")
+	case err != nil:
 		return nil, err
-	}
-	var protection *BranchProtection
-	for index := range protections {
-		if protections[index].RuleName == options.Branch {
-			protection = &protections[index]
-			break
+	default:
+		var protection *BranchProtection
+		for index := range protections {
+			if protections[index].RuleName == options.Branch {
+				protection = &protections[index]
+				break
+			}
 		}
-	}
-	if protection == nil {
-		add("branch protection "+options.Branch, AuditStatusMissing, "未配置分支保护")
-	} else {
-		if options.RequiredApprovals > 0 && protection.RequiredApprovals != options.RequiredApprovals {
-			add("branch protection approvals", AuditStatusOutdated,
-				fmt.Sprintf("required approvals=%d, want %d", protection.RequiredApprovals, options.RequiredApprovals))
-		}
-		if !protection.EnableMergeWhitelist || !slices.Equal(protection.MergeWhitelistUsernames, []string{options.Merger}) {
-			add("branch protection merge whitelist", AuditStatusOutdated,
-				fmt.Sprintf("合并白名单=%v, want 仅 %s", protection.MergeWhitelistUsernames, options.Merger))
-		}
-		if !protection.BlockOnRejectedReviews {
-			add("branch protection rejected reviews", AuditStatusOutdated, "应阻塞被驳回的评审")
-		}
-		if !protection.BlockOnOfficialReviewRequests {
-			add("branch protection official requests", AuditStatusOutdated, "应阻塞未回应的官方评审请求")
-		}
-		if !protection.DismissStaleApprovals {
-			add("branch protection dismiss stale", AuditStatusOutdated, "推送应作废旧批准")
-		}
-		if !protection.BlockOnOutdatedBranch {
-			add("branch protection outdated branch", AuditStatusOutdated, "应阻塞落后分支")
-		}
-		if !options.AllowAdminOverride && !protection.BlockAdminMergeOverride {
-			add("branch protection admin override", AuditStatusOutdated, "管理员须遵守分支保护规则")
+		if protection == nil {
+			add("branch protection "+options.Branch, AuditStatusMissing, "未配置分支保护")
+		} else {
+			if options.RequiredApprovals > 0 && protection.RequiredApprovals != options.RequiredApprovals {
+				add("branch protection approvals", AuditStatusOutdated,
+					fmt.Sprintf("required approvals=%d, want %d", protection.RequiredApprovals, options.RequiredApprovals))
+			}
+			if !protection.EnableMergeWhitelist || !slices.Equal(protection.MergeWhitelistUsernames, []string{options.Merger}) {
+				add("branch protection merge whitelist", AuditStatusOutdated,
+					fmt.Sprintf("合并白名单=%v, want 仅 %s", protection.MergeWhitelistUsernames, options.Merger))
+			}
+			if !protection.BlockOnRejectedReviews {
+				add("branch protection rejected reviews", AuditStatusOutdated, "应阻塞被驳回的评审")
+			}
+			if !protection.BlockOnOfficialReviewRequests {
+				add("branch protection official requests", AuditStatusOutdated, "应阻塞未回应的官方评审请求")
+			}
+			if !protection.DismissStaleApprovals {
+				add("branch protection dismiss stale", AuditStatusOutdated, "推送应作废旧批准")
+			}
+			if !protection.BlockOnOutdatedBranch {
+				add("branch protection outdated branch", AuditStatusOutdated, "应阻塞落后分支")
+			}
+			if !options.AllowAdminOverride && !protection.BlockAdminMergeOverride {
+				add("branch protection admin override", AuditStatusOutdated, "管理员须遵守分支保护规则")
+			}
 		}
 	}
 
 	// 标签体系：与 sync 同口径（名称齐全、scoped 互斥）
 	labels, err := c.ListRepositoryLabels(ctx, repository)
-	if err != nil {
+	switch {
+	case IsPermissionError(err):
+		add("labels", AuditStatusSkipped, "读取被拒")
+	case err != nil:
 		return nil, err
-	}
-	byName := make(map[string]Label, len(labels))
-	for _, label := range labels {
-		byName[label.Name] = label
-	}
-	for _, definition := range LabelDefinitions() {
-		label, ok := byName[definition.Name]
-		if !ok {
-			add("label "+definition.Name, AuditStatusMissing, "标签缺失")
-			continue
+	default:
+		byName := make(map[string]Label, len(labels))
+		for _, label := range labels {
+			byName[label.Name] = label
 		}
-		if definition.Exclusive && !label.Exclusive {
-			add("label "+definition.Name, AuditStatusOutdated, "scoped 标签应设为互斥")
+		for _, definition := range LabelDefinitions() {
+			label, ok := byName[definition.Name]
+			if !ok {
+				add("label "+definition.Name, AuditStatusMissing, "标签缺失")
+				continue
+			}
+			if definition.Exclusive && !label.Exclusive {
+				add("label "+definition.Name, AuditStatusOutdated, "scoped 标签应设为互斥")
+			}
 		}
 	}
 
@@ -135,7 +140,11 @@ func (c *Client) AuditRepository(ctx context.Context, repository Repository, opt
 			continue
 		}
 		permission, err := c.GetCollaboratorPermission(ctx, repository, want.name)
-		if err != nil {
+		switch {
+		case IsPermissionError(err):
+			add("collaborator "+want.name, AuditStatusSkipped, "读取被拒（需要仓库管理员）")
+			continue
+		case err != nil:
 			return nil, err
 		}
 		switch {

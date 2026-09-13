@@ -161,7 +161,20 @@ func TestAuditRepositorySkipsWithoutPermission(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AuditRepository() error = %v", err)
 	}
-	if len(findings) != 1 || findings[0].Status != AuditStatusSkipped || !findings[0].OK() {
-		t.Errorf("权限不足时应跳过而非报错: %+v", findings)
+	// 权限不足只让对应项 SKIPPED，其余检查照常执行（不整体报错、不整体跳过）
+	wantPaths := []string{
+		"branch protection main",
+		"labels",
+		"collaborator ai",
+		"collaborator merge",
+		"actions secret MERGE_TOKEN",
+	}
+	if len(findings) != len(wantPaths) {
+		t.Fatalf("findings = %+v, want %d 项", findings, len(wantPaths))
+	}
+	for index, finding := range findings {
+		if finding.Path != wantPaths[index] || finding.Status != AuditStatusSkipped || !finding.OK() {
+			t.Errorf("findings[%d] = %+v, want %s/SKIPPED", index, finding, wantPaths[index])
+		}
 	}
 }

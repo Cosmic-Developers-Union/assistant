@@ -114,10 +114,11 @@ func auditServer(
 		return nil, "", err
 	}
 
-	// 凭据：实例配置优先（管理员令牌可做全部检查），否则 env 单实例模式
+	// 凭据：实例配置优先（登录/setup 写入的 admin 令牌或 OAuth 刷新凭据），
+	// 否则 env 单实例模式
 	var token, reviewer, merger string
 	if fromConfig {
-		instance, ok := findInstance(file, host, fullName)
+		instance, ok := findInstanceByHost(file, host)
 		if !ok {
 			return nil, "", nil
 		}
@@ -193,6 +194,8 @@ func resolveServerTargetWithProbe(
 				}
 			}
 		}
+		// remote 与实例 host 匹配：优先仓库也已登记的实例，其次 host 命中即可
+		// （login 只表达作者身份，当前仓库未必在 repos[] 里）
 		for _, remote := range remotes {
 			for _, instance := range file.Instances {
 				if !sameHost(instance.Host, remote.Host) {
@@ -204,6 +207,16 @@ func resolveServerTargetWithProbe(
 					}
 				}
 			}
+		}
+		for _, remote := range remotes {
+			for _, instance := range file.Instances {
+				if sameHost(instance.Host, remote.Host) {
+					return instance.Host, remote.Repository, true
+				}
+			}
+		}
+		if repositoryFlag != "" && len(file.Instances) == 1 {
+			return file.Instances[0].Host, repositoryFlag, true
 		}
 	}
 
@@ -222,17 +235,13 @@ func sameHost(a, b string) bool {
 	return strings.EqualFold(strings.TrimRight(a, "/"), strings.TrimRight(b, "/"))
 }
 
-// findInstance 按站点（可空）与仓库全名定位实例配置。
-func findInstance(file *instances.File, host, fullName string) (instances.Instance, bool) {
-	normalizedHost := strings.TrimRight(host, "/")
+// findInstanceByHost 按站点定位实例配置：当前仓库可以不在 repos[] 中——
+// login/setup 写入的 admin 凭据表达的是平台（作者）身份，doctor 用它检查
+// 当前仓库的服务端配置。
+func findInstanceByHost(file *instances.File, host string) (instances.Instance, bool) {
 	for _, instance := range file.Instances {
-		if normalizedHost != "" && strings.TrimRight(instance.Host, "/") != normalizedHost {
-			continue
-		}
-		for _, repo := range instance.Repos {
-			if repo.Name == fullName {
-				return instance, true
-			}
+		if sameHost(instance.Host, host) {
+			return instance, true
 		}
 	}
 	return instances.Instance{}, false
