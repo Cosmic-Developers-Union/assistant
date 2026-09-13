@@ -14,6 +14,10 @@ GITEA_OWNER ?= owner
 # 容器镜像名（供 CI / 仓库级 Actions 使用）
 IMAGE ?= assistant:dev
 
+# 安装前缀（make install；DESTDIR 支持打包场景）
+PREFIX ?= /usr/local
+BINDIR ?= $(PREFIX)/bin
+
 .PHONY: help
 help: ## 显示帮助信息
 	@echo "assistant Makefile"
@@ -26,6 +30,7 @@ help: ## 显示帮助信息
 	@echo "示例:"
 	@echo "  make build               # 构建 assistant 二进制 (Linux/amd64)"
 	@echo "  make build-local         # 构建本地平台二进制"
+	@echo "  make install             # 先构建再安装到本机 (PREFIX 可改，缺省 /usr/local)"
 	@echo "  make test                # 运行测试"
 	@echo "  make push                # 手动发布: 构建并推送 latest 到 generic package registry"
 	@echo ""
@@ -44,6 +49,14 @@ build-local: ## 构建本地平台二进制 (用于开发测试)
 	@echo "==> 构建本地平台二进制..."
 	go build -o $(BINARY_NAME) ./cmd/assistant
 	@echo "==> 构建完成: $(BINARY_NAME)"
+
+.PHONY: install
+install: build-local ## 先构建再安装到本机 (缺省 /usr/local/bin；可 PREFIX=~/.local)
+	@echo "==> 安装 $(BINARY_NAME) 到 $(DESTDIR)$(BINDIR)..."
+	install -d "$(DESTDIR)$(BINDIR)"
+	install -m 0755 $(BINARY_NAME) "$(DESTDIR)$(BINDIR)/$(BINARY_NAME)"
+	@echo "==> 已安装: $(DESTDIR)$(BINDIR)/$(BINARY_NAME)"
+	@echo "    shell 补全: source <($(BINARY_NAME) completion bash)（或写入系统补全目录）"
 
 .PHONY: test
 test: ## 运行测试

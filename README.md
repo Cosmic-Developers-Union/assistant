@@ -290,6 +290,7 @@ WantedBy=multi-user.target
 ```bash
 make test          # go test -v ./...
 make build-local   # 构建本地平台二进制（用于开发测试）
+make install       # 先构建再安装到本机（缺省 /usr/local/bin；PREFIX=~/.local 可免 sudo）
 make build         # 构建 Linux/amd64 静态二进制（与 CI 发布产物相同）
 make push          # 手动发布 latest 到 generic package registry（引导/紧急修复；需要 GITEA_HOST / GITEA_ACCESS_TOKEN）
 make clean         # 清理构建产物
