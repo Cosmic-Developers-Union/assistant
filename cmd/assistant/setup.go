@@ -30,6 +30,7 @@ type setupOptions struct {
 	AdminUser         string
 	AdminPassword     string
 	OAuth             bool
+	Relogin           bool
 	OAuthClientID     string
 	OAuthClientSecret string
 	OAuthPort         int
@@ -69,7 +70,8 @@ func newSetupCommand(configFlag *string) *cobra.Command {
 	flags.StringVar(&options.AdminTokenFile, "admin-token-file", "", "从文件读取管理员令牌（避免 shell 历史/进程参数泄露）")
 	flags.StringVar(&options.AdminUser, "admin-user", "", "管理员账号（换取长期令牌；缺密码时交互式输入）")
 	flags.StringVar(&options.AdminPassword, "admin-password", "", "管理员密码（仅用于换取令牌，不落盘）")
-	flags.BoolVar(&options.OAuth, "oauth", false, "用浏览器 OAuth2 登录（授权码 + PKCE；令牌不写入配置）")
+	flags.BoolVar(&options.OAuth, "oauth", false, "用浏览器 OAuth2 登录（优先复用配置中的管理员凭据；--relogin 强制登录）")
+	flags.BoolVar(&options.Relogin, "relogin", false, "忽略配置中的管理员凭据，强制 OAuth 重新登录（隐含 --oauth）")
 	flags.StringVar(
 		&options.OAuthClientID,
 		"oauth-client-id",
@@ -94,26 +96,15 @@ func runSetup(command *cobra.Command, configPath string, options *setupOptions) 
 		fmt.Fprintf(stdout, "[setup] %s\n", fmt.Sprintf(format, arguments...))
 	}
 
-	// setup 允许 --config 指向尚不存在的文件（首次初始化即创建）
-	path := strings.TrimSpace(configPath)
-	if path == "" {
-		path = strings.TrimSpace(os.Getenv("ASSISTANT_CONFIG"))
+	// 读取已有配置（--config 允许指向尚不存在的文件；否则依次找当前目录与
+	// 平台标准配置目录），并确定写回路径。
+	_, file, err := loadInstanceFileForSetup(configPath)
+	if err != nil {
+		return err
 	}
-	var file *instances.File
-	var err error
-	if path != "" {
-		if _, statErr := os.Stat(path); statErr == nil {
-			if file, err = instances.Load(path); err != nil {
-				return err
-			}
-		} else if !os.IsNotExist(statErr) {
-			return statErr
-		}
-	} else if _, statErr := os.Stat("config.json"); statErr == nil {
-		path = "config.json"
-		if file, err = instances.Load(path); err != nil {
-			return err
-		}
+	writePath, err := setupConfigWritePath(configPath)
+	if err != nil {
+		return err
 	}
 	// 定位目标 instance：--host 指定，否则要求配置文件恰好一个 instance
 	host := strings.TrimRight(strings.TrimSpace(options.Host), "/")
@@ -145,8 +136,11 @@ func runSetup(command *cobra.Command, configPath string, options *setupOptions) 
 	// 允许空仓库清单：只初始化实例（账号/令牌/OAuth 凭据），仓库配置留给
 	// 之后的 setup 运行补齐。
 
-	// 管理员凭据优先级：--admin-token > --admin-token-file > --oauth >
-	// 配置文件 admin_token > GITEA_ACCESS_TOKEN > --admin-user/--admin-password。
+	// 管理员凭据优先级：显式令牌（--admin-token/-file）> 配置里的 admin_token
+	// > GITEA_ACCESS_TOKEN > 配置里的 admin_oauth（用 refresh token 换取，不弹
+	// 浏览器）> --admin-user/--admin-password > OAuth 登录（需要 --oauth）。
+	// 也就是说：配置里已有可用管理凭据时，setup 重复运行不会要求重新登录；
+	// --relogin 可强制忽略凭据重新走 OAuth。
 	adminToken := strings.TrimSpace(options.AdminToken)
 	if adminToken == "" && strings.TrimSpace(options.AdminTokenFile) != "" {
 		data, readErr := os.ReadFile(options.AdminTokenFile)
@@ -158,15 +152,27 @@ func runSetup(command *cobra.Command, configPath string, options *setupOptions) 
 			return fmt.Errorf("令牌文件为空：%s", options.AdminTokenFile)
 		}
 	}
-	useOAuth := options.OAuth
-	if adminToken == "" && !useOAuth && existing != nil {
+	if adminToken == "" && existing != nil {
 		adminToken = existing.AdminToken
 	}
-	if adminToken == "" && !useOAuth {
+	if adminToken == "" {
 		adminToken = strings.TrimSpace(os.Getenv("GITEA_ACCESS_TOKEN"))
 	}
+	if adminToken == "" && !options.Relogin && existing != nil && existing.AdminOAuth != nil {
+		access, _, refreshErr := setup.RefreshOAuthToken(
+			command.Context(), host,
+			existing.AdminOAuth.ClientID, existing.AdminOAuth.ClientSecret, existing.AdminOAuth.RefreshToken,
+			nil,
+		)
+		if refreshErr == nil {
+			adminToken = access
+			logf("复用配置中的 OAuth 凭据（已用 refresh token 换取短期管理员令牌）")
+		} else {
+			logf("配置中的 OAuth 凭据已失效（%v），需要重新登录", refreshErr)
+		}
+	}
 	adminPassword := options.AdminPassword
-	if adminToken == "" && !useOAuth && options.AdminUser != "" && adminPassword == "" {
+	if adminToken == "" && options.AdminUser != "" && adminPassword == "" {
 		if !term.IsTerminal(int(os.Stdin.Fd())) {
 			return fmt.Errorf("缺少管理员密码：--admin-password（非交互环境）")
 		}
@@ -175,9 +181,10 @@ func runSetup(command *cobra.Command, configPath string, options *setupOptions) 
 			return fmt.Errorf("读取密码: %w", err)
 		}
 	}
-	if adminToken == "" && !useOAuth && options.AdminUser == "" {
+	useOAuth := adminToken == "" && options.AdminUser == "" && (options.OAuth || options.Relogin)
+	if adminToken == "" && options.AdminUser == "" && !useOAuth {
 		return fmt.Errorf(
-			"缺少管理员凭据：--admin-token / --admin-token-file / --oauth，或 --admin-user/--admin-password")
+			"缺少管理员凭据：--admin-token / --admin-token-file，或 --oauth 登录 / --admin-user 密码")
 	}
 
 	var oauth *setup.OAuthOptions
@@ -238,13 +245,6 @@ func runSetup(command *cobra.Command, configPath string, options *setupOptions) 
 		return err
 	}
 
-	writePath := path
-	if writePath == "" {
-		writePath = configPath
-	}
-	if writePath == "" {
-		writePath = "config.json"
-	}
 	if options.DryRun {
 		logf("dry-run：未写入 %s", writePath)
 	} else {
@@ -256,6 +256,42 @@ func runSetup(command *cobra.Command, configPath string, options *setupOptions) 
 	logf("完成：%s reviewer=%s merger=%s repos=%d", instance.Host,
 		instance.Reviewer.Name, instance.Merger.Name, len(instance.Repos))
 	return nil
+}
+
+// loadInstanceFileForSetup 读取已有配置供 setup 增量更新：显式 --config /
+// ASSISTANT_CONFIG 指向不存在的文件是允许的（首次创建）；否则依次查当前目录
+// 与平台标准配置目录（都不存在时返回 nil）。
+func loadInstanceFileForSetup(configPath string) (string, *instances.File, error) {
+	path := strings.TrimSpace(configPath)
+	if path == "" {
+		path = strings.TrimSpace(os.Getenv("ASSISTANT_CONFIG"))
+	}
+	if path != "" {
+		if _, err := os.Stat(path); err == nil {
+			file, err := instances.Load(path)
+			return path, file, err
+		} else if !os.IsNotExist(err) {
+			return "", nil, err
+		}
+		return path, nil, nil
+	}
+	if _, err := os.Stat("config.json"); err == nil {
+		file, err := instances.Load("config.json")
+		return "config.json", file, err
+	} else if !os.IsNotExist(err) {
+		return "", nil, err
+	}
+	standard, err := instances.DefaultConfigPath()
+	if err != nil {
+		return "", nil, nil
+	}
+	if _, err := os.Stat(standard); err == nil {
+		file, err := instances.Load(standard)
+		return standard, file, err
+	} else if !os.IsNotExist(err) {
+		return "", nil, err
+	}
+	return "", nil, nil
 }
 
 func cleanStrings(values []string) []string {

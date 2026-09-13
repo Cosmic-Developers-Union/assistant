@@ -104,14 +104,14 @@ func TestSetupWithOAuthEndToEnd(t *testing.T) {
 	if instance.AdminOAuth == nil || instance.AdminOAuth.RefreshToken == "" || instance.AdminOAuth.ClientID != clientID {
 		t.Fatalf("AdminOAuth = %+v, want persisted refresh credential", instance.AdminOAuth)
 	}
-	if instance.Reviewer.Token == "" || instance.Merger.Token == "" {
+	if instance.Reviewer.Token == "" || len(instance.Repos) != 1 || instance.Repos[0].MergerToken == "" {
 		t.Fatalf("bot tokens missing: %+v", instance)
 	}
 
 	// 机器人令牌由 OAuth 管理员通过「重置密码 + BasicAuth」链路创建，仍然可用
 	for _, account := range []struct{ name, token string }{
 		{instance.Reviewer.Name, instance.Reviewer.Token},
-		{instance.Merger.Name, instance.Merger.Token},
+		{instance.Merger.Name, instance.Repos[0].MergerToken},
 	} {
 		client, err := status.NewClient(env.Host, account.token)
 		if err != nil {

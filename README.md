@@ -43,7 +43,7 @@ assistant completion fish > ~/.config/fish/completions/assistant.fish
 
 ## 多实例配置（config.json）
 
-不指定配置文件时，所有命令维持环境变量单实例模式（`GITEA_HOST` / `GITEA_ACCESS_TOKEN` / `GITEA_REPOSITORY`）。要同时管理多台 Gitea、多个仓库，写一份 `config.json`（`--config` / `ASSISTANT_CONFIG` / 当前目录 `config.json` 依次生效，示例见 `config.example.json`），机器人命令与调度命令都会按 instance × repo 迭代：
+不指定配置文件时，所有命令维持环境变量单实例模式（`GITEA_HOST` / `GITEA_ACCESS_TOKEN` / `GITEA_REPOSITORY`）。要同时管理多台 Gitea、多个仓库，写一份 `config.json`。查找顺序：`--config` > `ASSISTANT_CONFIG` > 当前目录 `config.json` > 平台标准配置目录 `<UserConfigDir>/Cosmic-Developers-Union/assistant/config.json`（Linux `~/.config`、macOS `~/Library/Application Support`、Windows `%AppData%`）；示例见 `config.example.json`。机器人命令与调度命令都会按 instance × repo 迭代：
 
 ```json
 {
@@ -51,11 +51,16 @@ assistant completion fish > ~/.config/fish/completions/assistant.fish
     {
       "host": "https://gitea.example.com",
       "admin_token": "admin-personal-access-token",
+      "admin_oauth": { "client_id": "...", "refresh_token": "..." },
       "reviewer": { "name": "ai", "token": "created-by-assistant-setup" },
-      "merger": { "name": "merge", "token": "created-by-assistant-setup" },
+      "merger": { "name": "merge" },
       "repos": [
         "owner/repo",
-        { "name": "owner/another", "dir": "/srv/another" }
+        {
+          "name": "owner/another",
+          "dir": "/srv/another",
+          "merger_token": "created-by-assistant-setup"
+        }
       ]
     }
   ]
@@ -64,8 +69,9 @@ assistant completion fish > ~/.config/fish/completions/assistant.fish
 
 - `admin_token`（可选）：高权限令牌（repo admin），用于 `automerge` 读取分支保护、收窄必要检查 context。用 OAuth 初始化时不写 access token（短期有效），而是写入 `admin_oauth`（`client_id` + `refresh_token`），运行期按需刷新；两者都缺失时 `automerge` 回退为「任何失败 context 即阻塞」的严格模式。
 - `admin_oauth`（可选，setup 自动写入）：OAuth2 刷新凭据。`access_token` 不落盘，`refresh_token` 长期有效；`check`/`sync`/`automerge` 在需要读分支保护时现场换取短期令牌。
-- `reviewer` / `merger`：两个机器人账号与令牌；`name` 缺省 `ai` / `merge`，`token` 由 `setup` 生成。reviewer 是内容评审者（dispatcher 的完成判定与 `status/review` 请求检测都按它匹配），merger 是状态评审者（会签/合并）。**每个账号只保留一个有效令牌**：`setup` 每次运行都会把账号下多余的历史令牌收敛删除——同一站点同时只有一个评审主机（dispatcher 的单飞锁是进程内的，令牌唯一从凭据层面兜底）。
-- `repos`：仓库清单。字符串是 `owner/name` 简写；调度引擎的 `review`/`triage` 会话需要本地检出，多仓库时用对象形式给出 `dir`（单仓库可省略，退回启动目录的检出）。
+- `reviewer`（`ai`）：内容评审者，其令牌**全实例唯一**——同一站点同时只有一个评审主机（dispatcher 的单飞锁是进程内的，令牌唯一从凭据层面兜底）；`setup` 每次运行都会把该账号其余令牌收敛删除。
+- `merger`（`merge`）：状态评审者（会签/合并）。**令牌按仓库独立**，存放在每个 repo 条目的 `merger_token`：仓库级 Actions workflow 各自使用自己项目的令牌，互不影响、可独立轮换。令牌名由仓库全名哈希派生（`assistant-<sha256 前 8 位>`），稳定且便于识别；`setup` 只清理同名旧令牌与历史共享名，不动其他仓库的令牌。
+- `repos`：仓库清单。字符串是 `owner/name` 简写（有 `dir`/`merger_token` 时写对象）；调度引擎的 `review`/`triage` 会话需要本地检出，多仓库时给出 `dir`（单仓库可省略，退回启动目录的检出）。
 - 路径默认值按仓库隔离：日志 `<检出>/logs`、锁 `<检出>/dispatcher.lock`、worktree `<临时目录>/agent-dispatcher/<owner>-<repo>/worktrees`。
 - 文件含令牌，`setup` 以 0600 写入；请勿提交到版本库（`.gitignore` 已忽略常见位置，建议自行确认）。
 
@@ -91,6 +97,8 @@ assistant setup --host https://gitea.example.com \
   --admin-user <管理员账号> --repos owner/repo
 ```
 
+管理员凭据会**优先复用配置中已有的**：`admin_token` 直接使用；只有 `admin_oauth` 时先用 refresh token 换取短期令牌；都不可用且未提供令牌/密码时才需要 `--oauth` 浏览器登录。因此配置就绪后重复运行 `setup` 不会反复要求登录；确实要换账号时加 `--relogin` 强制重新授权。
+
 OAuth 登录说明：默认使用 Gitea 内置的 `tea` 公共客户端；内置客户端在部分已发布版本上仍是 confidential（会提示 Unregistered Redirect URI），此时在 Gitea「设置 → 应用 → 创建 OAuth2 应用」建一个**公共**客户端（重定向 URI 填 `http://127.0.0.1`，或与 `--oauth-port` 完全一致的 `http://127.0.0.1:<端口>`），再用
 `--oauth --oauth-client-id <Client ID>`（如有密钥再给 `--oauth-client-secret`）重跑。access token 不落盘，`refresh_token` 会写入 `admin_oauth` 供运行期刷新。
 
@@ -100,12 +108,12 @@ OAuth 登录说明：默认使用 Gitea 内置的 `tea` 公共客户端；内置
 
 1. 校验管理员身份；
 2. 复用/创建 `reviewer`（默认 `ai`）与 `merger`（默认 `merge`）账号（随机密码不落盘）；
-3. 收敛访问令牌：保留现有有效令牌或新建，**删除账号下所有历史令牌**——每个账号任何时刻只有一个令牌（同一站点不允许并行多评审主机）。建令牌端点仅接受 Basic Auth，必要时以管理员身份重置机器人密码后创建；
+3. 收敛令牌：reviewer 全实例唯一（删除账号下其余令牌）；merger **按仓库独立**——每个项目一个 `assistant-<hash8>` 令牌，只清理同名旧令牌与历史共享名，不动其他仓库。建令牌端点仅接受 Basic Auth，必要时以管理员身份重置机器人密码后创建；
 4. 把两个账号加为仓库协作者（write），并补齐与 `sync` 完全相同口径的标签体系；
 5. 在默认分支配置分支保护：`required approvals=2`（内容批准 + 状态会签）、驳回阻塞、过期批准作废、落后分支阻塞；
-6. 把结果写回 `config.json`（0600）。`--create-repos` 会在仓库不存在时自动创建私有仓库（auto_init，默认分支 main）。
+6. 把结果写回 `config.json`（0600；缺省落点优先当前目录已有文件，否则平台标准配置目录）。`--create-repos` 会在仓库不存在时自动创建私有仓库（auto_init，默认分支 main）。
 
-常用开关：`--dry-run`（只输出计划）、`--reviewer` / `--merger`（账号名）、`--required-approvals`、`--email-domain`。
+常用开关：`--dry-run`（只输出计划）、`--relogin`（强制 OAuth 重新登录）、`--reviewer` / `--merger`（账号名）、`--required-approvals`、`--email-domain`。
 
 ## 仓库辅助机器人
 

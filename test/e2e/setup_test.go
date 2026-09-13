@@ -107,12 +107,15 @@ func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if instance.Reviewer.Token == "" || instance.Merger.Token == "" {
+	if instance.Reviewer.Token == "" || len(instance.Repos) != 1 || instance.Repos[0].MergerToken == "" {
 		t.Fatalf("tokens missing: %+v", instance)
 	}
+	if instance.Merger.Token != "" {
+		t.Errorf("Merger.Token = %q, want per-repo tokens only", instance.Merger.Token)
+	}
 
-	// 机器人令牌可用且身份正确
-	for _, account := range []instances.Account{instance.Reviewer, instance.Merger} {
+	// 机器人令牌可用且身份正确（merger 用仓库专属令牌）
+	for _, account := range []instances.Account{instance.Reviewer, {Name: instance.Merger.Name, Token: instance.Repos[0].MergerToken}} {
 		client, err := status.NewClient(host, account.Token)
 		if err != nil {
 			t.Fatal(err)
@@ -300,7 +303,8 @@ func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rerun Run() error = %v", err)
 	}
-	if instance2.Reviewer.Token != instance.Reviewer.Token || instance2.Merger.Token != instance.Merger.Token {
+	if instance2.Reviewer.Token != instance.Reviewer.Token ||
+		instance2.Repos[0].MergerToken != instance.Repos[0].MergerToken {
 		t.Errorf("rerun regenerated tokens: %+v", instance2)
 	}
 

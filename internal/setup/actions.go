@@ -2,6 +2,7 @@ package setup
 
 import (
 	"context"
+	"fmt"
 
 	"assistant/internal/instances"
 )
@@ -21,7 +22,7 @@ const (
 // ConfigureActions 为 instance 的每个仓库幂等写入 Actions variables/secrets：
 //
 //   - STATE_REVIEWER（variable）= merger 账号名；
-//   - STATE_TOKEN（secret）= merger 令牌；
+//   - STATE_TOKEN（secret）= 该仓库专属的 merger 令牌；
 //   - BRANCH_PROTECTION_TOKEN（secret）= 静态 admin_token（仅在实例存有
 //     静态令牌时写；OAuth access token 短期有效，不适合放进仓库 secret）。
 //
@@ -44,8 +45,11 @@ func ConfigureActions(
 		if repo.Name == "" {
 			continue
 		}
+		if repo.MergerToken == "" && !dryRun {
+			return fmt.Errorf("%s: 缺少仓库专属 merger 令牌（先运行 setup）", repo.Name)
+		}
 		logf("%s: 写 Actions variable %s=%s", repo.Name, ActionsVariableStateReviewer, instance.Merger.Name)
-		logf("%s: 写 Actions secret %s（merger 令牌）", repo.Name, ActionsSecretStateToken)
+		logf("%s: 写 Actions secret %s（该项目专属 merger 令牌）", repo.Name, ActionsSecretStateToken)
 		writeBranchProtection := instance.AdminToken != ""
 		if writeBranchProtection {
 			logf("%s: 写 Actions secret %s（分支保护读取）", repo.Name, ActionsSecretBranchProtectionToken)
@@ -59,7 +63,7 @@ func ConfigureActions(
 		if err := admin.SetRepoVariable(ctx, repo.Name, ActionsVariableStateReviewer, instance.Merger.Name); err != nil {
 			return err
 		}
-		if err := admin.SetRepoSecret(ctx, repo.Name, ActionsSecretStateToken, instance.Merger.Token); err != nil {
+		if err := admin.SetRepoSecret(ctx, repo.Name, ActionsSecretStateToken, repo.MergerToken); err != nil {
 			return err
 		}
 		if writeBranchProtection {

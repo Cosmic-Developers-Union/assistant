@@ -14,7 +14,9 @@ package setup
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/url"
@@ -65,9 +67,13 @@ type Admin interface {
 	CreateUser(ctx context.Context, name, email string) error
 	// EnsurePassword 返回账号可用密码（本次创建或管理员重置）。
 	EnsurePassword(ctx context.Context, name string) (string, error)
-	// ConvergeToken 把账号令牌收敛为唯一一个：保留 keepToken（末 8 位匹配）
-	// 或新建，删除其余全部。
-	ConvergeToken(ctx context.Context, name, password, keepToken string) (token string, created bool, err error)
+	// ConvergeToken 收敛账号令牌为唯一一个：保留 keepToken（末 8 位匹配）
+	// 或新建 tokenName，删除其余全部（reviewer 用：单评审主机）。
+	ConvergeToken(ctx context.Context, name, password, tokenName, keepToken string) (token string, created bool, err error)
+	// EnsureRepoToken 保证 tokenName 令牌存在（保留 keepToken 或新建），只清理
+	// 同名旧令牌与历史共享名（assistant / assistant-setup-*），不影响账号下
+	// 其他仓库的独立令牌（merger 用：每项目独立令牌）。
+	EnsureRepoToken(ctx context.Context, name, password, tokenName, keepToken string) (token string, created bool, err error)
 	// ValidateToken 确认 token 属于 name 账号（用于复用已有令牌）。
 	ValidateToken(ctx context.Context, name, token string) (bool, error)
 	GetRepo(ctx context.Context, fullName string) (RepoInfo, bool, error)
@@ -109,20 +115,33 @@ func Run(ctx context.Context, options Options, admin Admin) (instances.Instance,
 		instance.Repos = nil
 	}
 
+	// reviewer（ai）：单一令牌——同一站点只有一个评审主机，令牌唯一从凭据
+	// 层面兜底（dispatcher 的单飞锁是进程内的）。
 	reviewerToken, reviewerCreated, err := ensureAccount(
 		ctx, admin, options, logf, options.ReviewerName, existingToken(instance.Reviewer, options.ReviewerName),
 	)
 	if err != nil {
 		return instances.Instance{}, err
 	}
-	mergerToken, mergerCreated, err := ensureAccount(
-		ctx, admin, options, logf, options.MergerName, existingToken(instance.Merger, options.MergerName),
-	)
+	if reviewerCreated {
+		logf("令牌已生成（写入 config 后请妥善保管）")
+	}
+
+	// merger（merge）：账号一个，令牌按仓库独立——仓库级 Actions workflow
+	// 各自使用自己项目的令牌，互不影响。
+	mergerExists, err := admin.UserExists(ctx, options.MergerName)
 	if err != nil {
 		return instances.Instance{}, err
 	}
-	if reviewerCreated || mergerCreated {
-		logf("令牌已生成（写入 config 后请妥善保管）")
+	if !mergerExists {
+		logf("创建账号 %s（邮箱 %s，随机密码不落盘）", options.MergerName, options.email(options.MergerName))
+		if !options.DryRun {
+			if err := admin.CreateUser(ctx, options.MergerName, options.email(options.MergerName)); err != nil {
+				return instances.Instance{}, err
+			}
+		}
+	} else {
+		logf("账号 %s 已存在", options.MergerName)
 	}
 
 	// 管理令牌：本次实际生效的优先（用户显式提供或由账号密码新生成），
@@ -137,14 +156,55 @@ func Run(ctx context.Context, options Options, admin Admin) (instances.Instance,
 	}
 	instance.AdminOAuth = admin.AdminOAuth()
 	instance.Reviewer = instances.Account{Name: options.ReviewerName, Token: reviewerToken}
-	instance.Merger = instances.Account{Name: options.MergerName, Token: mergerToken}
+	instance.Merger = instances.Account{Name: options.MergerName}
 	instance.Repos = make([]instances.Repo, 0, len(options.Repos))
+
+	var mergerPassword string
+	if !options.DryRun && len(options.Repos) > 0 {
+		mergerPassword, err = admin.EnsurePassword(ctx, options.MergerName)
+		if err != nil {
+			return instances.Instance{}, fmt.Errorf("准备 %s 的密码: %w", options.MergerName, err)
+		}
+	}
 
 	for _, fullName := range options.Repos {
 		repo := instances.Repo{Name: fullName}
 		if options.Existing != nil {
-			if existing, ok := options.Existing.FindRepo(fullName); ok {
-				repo = existing
+			if existingRepo, ok := options.Existing.FindRepo(fullName); ok {
+				repo = existingRepo
+			}
+		}
+		keep := repo.MergerToken
+		if keep != "" {
+			valid, validateErr := admin.ValidateToken(ctx, options.MergerName, keep)
+			switch {
+			case validateErr != nil:
+				logf("%s 的 merger 令牌校验失败（%v），将重建", fullName, validateErr)
+				keep = ""
+			case !valid:
+				logf("%s 的 merger 令牌已失效，将重建", fullName)
+				keep = ""
+			default:
+				logf("%s: 复用现有 merger 令牌", fullName)
+			}
+		}
+		tokenName := RepoTokenName(fullName)
+		if options.DryRun {
+			if keep != "" {
+				logf("%s: 保留 merger 令牌（名称 %s）", fullName, tokenName)
+			} else {
+				logf("%s: 生成独立 merger 令牌（名称 %s）", fullName, tokenName)
+			}
+		} else {
+			token, created, tokenErr := admin.EnsureRepoToken(
+				ctx, options.MergerName, mergerPassword, tokenName, keep,
+			)
+			if tokenErr != nil {
+				return instances.Instance{}, tokenErr
+			}
+			repo.MergerToken = token
+			if created {
+				logf("%s: 已生成独立 merger 令牌（名称 %s）", fullName, tokenName)
 			}
 		}
 		if err := setupRepository(ctx, options, admin, logf, fullName, reviewerToken); err != nil {
@@ -158,6 +218,16 @@ func Run(ctx context.Context, options Options, admin Admin) (instances.Instance,
 		return instances.Instance{}, err
 	}
 	return instance, nil
+}
+
+// ReviewerTokenName 是 reviewer 账号的唯一令牌名。
+const ReviewerTokenName = "assistant"
+
+// RepoTokenName 由仓库全名派生短令牌名：assistant-<sha256 前 8 位十六进制>。
+// 每个项目独立令牌且名称稳定可识别（同一账号下 Gitea 令牌名唯一）。
+func RepoTokenName(fullName string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(fullName))))
+	return "assistant-" + hex.EncodeToString(sum[:])[:8]
 }
 
 func setupRepository(
@@ -271,7 +341,7 @@ func ensureAccount(
 	if valid {
 		keep = existingToken
 	}
-	token, created, err = admin.ConvergeToken(ctx, name, password, keep)
+	token, created, err = admin.ConvergeToken(ctx, name, password, ReviewerTokenName, keep)
 	if err != nil {
 		return "", false, err
 	}

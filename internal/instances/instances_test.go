@@ -80,7 +80,7 @@ func TestSaveWritesRestrictedFileAndRoundTrips(t *testing.T) {
 		AdminOAuth: &OAuthCredential{ClientID: "client-1", ClientSecret: "secret-1", RefreshToken: "refresh-1"},
 		Reviewer:   Account{Name: "ai", Token: "reviewer-token"},
 		Merger:     Account{Name: "merge", Token: "merger-token"},
-		Repos:      []Repo{{Name: "owner/repo"}, {Name: "owner/another", Dir: "/srv/another"}},
+		Repos:      []Repo{{Name: "owner/repo", MergerToken: "repo-merger-token"}, {Name: "owner/another", Dir: "/srv/another"}},
 	}}}
 	if err := Save(path, file); err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -106,8 +106,8 @@ func TestSaveWritesRestrictedFileAndRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(raw), `"owner/repo"`) {
-		t.Errorf("shorthand repo should stay a string:\n%s", raw)
+	if !strings.Contains(string(raw), `"repo-merger-token"`) || !strings.Contains(string(raw), `"merger_token"`) {
+		t.Errorf("repo merger token should be persisted:\n%s", raw)
 	}
 }
 
@@ -127,10 +127,18 @@ func TestRepoJSONShapes(t *testing.T) {
 		t.Errorf("encoded = %s", encoded)
 	}
 	var object Repo
-	if err := json.Unmarshal([]byte(`{"name":"owner/repo","dir":"/srv/repo"}`), &object); err != nil {
+	if err := json.Unmarshal([]byte(`{"name":"owner/repo","dir":"/srv/repo","merger_token":"tok-1"}`), &object); err != nil {
 		t.Fatal(err)
 	}
-	if object.Dir != "/srv/repo" {
+	if object.Dir != "/srv/repo" || object.MergerToken != "tok-1" {
 		t.Errorf("object = %+v", object)
+	}
+	// 有 dir/merger_token 时序列化为对象（不丢字段）
+	encoded, err = json.Marshal(object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"merger_token":"tok-1"`) {
+		t.Errorf("encoded = %s", encoded)
 	}
 }

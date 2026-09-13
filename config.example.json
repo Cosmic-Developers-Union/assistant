@@ -8,14 +8,17 @@
         "token": "created-by-assistant-setup"
       },
       "merger": {
-        "name": "merge",
-        "token": "created-by-assistant-setup"
+        "name": "merge"
       },
       "repos": [
-        "owner/repo",
+        {
+          "name": "owner/repo",
+          "merger_token": "created-by-assistant-setup"
+        },
         {
           "name": "owner/another",
-          "dir": "/srv/another"
+          "dir": "/srv/another",
+          "merger_token": "created-by-assistant-setup"
         }
       ]
     }

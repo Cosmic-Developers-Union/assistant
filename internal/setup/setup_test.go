@@ -71,6 +71,9 @@ func (f *fakeAdmin) CreateUser(_ context.Context, name, _ string) error {
 	return nil
 }
 
+// tokenKey 模拟 Gitea 的「账号 + 令牌名」唯一键。
+func tokenKey(name, tokenName string) string { return name + "\x00" + tokenName }
+
 func (f *fakeAdmin) EnsurePassword(_ context.Context, name string) (string, error) {
 	if f.passwords == nil {
 		f.passwords = map[string]string{}
@@ -81,19 +84,51 @@ func (f *fakeAdmin) EnsurePassword(_ context.Context, name string) (string, erro
 	return f.passwords[name], nil
 }
 
-// ConvergeToken 模拟真实实现的收敛语义：保留有效令牌或新建，账号下至多一个。
-func (f *fakeAdmin) ConvergeToken(_ context.Context, name, _ /*password*/, keepToken string) (string, bool, error) {
-	if keepToken != "" && f.tokens[name] == keepToken {
-		return keepToken, false, nil
+// ConvergeToken 模拟 reviewer 语义：账号下只保留一个令牌。
+func (f *fakeAdmin) ConvergeToken(_ context.Context, name, _ /*password*/, tokenName, keepToken string) (string, bool, error) {
+	if keepToken != "" {
+		for key, value := range f.tokens {
+			if strings.HasPrefix(key, name+"\x00") && value == keepToken {
+				for other := range f.tokens {
+					if strings.HasPrefix(other, name+"\x00") && other != key {
+						delete(f.tokens, other)
+					}
+				}
+				return keepToken, false, nil
+			}
+		}
+	}
+	for key := range f.tokens {
+		if strings.HasPrefix(key, name+"\x00") {
+			delete(f.tokens, key)
+		}
 	}
 	f.tokenSeq++
 	token := fmt.Sprintf("token-%s-%d", name, f.tokenSeq)
-	f.tokens[name] = token
+	f.tokens[tokenKey(name, tokenName)] = token
+	return token, true, nil
+}
+
+// EnsureRepoToken 模拟 merger 语义：每个令牌名一个独立令牌，其他仓库的令牌
+// 不受影响。
+func (f *fakeAdmin) EnsureRepoToken(_ context.Context, name, _ /*password*/, tokenName, keepToken string) (string, bool, error) {
+	if keepToken != "" && f.tokens[tokenKey(name, tokenName)] == keepToken {
+		return keepToken, false, nil
+	}
+	delete(f.tokens, tokenKey(name, tokenName))
+	f.tokenSeq++
+	token := fmt.Sprintf("token-%s-%d", name, f.tokenSeq)
+	f.tokens[tokenKey(name, tokenName)] = token
 	return token, true, nil
 }
 
 func (f *fakeAdmin) ValidateToken(_ context.Context, name, token string) (bool, error) {
-	return f.tokens[name] == token, nil
+	for key, value := range f.tokens {
+		if strings.HasPrefix(key, name+"\x00") && value == token {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (f *fakeAdmin) GetRepo(_ context.Context, fullName string) (RepoInfo, bool, error) {
@@ -137,8 +172,8 @@ func TestConfigureActionsWritesExpectedRepoConfig(t *testing.T) {
 	instance := instances.Instance{
 		Host:       "https://gitea.example.com",
 		AdminToken: "admin-token",
-		Merger:     instances.Account{Name: "merge", Token: "merger-token"},
-		Repos:      []instances.Repo{{Name: "acme/repo"}},
+		Merger:     instances.Account{Name: "merge"},
+		Repos:      []instances.Repo{{Name: "acme/repo", MergerToken: "merger-token"}},
 	}
 	if err := ConfigureActions(context.Background(), admin, instance, false, nil); err != nil {
 		t.Fatalf("ConfigureActions() error = %v", err)
@@ -154,12 +189,24 @@ func TestConfigureActionsWritesExpectedRepoConfig(t *testing.T) {
 	}
 }
 
+func TestConfigureActionsRequiresRepoToken(t *testing.T) {
+	admin := newFakeAdmin("acme/repo")
+	instance := instances.Instance{
+		Host:   "https://gitea.example.com",
+		Merger: instances.Account{Name: "merge"},
+		Repos:  []instances.Repo{{Name: "acme/repo"}},
+	}
+	if err := ConfigureActions(context.Background(), admin, instance, false, nil); err == nil {
+		t.Error("ConfigureActions() error = nil, want missing merger token error")
+	}
+}
+
 func TestConfigureActionsSkipsBranchProtectionWithoutStaticAdminToken(t *testing.T) {
 	admin := newFakeAdmin("acme/repo")
 	instance := instances.Instance{
 		Host:   "https://gitea.example.com",
-		Merger: instances.Account{Name: "merge", Token: "merger-token"},
-		Repos:  []instances.Repo{{Name: "acme/repo"}},
+		Merger: instances.Account{Name: "merge"},
+		Repos:  []instances.Repo{{Name: "acme/repo", MergerToken: "merger-token"}},
 	}
 	if err := ConfigureActions(context.Background(), admin, instance, false, nil); err != nil {
 		t.Fatalf("ConfigureActions() error = %v", err)
@@ -176,7 +223,7 @@ func TestConfigureActionsDryRunMakesNoWrites(t *testing.T) {
 	admin := newFakeAdmin("acme/repo")
 	instance := instances.Instance{
 		Host:   "https://gitea.example.com",
-		Merger: instances.Account{Name: "merge", Token: "merger-token"},
+		Merger: instances.Account{Name: "merge"},
 		Repos:  []instances.Repo{{Name: "acme/repo"}},
 	}
 	if err := ConfigureActions(context.Background(), admin, instance, true, nil); err != nil {
@@ -208,8 +255,14 @@ func TestRunInitializesInstance(t *testing.T) {
 	if instance.Reviewer.Name != instances.DefaultReviewerName || instance.Reviewer.Token == "" {
 		t.Errorf("Reviewer = %+v", instance.Reviewer)
 	}
-	if instance.Merger.Name != instances.DefaultMergerName || instance.Merger.Token == "" {
-		t.Errorf("Merger = %+v", instance.Merger)
+	if instance.Merger.Name != instances.DefaultMergerName || instance.Merger.Token != "" {
+		t.Errorf("Merger = %+v, want account without instance-level token", instance.Merger)
+	}
+	if len(instance.Repos) != 1 || instance.Repos[0].MergerToken == "" {
+		t.Errorf("Repos = %+v, want per-repo merger token", instance.Repos)
+	}
+	if !strings.HasPrefix(instance.Repos[0].MergerToken, "token-"+instances.DefaultMergerName+"-") {
+		t.Errorf("repo merger token = %q", instance.Repos[0].MergerToken)
 	}
 	if !admin.users[instances.DefaultReviewerName] || !admin.users[instances.DefaultMergerName] {
 		t.Errorf("bot users not created: %v", admin.users)
@@ -235,7 +288,7 @@ func TestRunInitializesInstance(t *testing.T) {
 func TestRunReusesValidToken(t *testing.T) {
 	admin := newFakeAdmin("acme/repo")
 	admin.users[instances.DefaultReviewerName] = true
-	admin.tokens[instances.DefaultReviewerName] = "existing-token"
+	admin.tokens[tokenKey(instances.DefaultReviewerName, ReviewerTokenName)] = "existing-token"
 	options := testOptions()
 	options.Existing = &instances.Instance{
 		Host:     "https://gitea.example.com",
@@ -266,6 +319,11 @@ func TestRunDryRunMakesNoMutations(t *testing.T) {
 	}
 	if instance.Reviewer.Token != "" || instance.Merger.Token != "" {
 		t.Errorf("dry-run should not invent tokens: %+v", instance)
+	}
+	for _, repo := range instance.Repos {
+		if repo.MergerToken != "" {
+			t.Errorf("dry-run should not invent repo merger tokens: %+v", repo)
+		}
 	}
 }
 
@@ -299,8 +357,11 @@ func TestRunWithoutReposInitializesInstanceOnly(t *testing.T) {
 	if len(instance.Repos) != 0 {
 		t.Errorf("Repos = %+v, want empty", instance.Repos)
 	}
-	if instance.Reviewer.Token == "" || instance.Merger.Token == "" {
-		t.Errorf("tokens missing: %+v", instance)
+	if instance.Reviewer.Token == "" {
+		t.Errorf("reviewer token missing: %+v", instance)
+	}
+	if instance.Merger.Token != "" {
+		t.Errorf("Merger.Token = %q, want no instance-level merger token", instance.Merger.Token)
 	}
 	if len(admin.collaborators) != 0 || len(admin.protections) != 0 || len(admin.labels) != 0 {
 		t.Errorf("repo-level mutations with no repos: %+v %+v %+v",

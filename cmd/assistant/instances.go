@@ -14,9 +14,13 @@ import (
 	"assistant/internal/status"
 )
 
-// resolveInstanceFile 解析多实例配置文件：--config > ASSISTANT_CONFIG >
-// 当前目录的 config.json（存在才使用）。三者都没有时返回 nil，调用方退回
-// 环境变量单实例模式。
+// resolveInstanceFile 解析多实例配置文件，按优先级查找：
+//  1. --config
+//  2. ASSISTANT_CONFIG
+//  3. 当前目录 config.json（存在才用）
+//  4. 平台标准配置目录 <UserConfigDir>/Cosmic-Developers-Union/assistant/config.json
+//
+// 都没有时返回 nil，调用方退回环境变量单实例模式。
 func resolveInstanceFile(options commandOptions) (string, *instances.File, error) {
 	path := strings.TrimSpace(options.ConfigPath)
 	explicit := path != ""
@@ -25,19 +29,49 @@ func resolveInstanceFile(options commandOptions) (string, *instances.File, error
 		explicit = path != ""
 	}
 	if !explicit {
-		if _, err := os.Stat("config.json"); err != nil {
-			if os.IsNotExist(err) {
-				return "", nil, nil
-			}
+		if _, err := os.Stat("config.json"); err == nil {
+			path = "config.json"
+		} else if !os.IsNotExist(err) {
 			return "", nil, err
 		}
-		path = "config.json"
+	}
+	if path == "" {
+		standard, err := instances.DefaultConfigPath()
+		if err != nil {
+			return "", nil, nil
+		}
+		if _, err := os.Stat(standard); err == nil {
+			path = standard
+		} else if !os.IsNotExist(err) {
+			return "", nil, err
+		}
+	}
+	if path == "" {
+		return "", nil, nil
 	}
 	file, err := instances.Load(path)
 	if err != nil {
 		return "", nil, err
 	}
 	return path, file, nil
+}
+
+// setupConfigWritePath 决定 setup 写配置的落点：--config / ASSISTANT_CONFIG
+// 显式指定优先；否则沿用当前目录已有的 config.json；否则用平台标准配置目录
+// （不存在则创建）。
+func setupConfigWritePath(configPath string) (string, error) {
+	if path := strings.TrimSpace(configPath); path != "" {
+		return path, nil
+	}
+	if path := strings.TrimSpace(os.Getenv("ASSISTANT_CONFIG")); path != "" {
+		return path, nil
+	}
+	if _, err := os.Stat("config.json"); err == nil {
+		return "config.json", nil
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	return instances.DefaultConfigPath()
 }
 
 // instanceManagers 按 instance × repo 构造 Manager。repoFilter 为空时，仓库
@@ -54,16 +88,16 @@ func instanceManagers(
 		logf := func(format string, arguments ...any) {
 			fmt.Fprintf(stderr, "[%s] %s\n", instance.Host, fmt.Sprintf(format, arguments...))
 		}
-		repos := instance.RepoNames()
+		repos := slices.Clone(instance.Repos)
 		if repoFilter != "" {
-			repos = slices.DeleteFunc(slices.Clone(repos), func(name string) bool { return name != repoFilter })
+			repos = slices.DeleteFunc(repos, func(repo instances.Repo) bool { return repo.Name != repoFilter })
 			if len(repos) == 0 {
 				continue
 			}
 			matchedFilter = true
 		}
 		if len(repos) == 0 {
-			manager, err := newInstanceManager(ctx, instance, "", logf)
+			manager, err := newInstanceManager(ctx, instance, instances.Repo{}, logf)
 			if err != nil {
 				return nil, err
 			}
@@ -90,7 +124,7 @@ func instanceManagers(
 func newInstanceManager(
 	ctx context.Context,
 	instance instances.Instance,
-	repo string,
+	repo instances.Repo,
 	logf func(string, ...any),
 ) (*status.Manager, error) {
 	baseToken := instance.Reviewer.Token
@@ -124,14 +158,19 @@ func newInstanceManager(
 		}
 	}
 	managerOptions := []status.ManagerOption{status.WithProgress(logf)}
-	if instance.Merger.Token != "" {
-		if err := client.UseStateReviewerToken(instance.Merger.Token); err != nil {
+	// 状态评审者令牌按仓库独立（旧配置退回实例级共用令牌）
+	stateToken := repo.MergerToken
+	if stateToken == "" {
+		stateToken = instance.Merger.Token
+	}
+	if stateToken != "" {
+		if err := client.UseStateReviewerToken(stateToken); err != nil {
 			return nil, err
 		}
 		managerOptions = append(managerOptions, status.WithStateReviewer(instance.Merger.Name))
 	}
-	if repo != "" {
-		owner, name, err := instances.ParseRepoName(repo)
+	if repo.Name != "" {
+		owner, name, err := instances.ParseRepoName(repo.Name)
 		if err != nil {
 			return nil, err
 		}

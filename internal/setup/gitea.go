@@ -20,9 +20,6 @@ import (
 
 const (
 	adminTokenName = "assistant-admin"
-	// botTokenName 是机器人令牌的固定名称：同一账号只保留一个令牌（唯一性由
-	// ConvergeToken 收敛），名称固定便于识别与人工排障。
-	botTokenName = "assistant"
 	// 机器人令牌的最小权限集：仓库读写（分支/协作者/合并）、Issue 读写
 	// （标签、评论、PR review）与读取自身账号（完成判定的身份校验）。
 	botTokenScopes = "read:repository,write:repository,read:issue,write:issue,read:user"
@@ -211,27 +208,18 @@ type tokenInfo struct {
 	TokenLastEight string `json:"token_last_eight"`
 }
 
-// ConvergeToken 把机器人账号的令牌收敛为唯一一个：保留 keepToken（按末 8 位
-// 匹配）或新建，删除账号下其余所有令牌。同一站点同时只允许一个评审主机
-// （dispatcher 单飞锁是进程内的），令牌唯一从凭据层面强制这一约束。
+// ConvergeToken 把账号令牌收敛为唯一一个：保留 keepToken（按末 8 位匹配）
+// 或新建 tokenName，删除账号下其余所有令牌。reviewer 用：同一站点同时只允许
+// 一个评审主机（dispatcher 单飞锁是进程内的），令牌唯一从凭据层面强制约束。
 func (a *giteaAdmin) ConvergeToken(
 	ctx context.Context,
-	name, password, keepToken string,
+	name, password, tokenName, keepToken string,
 ) (token string, created bool, err error) {
 	tokens, err := a.listTokensBasic(ctx, name, password)
 	if err != nil {
 		return "", false, fmt.Errorf("列出 %s 的令牌: %w", name, err)
 	}
-	var keepID int64
-	if keepToken != "" {
-		lastEight := tokenLastEight(keepToken)
-		for _, item := range tokens {
-			if item.TokenLastEight == lastEight {
-				keepID = item.ID
-				break
-			}
-		}
-	}
+	keepID := matchToken(tokens, keepToken)
 	deleted := 0
 	for _, item := range tokens {
 		if item.ID == keepID {
@@ -245,22 +233,81 @@ func (a *giteaAdmin) ConvergeToken(
 	if keepID != 0 {
 		token = keepToken
 	} else {
-		token, err = a.createTokenBasic(ctx, name, password)
+		token, err = a.createTokenBasic(ctx, name, password, tokenName)
 		if err != nil {
 			return "", false, err
 		}
 		created = true
 	}
 	if deleted > 0 {
-		a.log("已清理 %s 的 %d 个历史令牌（保证同一账号只有一个评审主机）", name, deleted)
+		a.log("已清理 %s 的 %d 个历史令牌（保证单一评审主机）", name, deleted)
 	}
 	return token, created, nil
 }
 
-// createTokenBasic 以机器人自己的 Basic Auth 建一个固定名称的令牌。
+// EnsureRepoToken 保证 tokenName 令牌存在（保留 keepToken 或新建），只清理
+// 同名旧令牌与历史共享名（assistant / assistant-setup-*），不影响账号下其他
+// 仓库的独立令牌。merger 用：每个项目一个自己的令牌。
+func (a *giteaAdmin) EnsureRepoToken(
+	ctx context.Context,
+	name, password, tokenName, keepToken string,
+) (token string, created bool, err error) {
+	tokens, err := a.listTokensBasic(ctx, name, password)
+	if err != nil {
+		return "", false, fmt.Errorf("列出 %s 的令牌: %w", name, err)
+	}
+	keepID := matchToken(tokens, keepToken)
+	deleted := 0
+	for _, item := range tokens {
+		if item.ID == keepID {
+			continue
+		}
+		if item.Name == tokenName || isLegacySharedTokenName(item.Name) {
+			if err := a.deleteTokenBasic(ctx, name, password, item.ID); err != nil {
+				return "", false, fmt.Errorf("删除 %s 的令牌 %s: %w", name, item.Name, err)
+			}
+			deleted++
+		}
+	}
+	if keepID != 0 {
+		token = keepToken
+	} else {
+		token, err = a.createTokenBasic(ctx, name, password, tokenName)
+		if err != nil {
+			return "", false, err
+		}
+		created = true
+	}
+	if deleted > 0 {
+		a.log("已清理 %s 的 %d 个同名/历史令牌（%s）", name, deleted, tokenName)
+	}
+	return token, created, nil
+}
+
+// matchToken 按末 8 位找到 keepToken 在令牌列表中的条目；找不到返回 0。
+func matchToken(tokens []tokenInfo, token string) int64 {
+	if token == "" {
+		return 0
+	}
+	lastEight := tokenLastEight(token)
+	for _, item := range tokens {
+		if item.TokenLastEight == lastEight {
+			return item.ID
+		}
+	}
+	return 0
+}
+
+// isLegacySharedTokenName 是旧版共用令牌的命名：merger 收敛时会清掉这些，
+// 避免多个项目复用同一个令牌。
+func isLegacySharedTokenName(name string) bool {
+	return name == "assistant" || strings.HasPrefix(name, "assistant-setup-")
+}
+
+// createTokenBasic 以机器人自己的 Basic Auth 建一个指定名称的令牌。
 // Gitea 的建令牌端点只接受 Basic Auth：管理员令牌（含 OAuth 令牌）会 401/403。
-func (a *giteaAdmin) createTokenBasic(ctx context.Context, name, password string) (string, error) {
-	body := map[string]any{"name": botTokenName, "scopes": strings.Split(botTokenScopes, ",")}
+func (a *giteaAdmin) createTokenBasic(ctx context.Context, name, password, tokenName string) (string, error) {
+	body := map[string]any{"name": tokenName, "scopes": strings.Split(botTokenScopes, ",")}
 	var payload struct {
 		Token string `json:"sha1"`
 	}

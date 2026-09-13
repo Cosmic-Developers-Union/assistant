@@ -60,6 +60,9 @@ type Account struct {
 type Repo struct {
 	Name string `json:"name"`
 	Dir  string `json:"dir,omitempty"`
+	// MergerToken 是该仓库专属的 merger 令牌（仓库级 Actions workflow 会签/
+	// 合并用）。每个项目独立令牌，互不影响；由 setup 生成并写入仓库 secret。
+	MergerToken string `json:"merger_token,omitempty"`
 }
 
 func (r *Repo) UnmarshalJSON(data []byte) error {
@@ -80,7 +83,7 @@ func (r *Repo) UnmarshalJSON(data []byte) error {
 
 // MarshalJSON 无 dir 时写回字符串简写，保持配置文件简洁。
 func (r Repo) MarshalJSON() ([]byte, error) {
-	if r.Dir == "" {
+	if r.Dir == "" && r.MergerToken == "" {
 		return json.Marshal(r.Name)
 	}
 	type plain Repo
@@ -223,4 +226,29 @@ func ParseRepoName(name string) (owner, repository string, err error) {
 		return "", "", fmt.Errorf("仓库必须使用 owner/name 格式：%q", name)
 	}
 	return owner, repository, nil
+}
+
+// 平台标准配置目录下的命名空间/应用名（Linux: $XDG_CONFIG_HOME 或
+// ~/.config；macOS: ~/Library/Application Support；Windows: %AppData%）。
+const (
+	configNamespace = "Cosmic-Developers-Union"
+	configApp       = "assistant"
+)
+
+// DefaultConfigDir 返回平台标准配置目录。
+func DefaultConfigDir() (string, error) {
+	directory, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(directory, configNamespace, configApp), nil
+}
+
+// DefaultConfigPath 是标准配置目录下的 config.json 路径。
+func DefaultConfigPath() (string, error) {
+	directory, err := DefaultConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(directory, "config.json"), nil
 }
