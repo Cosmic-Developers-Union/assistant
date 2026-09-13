@@ -24,23 +24,24 @@ func promptPassword(prompt string) (string, error) {
 }
 
 type setupOptions struct {
-	Host              string
-	AdminToken        string
-	AdminTokenFile    string
-	AdminUser         string
-	AdminPassword     string
-	OAuth             bool
-	Relogin           bool
-	OAuthClientID     string
-	OAuthClientSecret string
-	OAuthPort         int
-	Repos             []string
-	ReviewerName      string
-	MergerName        string
-	EmailDomain       string
-	RequiredApprovals int64
-	CreateRepos       bool
-	DryRun            bool
+	Host               string
+	AdminToken         string
+	AdminTokenFile     string
+	AdminUser          string
+	AdminPassword      string
+	OAuth              bool
+	Relogin            bool
+	OAuthClientID      string
+	OAuthClientSecret  string
+	OAuthPort          int
+	Repos              []string
+	ReviewerName       string
+	MergerName         string
+	EmailDomain        string
+	RequiredApprovals  int64
+	CreateRepos        bool
+	DryRun             bool
+	AllowAdminOverride bool
 }
 
 func newSetupCommand(configFlag *string) *cobra.Command {
@@ -85,6 +86,8 @@ func newSetupCommand(configFlag *string) *cobra.Command {
 	flags.StringVar(&options.MergerName, "merger", "", "状态评审/会签账号名（缺省 merge）")
 	flags.StringVar(&options.EmailDomain, "email-domain", "", "机器人邮箱域名（缺省从 host 推导）")
 	flags.Int64Var(&options.RequiredApprovals, "required-approvals", 0, "分支保护 required approvals（缺省 2）")
+	flags.BoolVar(&options.AllowAdminOverride, "allow-admin-override", false,
+		"允许管理员绕过分支保护（缺省关闭：勾选「管理员须遵守分支保护规则」）")
 	flags.BoolVar(&options.CreateRepos, "create-repos", false, "仓库不存在时自动创建（私有，auto_init）")
 	flags.BoolVar(&options.DryRun, "dry-run", false, "只输出将要执行的动作，不做任何写操作")
 	return command
@@ -199,20 +202,21 @@ func runSetup(command *cobra.Command, configPath string, options *setupOptions) 
 	}
 
 	setupOptions := setup.Options{
-		Host:              host,
-		AdminToken:        adminToken,
-		AdminUser:         options.AdminUser,
-		AdminPassword:     adminPassword,
-		OAuth:             oauth,
-		Repos:             repos,
-		ReviewerName:      options.ReviewerName,
-		MergerName:        options.MergerName,
-		EmailDomain:       options.EmailDomain,
-		RequiredApprovals: options.RequiredApprovals,
-		CreateRepos:       options.CreateRepos,
-		DryRun:            options.DryRun,
-		Existing:          existing,
-		Log:               logf,
+		Host:               host,
+		AdminToken:         adminToken,
+		AdminUser:          options.AdminUser,
+		AdminPassword:      adminPassword,
+		OAuth:              oauth,
+		Repos:              repos,
+		ReviewerName:       options.ReviewerName,
+		MergerName:         options.MergerName,
+		EmailDomain:        options.EmailDomain,
+		RequiredApprovals:  options.RequiredApprovals,
+		AllowAdminOverride: options.AllowAdminOverride,
+		CreateRepos:        options.CreateRepos,
+		DryRun:             options.DryRun,
+		Existing:           existing,
+		Log:                logf,
 	}
 	admin, err := setup.NewAdmin(command.Context(), setupOptions)
 	if err != nil {

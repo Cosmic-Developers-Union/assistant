@@ -139,29 +139,43 @@ func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 协作者
-	collaborators, err := reviewerClient.ListCollaboratorLogins(ctx, repository)
-	if err != nil {
-		t.Fatalf("ListCollaboratorLogins() error = %v", err)
-	}
-	for _, want := range []string{instance.Reviewer.Name, instance.Merger.Name} {
-		if !slices.Contains(collaborators, want) {
-			t.Errorf("collaborators = %v, want %s", collaborators, want)
+	// 协作者：reviewer 写权限，merger 管理员权限（合并白名单 + 保护读取）
+	for _, want := range []struct{ name, permission string }{
+		{instance.Reviewer.Name, "write"},
+		{instance.Merger.Name, "admin"},
+	} {
+		permission := collaboratorPermission(t, host, instance.AdminToken, adminLogin, repositoryName, want.name)
+		if permission != want.permission {
+			t.Errorf("collaborator %s permission = %q, want %q", want.name, permission, want.permission)
 		}
 	}
 
-	// 分支保护
+	// 分支保护：统一策略
 	protections, err := reviewerClient.ListBranchProtections(ctx, repository)
 	if err != nil {
 		t.Fatalf("ListBranchProtections() error = %v", err)
 	}
 	found := false
 	for _, protection := range protections {
-		if protection.RuleName == "main" {
-			found = true
-			if protection.RequiredApprovals != 2 {
-				t.Errorf("RequiredApprovals = %d, want 2", protection.RequiredApprovals)
-			}
+		if protection.RuleName != "main" {
+			continue
+		}
+		found = true
+		if protection.RequiredApprovals != 2 {
+			t.Errorf("RequiredApprovals = %d, want 2", protection.RequiredApprovals)
+		}
+		if !protection.EnableMergeWhitelist || !slices.Contains(protection.MergeWhitelistUsernames, instance.Merger.Name) {
+			t.Errorf("merge whitelist = %v/%v, want only %s",
+				protection.EnableMergeWhitelist, protection.MergeWhitelistUsernames, instance.Merger.Name)
+		}
+		if !protection.BlockOnRejectedReviews {
+			t.Error("BlockOnRejectedReviews = false, want true")
+		}
+		if protection.BlockOnOfficialReviewRequests {
+			t.Error("BlockOnOfficialReviewRequests = true, want false（会永久卡死自动合并）")
+		}
+		if !protection.BlockAdminMergeOverride {
+			t.Error("BlockAdminMergeOverride = false, want true（管理员须遵守分支保护规则）")
 		}
 	}
 	if !found {
@@ -350,6 +364,19 @@ func listActionSecrets(t *testing.T, host, token, owner, repo string) []string {
 		names = append(names, secret.Name)
 	}
 	return names
+}
+
+// collaboratorPermission 读仓库协作者权限（admin/write/read）。
+func collaboratorPermission(t *testing.T, host, token, owner, repo, user string) string {
+	t.Helper()
+	body := apiGet(t, host+"/api/v1/repos/"+owner+"/"+repo+"/collaborators/"+user+"/permission", token)
+	var payload struct {
+		Permission string `json:"permission"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("解析 collaborator permission: %v（%s）", err, body)
+	}
+	return payload.Permission
 }
 
 func apiGet(t *testing.T, url, token string) []byte {

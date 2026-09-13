@@ -108,6 +108,12 @@ type BranchProtection struct {
 	Contexts          []string
 	// RequiredApprovals 是合并所需批准数（setup/e2e 校验用）。
 	RequiredApprovals int64
+	// 以下字段用于 setup/e2e 校验统一策略。
+	EnableMergeWhitelist          bool
+	MergeWhitelistUsernames       []string
+	BlockOnRejectedReviews        bool
+	BlockOnOfficialReviewRequests bool
+	BlockAdminMergeOverride       bool
 }
 
 type ReviewInput struct {
@@ -566,10 +572,15 @@ func (c *Client) ListBranchProtections(ctx context.Context, repository Repositor
 		}
 		for _, protection := range protections {
 			result = append(result, BranchProtection{
-				RuleName:          protection.RuleName,
-				EnableStatusCheck: protection.EnableStatusCheck,
-				Contexts:          protection.StatusCheckContexts,
-				RequiredApprovals: protection.RequiredApprovals,
+				RuleName:                      protection.RuleName,
+				EnableStatusCheck:             protection.EnableStatusCheck,
+				Contexts:                      protection.StatusCheckContexts,
+				RequiredApprovals:             protection.RequiredApprovals,
+				EnableMergeWhitelist:          protection.EnableMergeWhitelist,
+				MergeWhitelistUsernames:       protection.MergeWhitelistUsernames,
+				BlockOnRejectedReviews:        protection.BlockOnRejectedReviews,
+				BlockOnOfficialReviewRequests: protection.BlockOnOfficialReviewRequests,
+				BlockAdminMergeOverride:       protection.BlockAdminMergeOverride,
 			})
 		}
 		next, ok := nextPage(response, page, len(protections))

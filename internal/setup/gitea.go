@@ -476,7 +476,7 @@ func (a *giteaAdmin) CreateRepo(ctx context.Context, fullName string) error {
 	return nil
 }
 
-func (a *giteaAdmin) AddCollaborator(ctx context.Context, fullName, user string) error {
+func (a *giteaAdmin) AddCollaborator(ctx context.Context, fullName, user, permission string) error {
 	if a.sdk == nil {
 		return fmt.Errorf("缺少管理员令牌，无法添加协作者")
 	}
@@ -484,16 +484,29 @@ func (a *giteaAdmin) AddCollaborator(ctx context.Context, fullName, user string)
 	if err != nil {
 		return err
 	}
-	permission := gitea.AccessModeWrite
+	mode := gitea.AccessMode(permission)
 	if _, err := a.sdk.Repositories.AddCollaborator(ctx, owner, name, user, gitea.AddCollaboratorOption{
-		Permission: &permission,
+		Permission: &mode,
 	}); err != nil {
 		return fmt.Errorf("添加协作者 %s 到 %s: %w", user, fullName, err)
 	}
 	return nil
 }
 
-func (a *giteaAdmin) EnsureBranchProtection(ctx context.Context, fullName, branch string, requiredApprovals int64) error {
+// EnsureBranchProtection 写入统一的分支保护策略：
+//   - required approvals（内容批准 + 状态会签）；
+//   - 合并白名单只含 merger：只有它可以把 PR 合入（自动化会签即合并）；
+//   - 驳回阻塞、过期批准作废、落后分支阻塞；
+//   - 管理员须遵守分支保护规则（AllowAdminOverride=false 时勾选），防止
+//     身为管理员的 merger 绕过审批/检查；
+//   - 明确关闭 block_on_official_review_requests：它按 pending 的 official
+//     review request 阻止合并，而 Gitea 提交 review 后不消费
+//     requested_reviewers，勾选会把自动合并永久卡死。
+func (a *giteaAdmin) EnsureBranchProtection(
+	ctx context.Context,
+	fullName string,
+	options ProtectionOptions,
+) error {
 	if a.sdk == nil {
 		return fmt.Errorf("缺少管理员令牌，无法配置分支保护")
 	}
@@ -506,27 +519,38 @@ func (a *giteaAdmin) EnsureBranchProtection(ctx context.Context, fullName, branc
 		return fmt.Errorf("读取 %s 分支保护: %w", fullName, err)
 	}
 	enabled := true
+	disabled := false
+	blockAdmin := !options.AllowAdminOverride
+	whitelist := []string{options.MergerName}
 	for _, protection := range protections {
-		if protection.RuleName != branch {
+		if protection.RuleName != options.Branch {
 			continue
 		}
-		required := requiredApprovals
+		required := options.RequiredApprovals
 		if _, _, err := a.sdk.Repositories.EditBranchProtection(ctx, owner, name, protection.RuleName, gitea.EditBranchProtectionOption{
-			RequiredApprovals:      &required,
-			BlockOnRejectedReviews: &enabled,
-			DismissStaleApprovals:  &enabled,
-			BlockOnOutdatedBranch:  &enabled,
+			RequiredApprovals:             &required,
+			BlockOnRejectedReviews:        &enabled,
+			BlockOnOfficialReviewRequests: &disabled,
+			DismissStaleApprovals:         &enabled,
+			BlockOnOutdatedBranch:         &enabled,
+			EnableMergeWhitelist:          &enabled,
+			MergeWhitelistUsernames:       whitelist,
+			BlockAdminMergeOverride:       &blockAdmin,
 		}); err != nil {
 			return fmt.Errorf("更新 %s 分支保护: %w", fullName, err)
 		}
 		return nil
 	}
 	if _, _, err := a.sdk.Repositories.CreateBranchProtection(ctx, owner, name, gitea.CreateBranchProtectionOption{
-		BranchName:             branch,
-		RequiredApprovals:      requiredApprovals,
-		BlockOnRejectedReviews: true,
-		DismissStaleApprovals:  true,
-		BlockOnOutdatedBranch:  true,
+		BranchName:                    options.Branch,
+		RequiredApprovals:             options.RequiredApprovals,
+		BlockOnRejectedReviews:        true,
+		BlockOnOfficialReviewRequests: false,
+		DismissStaleApprovals:         true,
+		BlockOnOutdatedBranch:         true,
+		EnableMergeWhitelist:          true,
+		MergeWhitelistUsernames:       whitelist,
+		BlockAdminMergeOverride:       blockAdmin,
 	}); err != nil {
 		return fmt.Errorf("创建 %s 分支保护: %w", fullName, err)
 	}

@@ -18,8 +18,8 @@ type fakeAdmin struct {
 	tokenSeq      int
 	repos         map[string]RepoInfo
 	createdRepos  []string
-	collaborators map[string][]string
-	protections   map[string]string
+	collaborators map[string]string
+	protections   map[string]ProtectionOptions
 	labels        map[string]bool
 	oauth         *instances.OAuthCredential
 	variables     map[string]string
@@ -34,8 +34,8 @@ func newFakeAdmin(repos ...string) *fakeAdmin {
 		tokens:        map[string]string{},
 		passwords:     map[string]string{},
 		repos:         map[string]RepoInfo{},
-		collaborators: map[string][]string{},
-		protections:   map[string]string{},
+		collaborators: map[string]string{},
+		protections:   map[string]ProtectionOptions{},
 		labels:        map[string]bool{},
 		variables:     map[string]string{},
 		secrets:       map[string]string{},
@@ -142,13 +142,13 @@ func (f *fakeAdmin) CreateRepo(_ context.Context, fullName string) error {
 	return nil
 }
 
-func (f *fakeAdmin) AddCollaborator(_ context.Context, fullName, user string) error {
-	f.collaborators[fullName] = append(f.collaborators[fullName], user)
+func (f *fakeAdmin) AddCollaborator(_ context.Context, fullName, user, permission string) error {
+	f.collaborators[fullName+"/"+user] = permission
 	return nil
 }
 
-func (f *fakeAdmin) EnsureBranchProtection(_ context.Context, fullName, branch string, requiredApprovals int64) error {
-	f.protections[fullName] = fmt.Sprintf("%s/%d", branch, requiredApprovals)
+func (f *fakeAdmin) EnsureBranchProtection(_ context.Context, fullName string, options ProtectionOptions) error {
+	f.protections[fullName] = options
 	return nil
 }
 
@@ -267,12 +267,19 @@ func TestRunInitializesInstance(t *testing.T) {
 	if !admin.users[instances.DefaultReviewerName] || !admin.users[instances.DefaultMergerName] {
 		t.Errorf("bot users not created: %v", admin.users)
 	}
-	wantCollaborators := []string{instances.DefaultReviewerName, instances.DefaultMergerName}
-	if got := admin.collaborators["acme/repo"]; strings.Join(got, ",") != strings.Join(wantCollaborators, ",") {
-		t.Errorf("collaborators = %v, want %v", got, wantCollaborators)
+	wantCollaborators := map[string]string{
+		"acme/repo/" + instances.DefaultReviewerName: "write",
+		"acme/repo/" + instances.DefaultMergerName:   "admin",
 	}
-	if admin.protections["acme/repo"] != "main/2" {
-		t.Errorf("protection = %q, want main/2", admin.protections["acme/repo"])
+	for key, want := range wantCollaborators {
+		if got := admin.collaborators[key]; got != want {
+			t.Errorf("collaborator %s = %q, want %q", key, got, want)
+		}
+	}
+	protection := admin.protections["acme/repo"]
+	if protection.Branch != "main" || protection.RequiredApprovals != 2 ||
+		protection.MergerName != instances.DefaultMergerName || protection.AllowAdminOverride {
+		t.Errorf("protection = %+v", protection)
 	}
 	if !admin.labels["acme/repo"] {
 		t.Error("labels were not reconciled")

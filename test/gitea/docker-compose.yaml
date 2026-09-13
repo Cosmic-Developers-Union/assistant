@@ -2,7 +2,7 @@ name: assistant-e2e
 
 services:
   gitea:
-    image: gitea/gitea:1.22
+    image: gitea/gitea:1.27
     container_name: assistant-e2e-gitea
     restart: "no"
     environment:

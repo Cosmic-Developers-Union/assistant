@@ -40,6 +40,9 @@ type Options struct {
 	RequiredApprovals int64
 	CreateRepos       bool
 	DryRun            bool
+	// AllowAdminOverride 为真时不勾选「管理员须遵守分支保护规则」；缺省 false，
+	// 即管理员（含 merger）也必须满足审批/检查门禁、不能绕过。
+	AllowAdminOverride bool
 	// Existing 是 config.json 里该 instance 的现状（可空），用于复用有效令牌。
 	Existing *instances.Instance
 	Log      func(format string, arguments ...any)
@@ -78,12 +81,23 @@ type Admin interface {
 	ValidateToken(ctx context.Context, name, token string) (bool, error)
 	GetRepo(ctx context.Context, fullName string) (RepoInfo, bool, error)
 	CreateRepo(ctx context.Context, fullName string) error
-	AddCollaborator(ctx context.Context, fullName, user string) error
-	EnsureBranchProtection(ctx context.Context, fullName, branch string, requiredApprovals int64) error
+	AddCollaborator(ctx context.Context, fullName, user, permission string) error
+	EnsureBranchProtection(ctx context.Context, fullName string, options ProtectionOptions) error
 	ReconcileLabels(ctx context.Context, fullName, reviewerToken string) error
 	// SetRepoVariable / SetRepoSecret 写仓库级 Actions 配置（幂等覆盖）。
 	SetRepoVariable(ctx context.Context, fullName, name, value string) error
 	SetRepoSecret(ctx context.Context, fullName, name, value string) error
+}
+
+// ProtectionOptions 是 setup 统一写入的分支保护配置。
+type ProtectionOptions struct {
+	Branch            string
+	RequiredApprovals int64
+	// MergerName 进入合并白名单：只允许 merger 合并（自动化会签 + 合并）。
+	MergerName string
+	// AllowAdminOverride 为真时不勾选「管理员须遵守分支保护规则」；缺省 false
+	// （勾选：身为管理员的 merger 也必须满足审批/检查门禁，不能绕过）。
+	AllowAdminOverride bool
 }
 
 var accountNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
@@ -258,10 +272,14 @@ func setupRepository(
 		}
 	}
 
-	for _, bot := range []string{options.ReviewerName, options.MergerName} {
-		logf("添加协作者 %s（write）", bot)
+	for _, collaborator := range []struct{ name, permission string }{
+		{options.ReviewerName, "write"},
+		// merger 需要仓库管理员权限：合并白名单 + 分支保护读取（repo admin）。
+		{options.MergerName, "admin"},
+	} {
+		logf("添加协作者 %s（%s）", collaborator.name, collaborator.permission)
 		if !options.DryRun {
-			if err := admin.AddCollaborator(ctx, fullName, bot); err != nil {
+			if err := admin.AddCollaborator(ctx, fullName, collaborator.name, collaborator.permission); err != nil {
 				return err
 			}
 		}
@@ -271,10 +289,19 @@ func setupRepository(
 		logf("仓库为空或无默认分支，跳过分支保护")
 		return nil
 	}
-	logf("配置分支保护 %s（required approvals=%d，驳回阻塞，过期批准作废，落后分支阻塞）",
-		info.DefaultBranch, options.RequiredApprovals)
+	adminOverride := "关闭（管理员也须遵守）"
+	if options.AllowAdminOverride {
+		adminOverride = "开启（管理员可绕过）"
+	}
+	logf("配置分支保护 %s（required approvals=%d，只允许 %s 合并，驳回阻塞，过期批准作废，落后分支阻塞，管理员绕过 %s）",
+		info.DefaultBranch, options.RequiredApprovals, options.MergerName, adminOverride)
 	if !options.DryRun {
-		if err := admin.EnsureBranchProtection(ctx, fullName, info.DefaultBranch, options.RequiredApprovals); err != nil {
+		if err := admin.EnsureBranchProtection(ctx, fullName, ProtectionOptions{
+			Branch:             info.DefaultBranch,
+			RequiredApprovals:  options.RequiredApprovals,
+			MergerName:         options.MergerName,
+			AllowAdminOverride: options.AllowAdminOverride,
+		}); err != nil {
 			return err
 		}
 	}
