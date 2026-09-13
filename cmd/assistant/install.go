@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"strings"
 
 	"assistant/internal/repoinstall"
 
@@ -127,41 +126,24 @@ func newMCPCommand() *cobra.Command {
 	return mcpCommand
 }
 
-// newDoctorCommand 检测当前仓库的 assistant 配置状态：install 管理的文件/
-// 段落/MCP 是否缺失、过期、非托管或遗留。只读，发现问题时以非零退出码结束。
+// newDoctorCommand 检测当前仓库的 assistant 配置状态：本地 install 产物
+// （文件/段落/MCP）与仓库服务端（分支保护/标签/协作者/merge 令牌）。
 func newDoctorCommand() *cobra.Command {
 	options := &repoToolOptions{}
+	var requiredApprovals int64
+	var allowAdminOverride bool
 	command := &cobra.Command{
 		Use:   "doctor",
-		Short: "检测当前仓库的 assistant 配置状态（缺失/过期/非托管/遗留）",
-		Long: "对照当前版本的模板与镜像，检测仓库里 install 管理的配置：\n" +
-			"  - .claude/skills/review/SKILL.md、AGENTS.md、.gitea/workflows/assistant.yml\n" +
-			"  - MCP 配置（claude/opencode/codex，按 --tools）\n" +
-			"只读；发现问题时以退出码 1 结束，重新运行 assistant install 可修复。",
+		Short: "检测当前仓库的 assistant 配置（本地 + 服务端，缺失/过期/非托管/遗留）",
+		Long: "两级体检，只读：\n" +
+			"  - 本地：对照当前模板与镜像检查 .claude/skills/review/SKILL.md、AGENTS.md、\n" +
+			"    .gitea/workflows/assistant.yml 与 MCP 配置；\n" +
+			"  - 服务端：按 origin remote/--repo 定位实例，检查分支保护策略、标签体系、\n" +
+			"    协作者权限（ai 写 / merge 管理员）与 MERGE_TOKEN secret。\n" +
+			"发现问题时以退出码 1 结束；本地问题重新 install、服务端问题重新 setup/actions。",
 		Args: cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			findings, err := repoinstall.Doctor(options.repoOptions(command))
-			if err != nil {
-				return err
-			}
-			stdout := command.OutOrStdout()
-			problems := 0
-			for _, finding := range findings {
-				status := strings.ToUpper(finding.Status)
-				if !finding.OK() {
-					problems++
-				}
-				if finding.Detail != "" {
-					fmt.Fprintf(stdout, "%-9s %s — %s\n", status, finding.Path, finding.Detail)
-				} else {
-					fmt.Fprintf(stdout, "%-9s %s\n", status, finding.Path)
-				}
-			}
-			fmt.Fprintln(stdout, repoinstall.Summary(findings))
-			if problems > 0 {
-				return fmt.Errorf("发现 %d 处配置问题（重新运行 assistant install 可修复）", problems)
-			}
-			return nil
+			return runDoctor(command, options, requiredApprovals, allowAdminOverride)
 		},
 	}
 	flags := command.Flags()
@@ -171,6 +153,8 @@ func newDoctorCommand() *cobra.Command {
 	flags.StringVar(&options.CodexPath, "codex-config", "", "覆盖 ~/.codex/config.toml 路径")
 	flags.StringVar(&options.Image, "image", "",
 		"workflow 容器镜像（缺省 "+repoinstall.DefaultImage+"）")
+	flags.Int64Var(&requiredApprovals, "required-approvals", 2, "服务端分支保护要求的批准数")
+	flags.BoolVar(&allowAdminOverride, "allow-admin-override", false, "允许管理员绕过分支保护（不检查该项）")
 	return command
 }
 

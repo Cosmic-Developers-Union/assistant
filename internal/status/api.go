@@ -114,6 +114,8 @@ type BranchProtection struct {
 	BlockOnRejectedReviews        bool
 	BlockOnOfficialReviewRequests bool
 	BlockAdminMergeOverride       bool
+	DismissStaleApprovals         bool
+	BlockOnOutdatedBranch         bool
 }
 
 type ReviewInput struct {
@@ -592,6 +594,8 @@ func (c *Client) ListBranchProtections(ctx context.Context, repository Repositor
 				BlockOnRejectedReviews:        protection.BlockOnRejectedReviews,
 				BlockOnOfficialReviewRequests: protection.BlockOnOfficialReviewRequests,
 				BlockAdminMergeOverride:       protection.BlockAdminMergeOverride,
+				DismissStaleApprovals:         protection.DismissStaleApprovals,
+				BlockOnOutdatedBranch:         protection.BlockOnOutdatedBranch,
 			})
 		}
 		next, ok := nextPage(response, page, len(protections))
