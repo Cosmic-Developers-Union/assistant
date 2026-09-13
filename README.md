@@ -13,6 +13,7 @@
 | --- | --- | --- |
 | `assistant setup` | 初始化 | 建机器人账号/令牌、配协作者与分支保护、补齐标签，并写入 `config.json` |
 | `assistant login` | 初始化 | OAuth 登录登记/刷新平台（写入 `admin_oauth`）；`login list`/`login remove` 管理平台 |
+| `assistant repos` | 初始化 | 管理 `config.json` 中登记的仓库：`list` / `add --dir` / `remove`（只改本地，不触碰服务端） |
 | `assistant init` | 初始化 | 只初始化当前仓库：复用平台凭据与 ai/merge 账号，配保护/标签/secret，并自动登记进 `config.json` |
 | `assistant deinit` | 初始化 | init 的反命令：从 `config.json` 移除当前仓库；`--purge` 同清理服务端（保护/协作者/secret） |
 | `assistant actions` | 初始化 | 为配置中的仓库写入 Actions secrets（merge 令牌等；身份约定 ai/merge，无需 variable） |
@@ -107,6 +108,19 @@ assistant deinit --purge       # 同时删除分支保护、移除 ai/merge 协�
 ```
 
 `init` 做的事：复用或补齐平台上的 `ai`/`merge` 账号与令牌 → 配协作者（ai write / merge admin）→ 分支保护（同 `setup` 口径）→ 标签体系 → 写入仓库级 `MERGE_TOKEN` secret → 把仓库条目（含 `merger_token`）自动加入 `config.json`。`deinit --purge` 是其反操作；本地安装产物（skills/AGENTS.md/workflow/MCP）用 `assistant uninstall` 清理。两者都支持 `--dry-run`。
+
+### 仓库登记：assistant repos
+
+`repos` 只管理 `config.json` 里的 `instances[].repos`（本地登记，不触碰服务端），适合先登记、再用 `setup` 统一补齐服务端：
+
+```bash
+assistant repos list                                  # 列出所有平台已登记仓库（dir / merger_token 状态）
+assistant repos list --host https://gitea.example.com
+assistant repos add owner/repo --host https://gitea.example.com --dir /srv/repo   # 登记（已存在则更新 dir）
+assistant repos remove owner/repo --host https://gitea.example.com                # 移除登记（不触碰服务端）
+```
+
+`--host` 缺省时按「检出 remote 对应的平台 → 已登记该仓库的平台 → 唯一实例」推断；`--dir` 缺省时若当前检出的 remote 指向该仓库，自动登记检出根目录（一个实例下多个仓库时建议显式 `--dir`）。登记后用 `assistant setup --host <H>` 按配置补齐协作者/分支保护/标签/`MERGE_TOKEN`。
 
 ### 初始化：assistant setup
 

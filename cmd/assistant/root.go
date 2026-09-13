@@ -114,6 +114,7 @@ func newRootCommand(stdout, stderr io.Writer, checker, syncer, merger managerRun
 	command.AddCommand(checkCommand, syncCommand, autoMergeCommand)
 	command.AddCommand(newDispatcherCommands(&options.Repository, &options.ConfigPath)...)
 	command.AddCommand(newLoginCommand(&options.ConfigPath))
+	command.AddCommand(newReposCommand(&options.ConfigPath))
 	command.AddCommand(newInitCommand(&options.ConfigPath), newDeinitCommand(&options.ConfigPath))
 	command.AddCommand(newSetupCommand(&options.ConfigPath))
 	command.AddCommand(newActionsCommand(&options.ConfigPath))
