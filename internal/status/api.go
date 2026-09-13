@@ -148,6 +148,8 @@ type API interface {
 	ListRepositoryLabels(context.Context, Repository) ([]Label, error)
 	SetLabelExclusive(context.Context, Repository, int64) error
 	CreateLabel(context.Context, Repository, LabelDefinition) (Label, error)
+	// DeleteLabel 删除非规范标签（assistant 强制维护完整标签集）。
+	DeleteLabel(context.Context, Repository, int64) error
 	AddLabel(context.Context, Repository, int64, int64) error
 	RemoveLabel(context.Context, Repository, int64, int64) error
 	CreatePullReview(context.Context, Repository, int64, ReviewInput) error
@@ -684,6 +686,14 @@ func (c *Client) CreateLabel(
 		return Label{}, fmt.Errorf("create label %q: %w", definition.Name, err)
 	}
 	return labelFromSDK(label), nil
+}
+
+// DeleteLabel 删除仓库标签（清理不在规范体系内的标签用）。
+func (c *Client) DeleteLabel(ctx context.Context, repository Repository, labelID int64) error {
+	if _, err := c.sdk.Repositories.DeleteLabel(ctx, repository.Owner, repository.Name, labelID); err != nil {
+		return fmt.Errorf("delete label %d: %w", labelID, err)
+	}
+	return nil
 }
 
 func (c *Client) AddLabel(ctx context.Context, repository Repository, index, labelID int64) error {

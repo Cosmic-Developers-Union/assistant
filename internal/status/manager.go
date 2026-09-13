@@ -213,6 +213,27 @@ func (m *Manager) prepareLabels(ctx context.Context, repository Repository) (map
 		label.Exclusive = true
 		byName[name] = label
 	}
+
+	// 删除不在规范体系内的标签：assistant 强制维护完整标签集，历史/手改标签会
+	// 让状态机分叉（doctor 与 sync 同口径）。
+	expected := make(map[string]bool, len(labelDefinitions))
+	for _, definition := range labelDefinitions {
+		expected[definition.Name] = true
+	}
+	extras := make([]string, 0)
+	for name := range byName {
+		if !expected[name] {
+			extras = append(extras, name)
+		}
+	}
+	slices.Sort(extras)
+	for _, name := range extras {
+		if err := m.api.DeleteLabel(ctx, repository, byName[name].ID); err != nil {
+			return nil, err
+		}
+		m.logf("%s: 已删除非规范标签 %s", repository.FullName(), name)
+		delete(byName, name)
+	}
 	return byName, nil
 }
 

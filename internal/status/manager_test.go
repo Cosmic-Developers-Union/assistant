@@ -41,6 +41,7 @@ type fakeAPI struct {
 	createdLabels   []LabelDefinition
 	addedLabels     []labelChange
 	removedLabels   []labelChange
+	deletedLabels   []labelChange
 	createdReviews  []reviewChange
 	createdRequests []reviewRequestChange
 	deletedRequests []reviewRequestChange
@@ -142,6 +143,11 @@ func (f *fakeAPI) ListRepositoryLabels(_ context.Context, repository Repository)
 
 func (f *fakeAPI) SetLabelExclusive(_ context.Context, _ Repository, labelID int64) error {
 	f.exclusive = append(f.exclusive, labelID)
+	return nil
+}
+
+func (f *fakeAPI) DeleteLabel(_ context.Context, _ Repository, labelID int64) error {
+	f.deletedLabels = append(f.deletedLabels, labelChange{Label: labelID})
 	return nil
 }
 
@@ -1287,4 +1293,22 @@ func draftPullRequest(index int64, labels []Label) PullRequest {
 
 func pullRequestKey(repository Repository, index int64) string {
 	return repository.FullName() + "#" + strconv.FormatInt(index, 10)
+}
+
+// 不在规范体系内的标签会被删除：assistant 强制维护完整标签集，避免历史/手改
+// 标签让状态机分叉（doctor 与 sync 同口径）。
+func TestManagerDeletesUnexpectedLabels(t *testing.T) {
+	repository := Repository{Owner: "acme", Name: "video"}
+	labels := append(completeLabels(), Label{ID: 99, Name: "stale/topic"})
+	api := newFakeAPI(repository, labels)
+	api.pullRequests[repository.FullName()] = []PullRequest{{Index: 50}}
+	api.current[pullRequestKey(repository, 50)] = mergeablePullRequest(50, nil)
+
+	if err := NewManager(api).Sync(t.Context()); err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	wantDeleted := []labelChange{{Label: 99}}
+	if !slices.Equal(api.deletedLabels, wantDeleted) {
+		t.Errorf("deleted labels = %+v, want %+v", api.deletedLabels, wantDeleted)
+	}
 }

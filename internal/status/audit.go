@@ -129,6 +129,15 @@ func (c *Client) AuditRepository(ctx context.Context, repository Repository, opt
 				add("label "+definition.Name, AuditStatusOutdated, "scoped 标签应设为互斥")
 			}
 		}
+		expected := make(map[string]bool, len(LabelDefinitions()))
+		for _, definition := range LabelDefinitions() {
+			expected[definition.Name] = true
+		}
+		for _, label := range labels {
+			if !expected[label.Name] {
+				add("label "+label.Name, AuditStatusOutdated, "不在规范标签体系中（sync 会删除）")
+			}
+		}
 	}
 
 	// 协作者权限：reviewer 写、merger 管理员

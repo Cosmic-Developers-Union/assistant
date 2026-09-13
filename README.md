@@ -142,7 +142,7 @@ OAuth 登录说明：默认使用 Gitea 内置的 `tea` 公共客户端；内置
 1. 校验管理员身份；
 2. 复用/创建 `reviewer`（默认 `ai`）与 `merger`（默认 `merge`）账号（随机密码不落盘）；
 3. 收敛令牌：reviewer 全实例唯一（删除账号下其余令牌）；merger **按仓库独立**——每个项目一个 `assistant-<hash8>` 令牌，只清理同名旧令牌与历史共享名，不动其他仓库。建令牌端点仅接受 Basic Auth，必要时以管理员身份重置机器人密码后创建；
-4. 把两个账号加为仓库协作者：reviewer 写权限，**merger 管理员权限**（合并白名单成员 + 分支保护读取），并补齐与 `sync` 完全相同口径的标签体系；
+4. 把两个账号加为仓库协作者：reviewer 写权限，**merger 管理员权限**（合并白名单成员 + 分支保护读取），并收敛标签体系（补齐缺失、scoped 互斥、删除不在体系内的标签，与 `sync` 完全相同口径）；
 5. 在默认分支配置分支保护：`required approvals=2`（内容批准 + 状态会签）、**合并白名单只含 merger（只有它可以合入）**、驳回阻塞（`block_on_rejected_reviews`）、过期批准作废、落后分支阻塞、**勾选「管理员须遵守分支保护规则」（`block_admin_merge_override`，管理员也不得绕过）**，以及**「有官方审核阻止了代码合并」（`block_on_official_review_requests`）**：合并 job（merge 管理员身份）会把 `/review`、`@ai` 提及登记为正式评审请求，内容评审者提交 review 后由它撤回遗留请求、门禁解除（Gitea 只允许 PR 作者或仓库管理员选择 reviewer，`gitea-actions` 会被拒绝，因此请求维护不在 sync）。注意：**团队评审请求**不会因成员 review 自动清除，需人工移除后合并才解除；API 的 `requested_reviewers` 字段有显示滞后，不代表门禁实际状态；
 6. 把结果写回 `config.json`（0600；落点：`--config` / `ASSISTANT_CONFIG`，否则平台标准配置目录）。`--create-repos` 会在仓库不存在时自动创建私有仓库（auto_init，默认分支 main）。
 
@@ -150,7 +150,7 @@ OAuth 登录说明：默认使用 Gitea 内置的 `tea` 公共客户端；内置
 
 ## 仓库辅助机器人
 
-- `sync`：补齐标签体系、规范 open Issue 标签（含 duplicate/wontfix 自动关闭）、把 PR 评审状态同步为状态标签。`status/review` 即「评审请求中」标记：原生 review 请求、`@ai`/`@reviewer` 提及、行首 `/review` 命令任一出现就进评审队列，不再被门禁（冲突/落后/必要检查失败）阻断——门禁只在 `automerge` 合并时校验，避免「检查被取消」直接卡住评审。单次执行、幂等，由 Gitea Actions 事件驱动运行（只用内置令牌）。官方评审请求的登记/撤回由 `automerge`（merge 身份）承担，见下文。
+- `sync`：**强制收敛标签体系**——补齐缺失标签、把 scoped 标签设为互斥、删除不在规范体系内的标签；规范 open Issue 标签（含 duplicate/wontfix 自动关闭）、把 PR 评审状态同步为状态标签。`status/review` 即「评审请求中」标记：原生 review 请求、`@ai`/`@reviewer` 提及、行首 `/review` 命令任一出现就进评审队列，不再被门禁（冲突/落后/必要检查失败）阻断——门禁只在 `automerge` 合并时校验，避免「检查被取消」直接卡住评审。单次执行、幂等，由 Gitea Actions 事件驱动运行（只用内置令牌）。官方评审请求的登记/撤回由 `automerge`（merge 身份）承担，见下文。
 - `check`：按标签检索待处理项并输出报告。默认立即返回；`--wait` 持续轮询直到出现待办，`--timeout` 轮询到超时为止（两者互斥，时长支持 `d` / `w` 单位，如 `1d1m1s`）；`--interval` 控制间隔（默认 15s），Ctrl+C 可随时中断。
 - `automerge`：把带 `status/approved` + `awaiting/merge` 标签且门禁全绿（分支未落后 main、无冲突、必要检查通过）的 PR squash 合并；一次运行至多合并一个 PR。由 schedule 工作流每 5 分钟驱动。
 
@@ -306,7 +306,7 @@ assistant review 42 --docker-image ...     # 一次性调试同样支持
 
 ```
 assistant run             长驻主循环（部署形态；--interval/--timeout 可调）
-assistant run --dry-run   只读演练：按同一检测口径列出将执行的待办，逐步说明
+assistant run --dry-run   只读演练：先打印生效配置（host/repo/令牌掩码/会话/节奏/路径/基线），再列出将执行的待办并逐步说明
                           将发生的动作（日志、worktree、会话、超时、完成判定、
                           放行、清理），零副作用
 assistant list            只读列出当前待办（快速验证 host/仓库/令牌/标签链路）

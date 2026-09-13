@@ -106,7 +106,8 @@ func TestAuditRepositoryDetectsDrift(t *testing.T) {
 	fixture.protection["merge_whitelist_usernames"] = []string{"everyone"}
 	fixture.protection["block_on_official_review_requests"] = false
 	fixture.protection["dismiss_stale_approvals"] = false
-	fixture.labels = fixture.labels[:len(fixture.labels)-1] // 少一个标签
+	fixture.labels = fixture.labels[:len(fixture.labels)-1]                                   // 少一个标签
+	fixture.labels = append(fixture.labels, map[string]any{"id": 999, "name": "stale/topic"}) // 多一个非规范标签
 	fixture.collaborator["ai"] = "read"
 	fixture.secrets = []map[string]any{}
 	client := fixture.server(t)
@@ -123,6 +124,7 @@ func TestAuditRepositoryDetectsDrift(t *testing.T) {
 		"branch protection official requests": AuditStatusOutdated,
 		"branch protection dismiss stale":     AuditStatusOutdated,
 		"collaborator ai":                     AuditStatusOutdated,
+		"label stale/topic":                   AuditStatusOutdated,
 		"actions secret MERGE_TOKEN":          AuditStatusMissing,
 	}
 	for path, wantStatus := range want {

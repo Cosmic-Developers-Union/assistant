@@ -223,8 +223,23 @@ func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 		status.WithContentReviewer(instance.Reviewer.Name),
 		status.WithProgress(t.Logf),
 	)
+	// 非规范标签：sync 强制收敛标签体系时应删除
+	if _, err := reviewerClient.CreateLabel(ctx, repository, status.LabelDefinition{
+		Name: "stale/topic", Color: "CCCCCC", Description: "e2e 非规范标签",
+	}); err != nil {
+		t.Fatalf("CreateLabel(stale) error = %v", err)
+	}
 	if err := manager.Sync(ctx); err != nil {
 		t.Fatalf("Sync() error = %v", err)
+	}
+	afterSync, err := reviewerClient.ListRepositoryLabels(ctx, repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, label := range afterSync {
+		if label.Name == "stale/topic" {
+			t.Errorf("非规范标签未被删除：%+v", afterSync)
+		}
 	}
 	report, err := manager.Check(ctx)
 	if err != nil {

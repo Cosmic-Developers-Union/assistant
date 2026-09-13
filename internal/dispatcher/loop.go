@@ -387,10 +387,51 @@ func pruneSettled(work []WorkItem, settled map[string]bool) []WorkItem {
 	return filtered
 }
 
-// DryRunPass 是 run 的只读演练：按同一检测口径列出将执行的待办，逐条给出
-// 将执行的具体命令（只打印不执行）——不建 worktree、不起会话、不写待办日志。
+// ConfigPreview 返回生效调度配置的只读摘要（令牌掩码），供 run --dry-run
+// 预览「当前实际用的是什么配置」。
+func ConfigPreview(config Config, repoDir string) []string {
+	session := "claude=" + config.ClaudeBin
+	if config.DockerImage != "" {
+		session = "docker=" + config.DockerImage
+		if config.DockerNetwork != "" {
+			session += "（network=" + config.DockerNetwork + "）"
+		}
+	}
+	model := config.Model
+	if model == "" {
+		model = "账号默认"
+	}
+	return []string{
+		fmt.Sprintf("配置预览：host=%s repo=%s reviewer=%s", config.Host, config.Repository.FullName(), config.Reviewer),
+		fmt.Sprintf("  认证：令牌=%s 来源=--token/GITEA_ACCESS_TOKEN", maskSecret(config.AccessToken)),
+		fmt.Sprintf("  会话：model=%s %s", model, session),
+		fmt.Sprintf("  节奏：interval=%s timeout=%s concurrency=%d", config.Interval, config.SessionTimeout, config.Concurrency),
+		fmt.Sprintf("  路径：repo_dir=%s worktree_root=%s log_dir=%s lock=%s",
+			repoDir, config.WorktreeRoot, config.LogDir, config.LockFile),
+		fmt.Sprintf("  基线：base_branch=%s sync_mirror=%t", config.BaseBranch, config.SyncMirror),
+	}
+}
+
+// maskSecret 只保留前后各 4 位；过短时全掩码。
+func maskSecret(secret string) string {
+	if secret == "" {
+		return "(空)"
+	}
+	if len(secret) <= 8 {
+		return "***"
+	}
+	return secret[:4] + "***" + secret[len(secret)-4:]
+}
+
+// DryRunPass 是 run 的只读演练：先打印生效配置，再按同一检测口径列出将执行
+// 的待办，逐条给出将执行的具体命令（只打印不执行）——不建 worktree、不起会话、
+// 不写待办日志。
 func DryRunPass(ctx context.Context, deps Deps) error {
 	config := deps.Config
+	for _, line := range ConfigPreview(deps.Config, deps.RepoDir) {
+		deps.Log(line)
+	}
+	deps.Log("")
 	if deps.SyncMirror != nil {
 		deps.Log(fmt.Sprintf(
 			"每轮先同步镜像（--sync-mirror）：git fetch --prune origin；git checkout -f -B %s origin/%s；git clean -fd（在宿主检出，失败跳过本轮）",

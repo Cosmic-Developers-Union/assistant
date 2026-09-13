@@ -83,8 +83,14 @@ func TestDryRunPassWithoutWork(t *testing.T) {
 	if err := DryRunPass(context.Background(), deps); err != nil {
 		t.Fatalf("DryRunPass() error = %v", err)
 	}
-	if len(logs) != 1 || logs[0] != "当前无待办" {
-		t.Errorf("logs = %v, want [当前无待办]", logs)
+	output := strings.Join(logs, "\n")
+	for _, want := range []string{"配置预览：host=", "令牌=***", "当前无待办"} {
+		if !strings.Contains(output, want) {
+			t.Errorf("dry-run output missing %q:\n%s", want, output)
+		}
+	}
+	if got := logs[len(logs)-1]; got != "当前无待办" {
+		t.Errorf("最后一行 = %q, want 当前无待办", got)
 	}
 }
 
