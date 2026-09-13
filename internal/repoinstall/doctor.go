@@ -52,7 +52,7 @@ func Doctor(options Options) ([]Finding, error) {
 	}
 
 	findings := []Finding{
-		checkSection(&options, ManagedAgentPath(), agents),
+		checkSection(&options, ManagedAgentPath(), wrapManagedSection(agents)),
 		checkClaudeMD(&options),
 	}
 	for _, relative := range ManagedWorkflowPaths() {

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"assistant/content"
 	"assistant/skills"
 )
 
@@ -127,10 +128,16 @@ func TestInstallCreatesArtifactsAndIsIdempotent(t *testing.T) {
 			t.Errorf("workflow 不应包含 %s:\n%s", unwanted, workflow)
 		}
 	}
-	// AGENTS.md 段落同样绑定
+	// AGENTS.md 段落同样绑定；marker 由 install 自动包裹，内容源不写
 	agents := readFile(t, filepath.Join(options.Dir, ManagedAgentPath()))
 	if !strings.Contains(agents, "@"+ConventionReviewer) || !strings.Contains(agents, "`"+ConventionMerger+"`") {
 		t.Errorf("AGENTS.md not bound to conventions:\n%s", agents)
+	}
+	if !strings.Contains(agents, "<!-- /"+Marker+" -->") {
+		t.Errorf("AGENTS.md 缺少 install 包裹的结束 marker:\n%s", agents)
+	}
+	if strings.Contains(content.AgentsSection, Marker) {
+		t.Errorf("content/agents.md 不应包含 marker（install 自动包裹）")
 	}
 
 	// 幂等：第二次运行不改变任何文件

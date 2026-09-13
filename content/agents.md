@@ -1,4 +1,3 @@
-<!-- managed-by: assistant -->
 ## assistant 自动化约定
 
 本仓库由 assistant 维护标签与评审流程，改动代码时遵守以下约定：
@@ -12,4 +11,3 @@
 - **作者推送会作废旧评审**：批准只背书被评审的那批提交，rebase/推送后需重新评审。
 - **AI 评审会话**由宿主机 dispatcher 拉起；评审结论以 Gitea 原生 review 落库。
 - 分诊与评审的详细协议见 `.claude/skills/review/SKILL.md`。
-<!-- /managed-by: assistant -->

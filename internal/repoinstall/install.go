@@ -152,7 +152,7 @@ func Install(ctx context.Context, options Options) error {
 	if err != nil {
 		return err
 	}
-	if err := installSection(&options, filepath.Join(options.Dir, ManagedAgentPath()), agents); err != nil {
+	if err := installSection(&options, filepath.Join(options.Dir, ManagedAgentPath()), wrapManagedSection(agents)); err != nil {
 		return err
 	}
 	if err := installClaudeMD(&options); err != nil {
@@ -287,6 +287,12 @@ func installSection(options *Options, path, section string) error {
 	}
 	merged := strings.TrimRight(content, "\n") + "\n\n" + section
 	return options.write(path, merged)
+}
+
+// wrapManagedSection 给内容源加上 marker 段落边界：content/ 里维护的内容无需
+// 自己写 marker，install 统一包裹；uninstall/doctor 靠 marker 识别与清理。
+func wrapManagedSection(text string) string {
+	return "<!-- " + Marker + " -->\n" + strings.TrimRight(text, "\n") + "\n<!-- /" + Marker + " -->\n"
 }
 
 func uninstallSection(options *Options, path string) error {
