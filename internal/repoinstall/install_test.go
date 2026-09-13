@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"assistant/content"
+	"assistant/internal/claudecfg"
 	"assistant/skills"
 )
 
@@ -87,7 +88,7 @@ func TestInstallCreatesArtifactsAndIsIdempotent(t *testing.T) {
 		t.Errorf("claude mcp gitea = %+v", gitea)
 	}
 	settings := readFile(t, filepath.Join(options.Dir, ".claude", "settings.json"))
-	for _, want := range []string{"enableAllProjectMcpServers", "mcp__gitea", "mcp__gitea__*"} {
+	for _, want := range []string{"enableAllProjectMcpServers", "mcp__gitea", "mcp__gitea__*", "Bash(git diff:*)", "BASH_DEFAULT_TIMEOUT_MS"} {
 		if !strings.Contains(settings, want) {
 			t.Errorf("settings missing %s: %s", want, settings)
 		}
@@ -208,6 +209,77 @@ func TestUninstallKeepsUserContent(t *testing.T) {
 		// codex 配置若只剩空内容会被删除
 		t.Log("codex config remains (contains user content?)")
 	}
+}
+
+// claude settings 只管理白名单键：install 合并写入 env/权限放行，卸载只摘除
+// 仍是我们写入的托管项，用户自有键原样保留（也不触碰用户级配置）。
+func TestClaudeSettingsManagedKeys(t *testing.T) {
+	options := testOptions(t)
+	options.Tools = []string{"claude"}
+	settingsPath := filepath.Join(options.Dir, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	userSettings := `{"env":{"USER_KEY":"keep"},"permissions":{"allow":["Bash(ls:*)"],"deny":["Read(.env)"]}}`
+	if err := os.WriteFile(settingsPath, []byte(userSettings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Install(context.Background(), options); err != nil {
+		t.Fatalf("Install() error = %v", err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal([]byte(readFile(t, settingsPath)), &document); err != nil {
+		t.Fatal(err)
+	}
+	env := document["env"].(map[string]any)
+	if env["USER_KEY"] != "keep" || env["BASH_DEFAULT_TIMEOUT_MS"] != claudecfg.Env["BASH_DEFAULT_TIMEOUT_MS"] {
+		t.Errorf("env = %+v", env)
+	}
+	permissions := document["permissions"].(map[string]any)
+	allow := toStringList(permissions["allow"])
+	if !contains(allow, "Bash(ls:*)") || !contains(allow, "Bash(git diff:*)") {
+		t.Errorf("allow = %v", allow)
+	}
+	if permissions["deny"] == nil {
+		t.Errorf("用户自有 permissions.deny 丢失: %+v", permissions)
+	}
+
+	if err := Uninstall(context.Background(), options); err != nil {
+		t.Fatalf("Uninstall() error = %v", err)
+	}
+	// 重新解析到新 map：Unmarshal 不清空旧键，复用 map 会看到过期结果
+	var after map[string]any
+	if err := json.Unmarshal([]byte(readFile(t, settingsPath)), &after); err != nil {
+		t.Fatal(err)
+	}
+	document = after
+	env = document["env"].(map[string]any)
+	if env["USER_KEY"] != "keep" || len(env) != 1 {
+		t.Errorf("卸载后 env = %+v, want 仅 USER_KEY", env)
+	}
+	permissions = document["permissions"].(map[string]any)
+	allow = toStringList(permissions["allow"])
+	if len(allow) != 1 || allow[0] != "Bash(ls:*)" {
+		t.Errorf("卸载后 allow = %v", allow)
+	}
+	if _, ok := document["enableAllProjectMcpServers"]; ok {
+		t.Errorf("卸载后不应保留 enableAllProjectMcpServers: %+v", document)
+	}
+}
+
+func toStringList(value any) []string {
+	items, _ := value.([]any)
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		if text, ok := item.(string); ok {
+			result = append(result, text)
+		}
+	}
+	return result
+}
+
+func contains(values []string, want string) bool {
+	return slices.Contains(values, want)
 }
 
 // 技能安装/卸载委托给 skills CLI（bunx skills）：install 调 add、uninstall 调

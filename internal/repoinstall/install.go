@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"assistant/content"
+	"assistant/internal/claudecfg"
 )
 
 // Options 控制 install/uninstall 的行为。
@@ -418,12 +419,19 @@ func installClaude(options *Options) error {
 	}
 	return updateJSON(settingsPath, func(document map[string]any) {
 		document["enableAllProjectMcpServers"] = true
+		env, _ := document["env"].(map[string]any)
+		if env == nil {
+			env = map[string]any{}
+		}
+		for key, value := range claudecfg.Env {
+			env[key] = value
+		}
+		document["env"] = env
 		permissions, _ := document["permissions"].(map[string]any)
 		if permissions == nil {
 			permissions = map[string]any{}
 		}
-		allow := stringSlice(permissions["allow"])
-		allow = appendUnique(allow, "mcp__gitea", "mcp__gitea__*")
+		allow := appendUnique(stringSlice(permissions["allow"]), claudecfg.Allow...)
 		permissions["allow"] = allow
 		document["permissions"] = permissions
 	}, options)
@@ -441,8 +449,22 @@ func uninstallClaude(options *Options) error {
 		return err
 	}
 	return updateJSON(filepath.Join(options.Dir, ".claude", "settings.json"), func(document map[string]any) {
+		if enabled, ok := document["enableAllProjectMcpServers"].(bool); ok && enabled {
+			delete(document, "enableAllProjectMcpServers")
+		}
+		// env：只摘除仍是我们写入的托管项，用户改过值的键保留
+		if env, ok := document["env"].(map[string]any); ok {
+			for key, value := range claudecfg.Env {
+				if env[key] == value {
+					delete(env, key)
+				}
+			}
+			if len(env) == 0 {
+				delete(document, "env")
+			}
+		}
 		if permissions, ok := document["permissions"].(map[string]any); ok {
-			allow := removeStrings(stringSlice(permissions["allow"]), "mcp__gitea", "mcp__gitea__*")
+			allow := removeStrings(stringSlice(permissions["allow"]), claudecfg.Allow...)
 			if len(allow) == 0 {
 				delete(permissions, "allow")
 			} else {

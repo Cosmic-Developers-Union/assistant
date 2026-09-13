@@ -2,7 +2,10 @@
 //
 // 命令面与手工运维一致：`--permission-mode auto`（模型分类器自动批准/拒绝，
 // result 的 permission_denials 落日志可观测质量）、`--autocompact auto`（长
-// 评审会话自动压缩上下文）。与手工命令的差异只有三处，均为无人值守必需：
+// 评审会话自动压缩上下文）。会话配置独立于操作者：claudecfg 生成临时
+// `--settings`（环境变量与权限放行），`--setting-sources project` 只加载项目级
+// 设置（不读也不写 ~/.claude 用户配置），`--no-session-persistence` 不落会话
+// 历史。与手工命令的差异，均为无人值守必需：
 //   - `--strict-mcp-config` + `--mcp-config` 显式注入宿主仓库的 gitea MCP：评审
 //     要提交 Pull Request Review，而 worktree 是新路径，项目级 MCP 授权状态不可依赖；
 //   - `--max-turns` 给 runaway 会话兜底（超时之外的第二道闸）；
@@ -18,7 +21,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -26,6 +28,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"assistant/internal/claudecfg"
 )
 
 // SessionOutcome 是一次 claude 会话的归集结果。
@@ -224,7 +228,10 @@ type SessionOptions struct {
 	// MCPConfigPath 是宿主仓库 .mcp.json 的路径：工具面由 dispatcher 宿主控制，
 	// 与 PR head 解耦
 	MCPConfigPath string
-	OnProgress    func(string)
+	// SettingsPath 是独立会话配置（--settings）的路径：由 RunSession 生成，调用
+	// 方无需填写（测试可预置固定路径）
+	SettingsPath string
+	OnProgress   func(string)
 }
 
 // sessionCommand 组装会话命令：缺省直接跑 claude；Config.DockerImage 非空时
@@ -246,8 +253,15 @@ func sessionCommand(options SessionOptions) (bin string, args []string, containe
 		"--strict-mcp-config",
 		"--mcp-config",
 		options.MCPConfigPath,
+		"--setting-sources",
+		claudecfg.SettingSources,
+		// 无人值守会话不落用户会话历史，也不做自动更新/遥测类副作用
+		"--no-session-persistence",
 		"--max-turns",
 		strconv.Itoa(MaxTurns),
+	}
+	if options.SettingsPath != "" {
+		claudeArgs = append(claudeArgs, "--settings", options.SettingsPath)
 	}
 	if config.Model != "" {
 		claudeArgs = append(claudeArgs, "--model", config.Model)
@@ -262,9 +276,9 @@ func sessionCommand(options SessionOptions) (bin string, args []string, containe
 		"-v", options.Cwd + ":" + options.Cwd,
 		"-w", options.Cwd,
 	}
-	if options.MCPConfigPath != "" {
-		mcpDir := filepath.Dir(options.MCPConfigPath)
-		args = append(args, "-v", mcpDir+":"+mcpDir)
+	// 会话输入文件（MCP 配置、独立 settings）按相同绝对路径挂载
+	for _, dir := range sessionMountDirs(options) {
+		args = append(args, "-v", dir+":"+dir)
 	}
 	if config.DockerNetwork != "" {
 		args = append(args, "--network", config.DockerNetwork)
@@ -313,6 +327,16 @@ func RunSession(options SessionOptions) SessionOutcome {
 	config := options.Config
 	startedAt := time.Now()
 	outcome := NewSessionOutcome()
+
+	// 独立会话配置写临时目录：环境变量与权限放行随二进制版本走，不依赖仓库
+	// 状态与操作者用户配置
+	settingsPath, cleanup, err := writeClaudeSessionSettings()
+	if err != nil {
+		outcome.Errors = append(outcome.Errors, err.Error())
+		return outcome
+	}
+	defer cleanup()
+	options.SettingsPath = settingsPath
 
 	bin, args, container := sessionCommand(options)
 	command := exec.Command(bin, args...)

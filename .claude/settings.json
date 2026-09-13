@@ -1,9 +1,24 @@
 {
   "enableAllProjectMcpServers": true,
+  "env": {
+    "BASH_DEFAULT_TIMEOUT_MS": "300000",
+    "BASH_MAX_OUTPUT_LENGTH": "150000",
+    "BASH_MAX_TIMEOUT_MS": "1800000",
+    "MAX_MCP_OUTPUT_TOKENS": "50000",
+    "MCP_TIMEOUT": "30000"
+  },
   "permissions": {
     "allow": [
       "mcp__gitea",
-      "mcp__gitea__*"
+      "mcp__gitea__*",
+      "Bash(assistant:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git worktree list:*)"
     ]
   }
 }

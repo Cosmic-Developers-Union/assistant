@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"assistant/content"
+	"assistant/internal/claudecfg"
 )
 
 // Finding 状态：doctor 按这些状态报告每一处 install 管理产物的现状。
@@ -240,13 +242,49 @@ func checkClaudeSettings(options *Options) Finding {
 	case err != nil:
 		return Finding{Path: ".claude/settings.json", Status: StatusUnmanaged, Detail: "JSON 解析失败: " + err.Error()}
 	}
+	var problems []string
+	enabled, _ := document["enableAllProjectMcpServers"].(bool)
+	if !enabled {
+		problems = append(problems, "未启用项目 MCP")
+	}
 	permissions, _ := document["permissions"].(map[string]any)
 	allow := jsonStringSlice(permissions["allow"])
-	enabled, _ := document["enableAllProjectMcpServers"].(bool)
-	if !enabled || !containsAll(allow, "mcp__gitea", "mcp__gitea__*") {
-		return Finding{Path: ".claude/settings.json", Status: StatusOutdated, Detail: "缺少 gitea MCP 放行配置"}
+	if missing := missingStrings(allow, claudecfg.Allow...); len(missing) > 0 {
+		problems = append(problems, "缺少权限放行："+strings.Join(missing, ", "))
+	}
+	env, _ := document["env"].(map[string]any)
+	var envMissing []string
+	for key, value := range claudecfg.Env {
+		if env[key] != value {
+			envMissing = append(envMissing, key)
+		}
+	}
+	slices.Sort(envMissing)
+	if len(envMissing) > 0 {
+		problems = append(problems, "环境变量缺失/不一致："+strings.Join(envMissing, ", "))
+	}
+	if len(problems) > 0 {
+		return Finding{Path: ".claude/settings.json", Status: StatusOutdated, Detail: strings.Join(problems, "；")}
 	}
 	return Finding{Path: ".claude/settings.json", Status: StatusOK}
+}
+
+// missingStrings 返回 wanted 中不在 values 里的条目（保持 wanted 顺序）。
+func missingStrings(values []string, wanted ...string) []string {
+	var missing []string
+	for _, want := range wanted {
+		found := false
+		for _, value := range values {
+			if value == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			missing = append(missing, want)
+		}
+	}
+	return missing
 }
 
 func checkOpenCode(options *Options) []Finding {

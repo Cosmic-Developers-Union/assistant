@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"assistant/internal/claudecfg"
 	"assistant/internal/status"
 )
 
@@ -321,6 +322,9 @@ func planSteps(deps Deps, item WorkItem) []string {
 		"--verbose",
 		"--strict-mcp-config",
 		"--mcp-config " + filepath.Join(deps.RepoDir, ".mcp.json"),
+		"--settings <临时独立配置：env 时长/输出上限 + 只读权限放行>",
+		"--setting-sources " + claudecfg.SettingSources,
+		"--no-session-persistence",
 		fmt.Sprintf("--max-turns %d", MaxTurns),
 	}
 	if config.Model != "" {

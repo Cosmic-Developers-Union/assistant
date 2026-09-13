@@ -1,7 +1,9 @@
 // Package repoinstall 为最终开发者把仓库配置成 assistant 工作流：评审 skill、
 // AGENTS.md、仓库 Actions workflow，以及各 AI CLI（claude/opencode/codex）的
-// MCP 配置。生成内容由 templates/ 下的模板绑定渲染（身份约定 ai/merge），全部
-// 带 marker，uninstall 可精确移除；重复 install 幂等。
+// MCP 配置；Claude 另有项目级 .claude/settings.json（env/权限放行，见
+// internal/claudecfg）按白名单键增量托管。生成内容由 templates/ 下的模板绑定
+// 渲染（身份约定 ai/merge），全部带 marker，uninstall 可精确移除；重复 install
+// 幂等。
 package repoinstall
 
 // Marker 是自动生成内容的标识：卸载与覆盖只触碰带 marker 的内容。

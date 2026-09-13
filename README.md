@@ -264,7 +264,15 @@ assistant uninstall            # 移除 assistant 生成的内容
 - `AGENTS.md`：assistant 段落（内容源在 `content/agents.md`，追加，不覆盖用户已有内容）；
 - `CLAUDE.md`：Claude Code 的项目说明，内容稳定为 `@AGENTS.md` 导入（用户自有文件不覆盖）；
 - `.gitea/workflows/assistant.yml`：单文件两个 job——sync（内置令牌）与 automerge（merge 令牌）；旧版 `automerge.yml` 带 marker 时自动清理；
-- MCP：Claude（`.mcp.json` + `.claude/settings.json` 放行 `mcp__gitea*`）、opencode（`opencode.json`，`gitea_*` 放行）、Codex（全局 `~/.codex/config.toml`，`approval_policy = "never"` 自动放行；若你已配置该键则保留）。zcode 暂不支持。
+- MCP：Claude（`.mcp.json` + `.claude/settings.json`：放行 `mcp__gitea*`、托管会话环境变量与只读命令白名单）、opencode（`opencode.json`，`gitea_*` 放行）、Codex（全局 `~/.codex/config.toml`，`approval_policy = "never"` 自动放行；若你已配置该键则保留）。zcode 暂不支持。
+
+Claude 的项目级 `.claude/settings.json` 是**增量托管**：只写下面这些键，其余键（含用户自定义的 `env`/`permissions.deny`）原样保留，`uninstall` 也只摘除仍是我们写入的值：
+
+| 键 | 内容 | 用途 |
+| --- | --- | --- |
+| `env` | `BASH_DEFAULT_TIMEOUT_MS=300000`、`BASH_MAX_TIMEOUT_MS=1800000`、`BASH_MAX_OUTPUT_LENGTH=150000`、`MCP_TIMEOUT=30000`、`MAX_MCP_OUTPUT_TOKENS=50000` | 长测试/构建、测试日志回读、gitea MCP 大 diff 的输出上限 |
+| `permissions.allow` | `mcp__gitea*`、`Bash(assistant:*)`、只读 git（`status`/`diff`/`log`/`show`/`branch`/`rev-parse`/`worktree list`） | 评审场景常用只读命令免打扰；写入类命令仍走权限判定 |
+| `enableAllProjectMcpServers` | `true` | 自动启用 `.mcp.json` 的项目 MCP |
 
 `assistant doctor` 逐项输出 `OK / MISSING / OUTDATED / UNMANAGED / LEGACY / SKIPPED`：本地对照当前模板/镜像检查缺失、过期、非托管、遗留；服务端按配置/remote 定位实例——多个 remote 会逐个探测 `/api/v1/version`（GitHub/GitLab 等非 Gitea 自动跳过），**凭据复用该实例在 `config.json` 中的 admin（`setup`/`login` 写入，OAuth 现场刷新短期令牌），当前仓库未登记在 `repos[]` 也照查**；逐项核对分支保护策略、标签体系、协作者权限（ai write / merge admin）与 `MERGE_TOKEN` secret。每项检查独立执行，单项权限不足只标记 `SKIPPED`，不阻断其余检查。有问题时退出码 1。
 
@@ -293,6 +301,7 @@ status/triage     Issue ───────▶  triage issue #N               
 - **评审标准锚定基线，PR 不可自改**：worktree 建成后立即以宿主检出的 `.claude/` 整体覆盖（skills、settings）——worktree 按 PR head 检出，随带的 `.claude` 是 PR 自己的版本，照单全收等于允许 PR 改弱自己被审的规则。宿主检出缺 `.claude/` 时拒绝起会话（fail-closed）。
 - **镜像同步（`--sync-mirror` / `DISPATCH_SYNC_MIRROR=1`，部署形态开启）**：每轮检测前把宿主检出强制对齐 `origin/<基线分支>`（`--base-branch` / `DISPATCH_BASE_BRANCH`，缺省 `main`）——`git fetch --prune origin` → `git checkout -f -B <基线> origin/<基线>` → `git clean -fd`，本地任何分叉一律丢弃；`.gitignore` 豁免的本地产物不受影响。同步失败跳过本轮等待重试。共享开发检出勿开启。
 - **会话驱动**：`claude -p` 子进程，命令面与手工运维一致（`--permission-mode auto`、`--autocompact auto`、stream-json 输出）。无人值守必需项：`--strict-mcp-config --mcp-config` 从宿主仓库 `.mcp.json` 显式注入 gitea MCP，外加 `--max-turns` / abort 超时兜底 runaway 会话。
+- **独立会话配置**：每次会话在临时目录生成 `--settings`（同一份 env/权限放行，见上文 install 的托管键），并加 `--setting-sources project`（只加载项目级设置）、`--no-session-persistence`（不落会话历史）；**不读取也不写入任何用户级配置**（`~/.claude`）。需要 Claude Code 2.1+（`claude --help` 能看到这些参数；评审镜像安装的是 latest）。
 - **进度两路落点**：控制台实时显示会话 init 与编号的工具调用；完整明细实时写待办日志——stdout 按 stream-json 逐行解析，assistant 文本原样、工具调用记 `🔧 名称`。
 - **一请求一会话，head 漂移即作废**：同一 instance+仓库+PR/Issue 同时至多一个会话；每个请求只拉起一个会话，完成（reviewer 已提交 review / triage 标签已移除）后在标签被 sync 收敛前不再重复拉起——连续 `@ai`、`/review` 不会造成重复会话。验证未过则本轮放行，等待下一轮检测；head 已被作者推进则本轮评审作废，下一轮以新 head 重开。
 - **有界并发（`--concurrency` / `DISPATCH_CONCURRENCY`，缺省 1）**：一轮待办至多同时跑 N 个会话；轮与轮之间是天然 barrier——同一 PR/Issue 同一时刻至多一个会话。
@@ -312,7 +321,7 @@ assistant review 42 --docker-image ...     # 一次性调试同样支持
 ```
 
 - 镜像定义在 `images/review/Dockerfile`：gitea runner 基础镜像 + bun/skills CLI、Claude Code、Go 工具链与常用构建工具，缓存目录统一到 `/root`。
-- **路径一致挂载**：worktree 与宿主 `.mcp.json` 所在目录按相同绝对路径挂进容器，claude 的 `--mcp-config`、`--plugin-dir` 等参数无需改写；`.claude/` 已由 dispatcher 以宿主基线覆盖进 worktree（PR 自带的评审规则不起作用）。
+- **路径一致挂载**：worktree 与宿主 `.mcp.json`、临时会话 `--settings` 所在目录按相同绝对路径挂进容器，claude 的 `--mcp-config`、`--settings`、`--plugin-dir` 等参数无需改写；`.claude/` 已由 dispatcher 以宿主基线覆盖进 worktree（PR 自带的评审规则不起作用）。
 - **认证透传**：`ANTHROPIC_*` / `CLAUDE_*` 及代理变量按白名单 `-e KEY` 从宿主环境继承，其余环境不进容器。
 - **超时兜底**：SIGTERM docker 客户端不会停容器，dispatcher 额外按容器名执行 `docker kill`。
 - **网络**：容器默认 bridge；MCP 需要回连宿主机上的服务时用 `--docker-network host`（或自定义网络）。

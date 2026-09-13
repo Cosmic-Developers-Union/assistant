@@ -1,12 +1,16 @@
 package dispatcher
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"assistant/internal/claudecfg"
 )
 
 func TestBuildPromptPull(t *testing.T) {
@@ -274,10 +278,78 @@ func TestSessionCommandBare(t *testing.T) {
 	if bin != "claude" || container != "" {
 		t.Fatalf("bin=%q container=%q, want claude/bare", bin, container)
 	}
-	for _, want := range []string{"-p", "review pr #1", "--model", "sonnet", "--mcp-config", "/repo/.mcp.json"} {
+	for _, want := range []string{
+		"-p", "review pr #1", "--model", "sonnet", "--mcp-config", "/repo/.mcp.json",
+		"--setting-sources", "project", "--no-session-persistence",
+	} {
 		if !containsString(args, want) {
 			t.Errorf("args missing %q: %v", want, args)
 		}
+	}
+	if containsString(args, "--settings") {
+		t.Errorf("未生成会话配置时不应传 --settings: %v", args)
+	}
+}
+
+// 独立会话配置：env 与权限放行走 claudecfg，未显式预置时由 RunSession 写临时
+// 文件；Docker 形态按相同路径挂载 settings 所在目录。
+func TestWriteClaudeSessionSettings(t *testing.T) {
+	path, cleanup, err := writeClaudeSessionSettings()
+	if err != nil {
+		t.Fatalf("writeClaudeSessionSettings: %v", err)
+	}
+	defer cleanup()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(data, &document); err != nil {
+		t.Fatal(err)
+	}
+	env, _ := document["env"].(map[string]any)
+	if env["BASH_DEFAULT_TIMEOUT_MS"] != claudecfg.Env["BASH_DEFAULT_TIMEOUT_MS"] ||
+		env["MAX_MCP_OUTPUT_TOKENS"] != claudecfg.Env["MAX_MCP_OUTPUT_TOKENS"] {
+		t.Errorf("env = %+v", env)
+	}
+	if document["enableAllProjectMcpServers"] != false {
+		t.Errorf("enableAllProjectMcpServers = %v, want false", document["enableAllProjectMcpServers"])
+	}
+	permissions, _ := document["permissions"].(map[string]any)
+	allow, _ := permissions["allow"].([]any)
+	if !containsString(toStrings(allow), "mcp__gitea__*") || !containsString(toStrings(allow), "Bash(git diff:*)") {
+		t.Errorf("allow = %v", allow)
+	}
+	cleanup()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("cleanup 后文件仍在：%v", err)
+	}
+}
+
+func toStrings(values []any) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if text, ok := value.(string); ok {
+			result = append(result, text)
+		}
+	}
+	return result
+}
+
+func TestSessionMountDirsDedupes(t *testing.T) {
+	dirs := sessionMountDirs(SessionOptions{
+		MCPConfigPath: "/srv/repo/.mcp.json",
+		SettingsPath:  "/srv/repo/session.json",
+	})
+	if !slices.Equal(dirs, []string{"/srv/repo"}) {
+		t.Errorf("dirs = %v, want [/srv/repo]", dirs)
+	}
+	dirs = sessionMountDirs(SessionOptions{
+		MCPConfigPath: "/srv/repo/.mcp.json",
+		SettingsPath:  "/tmp/settings/settings.json",
+	})
+	if !slices.Equal(dirs, []string{"/srv/repo", "/tmp/settings"}) {
+		t.Errorf("dirs = %v", dirs)
 	}
 }
 
@@ -293,6 +365,7 @@ func TestSessionCommandDocker(t *testing.T) {
 		Prompt:        "review pr #2",
 		Cwd:           "/tmp/worktrees/pr-2",
 		MCPConfigPath: "/srv/repo/.mcp.json",
+		SettingsPath:  "/tmp/settings/settings.json",
 	}
 	bin, args, container := sessionCommand(options)
 	if bin != "docker" || container == "" {
@@ -305,6 +378,7 @@ func TestSessionCommandDocker(t *testing.T) {
 		"-v /tmp/worktrees/pr-2:/tmp/worktrees/pr-2",
 		"-w /tmp/worktrees/pr-2",
 		"-v /srv/repo:/srv/repo",
+		"-v /tmp/settings:/tmp/settings",
 		"--network host",
 		"-e ANTHROPIC_API_KEY",
 		"assistant-review:dev claude -p review pr #2",

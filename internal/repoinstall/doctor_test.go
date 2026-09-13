@@ -80,6 +80,14 @@ func TestDoctorDetectsConfigurationDrift(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+	// claude settings 被砍成只剩 MCP 放行（缺 env/只读权限）→ outdated
+	if err := os.WriteFile(
+		filepath.Join(options.Dir, ".claude", "settings.json"),
+		[]byte(`{"enableAllProjectMcpServers":true,"permissions":{"allow":["mcp__gitea","mcp__gitea__*"]}}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
 
 	findings, err = Doctor(options)
 	if err != nil {
@@ -92,6 +100,7 @@ func TestDoctorDetectsConfigurationDrift(t *testing.T) {
 		ManagedClaudePath():       StatusUnmanaged,
 		LegacyWorkflowPaths()[0]:  StatusLegacy,
 		"opencode.json":           StatusOutdated,
+		".claude/settings.json":   StatusOutdated,
 	} {
 		if status := statusOf(t, findings, path); status != want {
 			t.Errorf("%s 状态 = %s, want %s（%+v）", path, status, want, findings)
