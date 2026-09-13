@@ -57,7 +57,9 @@ func newRootCommand(stdout, stderr io.Writer, checker, syncer, merger managerRun
 		"",
 		"多实例配置文件（缺省 ASSISTANT_CONFIG 或当前目录 config.json；都缺省时用环境变量单实例模式）",
 	)
-	command.CompletionOptions.DisableDefaultCmd = true
+	// 保留 Cobra 默认的 `completion` 子命令（bash/zsh/fish/powershell），
+	// 以及命令/旗标的动态补全。
+	command.CompletionOptions.DisableDefaultCmd = false
 
 	checkCommand := &cobra.Command{
 		Use:   "check",

@@ -23,6 +23,24 @@
 
 `assistant --help` 查看全部选项。
 
+### Shell 补全
+
+Cobra 内置的补全命令已启用（命令、旗标与文件路径）：
+
+```bash
+# bash（当前会话）
+source <(assistant completion bash)
+# bash（持久）
+assistant completion bash > /etc/bash_completion.d/assistant
+
+# zsh（持久，写入 fpath）
+assistant completion zsh > "${fpath[1]}/_assistant"
+# fish
+assistant completion fish > ~/.config/fish/completions/assistant.fish
+```
+
+`assistant completion --help` 查看全部说明。
+
 ## 多实例配置（config.json）
 
 不指定配置文件时，所有命令维持环境变量单实例模式（`GITEA_HOST` / `GITEA_ACCESS_TOKEN` / `GITEA_REPOSITORY`）。要同时管理多台 Gitea、多个仓库，写一份 `config.json`（`--config` / `ASSISTANT_CONFIG` / 当前目录 `config.json` 依次生效，示例见 `config.example.json`），机器人命令与调度命令都会按 instance × repo 迭代：

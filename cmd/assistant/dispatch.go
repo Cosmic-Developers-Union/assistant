@@ -88,6 +88,8 @@ func newDispatcherCommands(repoFlag, configFlag *string) []*cobra.Command {
 		Use:   "review <number>",
 		Short: "立即评审单个 PR（跳过检测，端到端调试用）",
 		Args:  cobra.ExactArgs(1),
+		// 编号是数字参数：不触发文件补全
+		ValidArgsFunction: cobra.NoFileCompletions,
 		RunE: func(command *cobra.Command, args []string) error {
 			number, err := parseItemNumber(args[0])
 			if err != nil {
@@ -104,6 +106,8 @@ func newDispatcherCommands(repoFlag, configFlag *string) []*cobra.Command {
 		Use:   "triage <number>",
 		Short: "立即分诊单个 Issue（跳过检测）",
 		Args:  cobra.ExactArgs(1),
+		// 编号是数字参数：不触发文件补全
+		ValidArgsFunction: cobra.NoFileCompletions,
 		RunE: func(command *cobra.Command, args []string) error {
 			number, err := parseItemNumber(args[0])
 			if err != nil {

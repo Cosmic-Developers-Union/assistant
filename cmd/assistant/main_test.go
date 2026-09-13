@@ -49,6 +49,22 @@ func TestRootCommandShowsHelpWithoutArguments(t *testing.T) {
 	}
 }
 
+func TestCompletionCommandGeneratesScript(t *testing.T) {
+	var stdout bytes.Buffer
+	runner := func(context.Context, io.Writer, io.Writer, commandOptions) error {
+		t.Fatal("runner was called")
+		return nil
+	}
+	command := newRootCommand(&stdout, &bytes.Buffer{}, runner, runner, runner)
+	command.SetArgs([]string{"completion", "bash"})
+	if err := command.ExecuteContext(t.Context()); err != nil {
+		t.Fatalf("ExecuteContext() error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "bash completion") {
+		t.Errorf("completion output = %q", stdout.String())
+	}
+}
+
 func TestUnknownCommandFails(t *testing.T) {
 	runner := func(context.Context, io.Writer, io.Writer, commandOptions) error {
 		t.Fatal("runner was called")
