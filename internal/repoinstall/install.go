@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"assistant/content"
 )
 
 // Options 控制 install/uninstall 的行为。
@@ -144,13 +146,16 @@ func Install(ctx context.Context, options Options) error {
 	if err := installSkills(&options); err != nil {
 		return err
 	}
-	// 2) AGENTS.md / 仓库 workflow（模板绑定渲染）
+	// 2) AGENTS.md 段落 / CLAUDE.md 导入 / 仓库 workflow
 	data := TemplateData{Reviewer: options.Reviewer, Merger: options.Merger, Image: options.Image}
-	agents, err := renderTemplate(agentTemplateName, data)
+	agents, err := renderContent("agents", content.AgentsSection, data)
 	if err != nil {
 		return err
 	}
 	if err := installSection(&options, filepath.Join(options.Dir, ManagedAgentPath()), agents); err != nil {
+		return err
+	}
+	if err := installClaudeMD(&options); err != nil {
 		return err
 	}
 	workflow, err := renderTemplate(workflowTemplateName, data)
@@ -196,6 +201,9 @@ func Uninstall(ctx context.Context, options Options) error {
 	uninstallSkills(&options)
 	removeMarkerFile(&options, filepath.Join(options.Dir, ManagedSkillPath()))
 	if err := uninstallSection(&options, filepath.Join(options.Dir, ManagedAgentPath())); err != nil {
+		return err
+	}
+	if err := uninstallClaudeMD(&options); err != nil {
 		return err
 	}
 	for _, relative := range ManagedWorkflowPaths() {
@@ -299,6 +307,61 @@ func uninstallSection(options *Options, path string) error {
 		return options.remove(path)
 	}
 	return options.write(path, remaining)
+}
+
+// installClaudeMD 写入/更新 CLAUDE.md：内容稳定为 @AGENTS.md 导入。已包含
+// 导入行则视为最新；用户自有且不含导入行的文件不覆盖。
+func installClaudeMD(options *Options) error {
+	path := filepath.Join(options.Dir, ManagedClaudePath())
+	existing, err := os.ReadFile(path)
+	switch {
+	case os.IsNotExist(err):
+		return options.write(path, ClaudeTemplate)
+	case err != nil:
+		return err
+	case strings.Contains(string(existing), "@AGENTS.md"):
+		options.Log("已是最新：%s", ManagedClaudePath())
+		return nil
+	case strings.Contains(string(existing), Marker):
+		return options.write(path, ClaudeTemplate)
+	default:
+		options.Log("跳过 %s（用户自有内容，未包含 @AGENTS.md；如需加载约定请手动添加）", ManagedClaudePath())
+		return nil
+	}
+}
+
+// uninstallClaudeMD 移除 install 写入的 CLAUDE.md：整文件是规范内容时删除，
+// 用户自有文件只摘掉 @AGENTS.md 导入行。
+func uninstallClaudeMD(options *Options) error {
+	path := filepath.Join(options.Dir, ManagedClaudePath())
+	existing, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	text := string(existing)
+	if !strings.Contains(text, Marker) && !strings.Contains(text, "@AGENTS.md") {
+		options.Log("跳过 %s（用户自有内容）", ManagedClaudePath())
+		return nil
+	}
+	if strings.Contains(text, Marker) {
+		return options.remove(path)
+	}
+	lines := strings.Split(text, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "@AGENTS.md" {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	remaining := strings.TrimSpace(strings.Join(kept, "\n"))
+	if remaining == "" {
+		return options.remove(path)
+	}
+	return options.write(path, remaining+"\n")
 }
 
 // replaceManagedSection 用 replacement 替换 marker 段落（begin..end），空串即删除。

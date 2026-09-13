@@ -27,7 +27,12 @@ func renderTemplate(name string, data TemplateData) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("读取模板 %s: %w", name, err)
 	}
-	parsed, err := template.New(name).Delims("<<", ">>").Parse(string(content))
+	return renderContent(name, string(content), data)
+}
+
+// renderContent 渲染任意内容源（如 content/ 下维护者编写的文本）。
+func renderContent(name, text string, data TemplateData) (string, error) {
+	parsed, err := template.New(name).Delims("<<", ">>").Parse(text)
 	if err != nil {
 		return "", fmt.Errorf("解析模板 %s: %w", name, err)
 	}

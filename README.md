@@ -247,7 +247,8 @@ assistant uninstall            # 移除 assistant 生成的内容
 - **review 技能**：源码在 `skills/review/SKILL.md`，安装/更新/卸载交给 skills CLI
   （`bunx skills add Cosmic-Developers-Union/assistant --skill review --copy -a claude-code -a opencode -a codex -y`），
   落盘 `.claude/skills/review/`、`.agents/skills/review/`；
-- `AGENTS.md`：assistant 段落（追加，不覆盖用户已有内容）；
+- `AGENTS.md`：assistant 段落（内容源在 `content/agents.md`，追加，不覆盖用户已有内容）；
+- `CLAUDE.md`：Claude Code 的项目说明，内容稳定为 `@AGENTS.md` 导入（用户自有文件不覆盖）；
 - `.gitea/workflows/assistant.yml`：单文件两个 job——sync（内置令牌）与 automerge（merge 令牌）；旧版 `automerge.yml` 带 marker 时自动清理；
 - MCP：Claude（`.mcp.json` + `.claude/settings.json` 放行 `mcp__gitea*`）、opencode（`opencode.json`，`gitea_*` 放行）、Codex（全局 `~/.codex/config.toml`，`approval_policy = "never"` 自动放行；若你已配置该键则保留）。zcode 暂不支持。
 

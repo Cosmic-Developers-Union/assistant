@@ -66,11 +66,14 @@ func TestInstallCreatesArtifactsAndIsIdempotent(t *testing.T) {
 	if err := Install(context.Background(), options); err != nil {
 		t.Fatalf("Install() error = %v", err)
 	}
-	for _, relative := range append([]string{ManagedSkillPath(), ManagedAgentPath()}, ManagedWorkflowPaths()...) {
+	for _, relative := range append([]string{ManagedSkillPath(), ManagedAgentPath(), ManagedClaudePath()}, ManagedWorkflowPaths()...) {
 		path := filepath.Join(options.Dir, relative)
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("missing %s: %v", relative, err)
 		}
+	}
+	if got := readFile(t, filepath.Join(options.Dir, ManagedClaudePath())); got != ClaudeTemplate {
+		t.Errorf("CLAUDE.md = %q, want %q", got, ClaudeTemplate)
 	}
 	// Claude：.mcp.json + settings 放行
 	var mcp map[string]any
@@ -135,6 +138,7 @@ func TestInstallCreatesArtifactsAndIsIdempotent(t *testing.T) {
 	for _, path := range []string{
 		filepath.Join(options.Dir, ManagedSkillPath()),
 		filepath.Join(options.Dir, ManagedAgentPath()),
+		filepath.Join(options.Dir, ManagedClaudePath()),
 		filepath.Join(options.Dir, ".mcp.json"),
 		filepath.Join(options.Dir, ".claude", "settings.json"),
 		filepath.Join(options.Dir, "opencode.json"),
@@ -387,5 +391,52 @@ func TestInstallMigratesLegacyAutomergeWorkflow(t *testing.T) {
 	}
 	if _, err := os.Stat(path()); err != nil {
 		t.Error("user-owned automerge workflow must survive install/uninstall")
+	}
+}
+
+// CLAUDE.md 生命周期：install 写入 @AGENTS.md；uninstall 只移除自己写入的内容，
+// 用户自有文件（含只摘导入行）不受损。
+func TestClaudeMDLifecycle(t *testing.T) {
+	options := testOptions(t)
+	path := filepath.Join(options.Dir, ManagedClaudePath())
+	if err := Install(context.Background(), options); err != nil {
+		t.Fatalf("Install() error = %v", err)
+	}
+	if got := readFile(t, path); got != ClaudeTemplate {
+		t.Fatalf("CLAUDE.md = %q, want %q", got, ClaudeTemplate)
+	}
+	if err := Uninstall(context.Background(), options); err != nil {
+		t.Fatalf("Uninstall() error = %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("CLAUDE.md 应被移除：%v", err)
+	}
+
+	// 用户自有（无导入行）：install 跳过、uninstall 保留
+	if err := os.WriteFile(path, []byte("# 用户说明\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Install(context.Background(), options); err != nil {
+		t.Fatalf("Install() error = %v", err)
+	}
+	if got := readFile(t, path); got != "# 用户说明\n" {
+		t.Errorf("用户 CLAUDE.md 被改写：%q", got)
+	}
+	if err := Uninstall(context.Background(), options); err != nil {
+		t.Fatalf("Uninstall() error = %v", err)
+	}
+	if got := readFile(t, path); got != "# 用户说明\n" {
+		t.Errorf("用户 CLAUDE.md 被删除/改写：%q", got)
+	}
+
+	// 用户内容 + 导入行：uninstall 只摘导入行
+	if err := os.WriteFile(path, []byte("# 用户说明\n@AGENTS.md\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Uninstall(context.Background(), options); err != nil {
+		t.Fatalf("Uninstall() error = %v", err)
+	}
+	if got := readFile(t, path); got != "# 用户说明\n" {
+		t.Errorf("应只摘掉导入行：%q", got)
 	}
 }

@@ -374,7 +374,7 @@ func installAssetsToMain(
 		}
 	}
 	const branch = "e2e-install"
-	assets := append([]string{repoinstall.ManagedSkillPath(), repoinstall.ManagedAgentPath()}, repoinstall.ManagedWorkflowPaths()...)
+	assets := append([]string{repoinstall.ManagedSkillPath(), repoinstall.ManagedAgentPath(), repoinstall.ManagedClaudePath()}, repoinstall.ManagedWorkflowPaths()...)
 	for index, relative := range assets {
 		content, err := os.ReadFile(filepath.Join(dir, relative))
 		if err != nil {

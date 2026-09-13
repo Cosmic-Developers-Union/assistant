@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"assistant/content"
 )
 
 // Finding 状态：doctor 按这些状态报告每一处 install 管理产物的现状。
@@ -40,7 +42,7 @@ func Doctor(options Options) ([]Finding, error) {
 		return nil, err
 	}
 	data := TemplateData{Reviewer: options.Reviewer, Merger: options.Merger, Image: options.Image}
-	agents, err := renderTemplate(agentTemplateName, data)
+	agents, err := renderContent("agents", content.AgentsSection, data)
 	if err != nil {
 		return nil, err
 	}
@@ -51,6 +53,7 @@ func Doctor(options Options) ([]Finding, error) {
 
 	findings := []Finding{
 		checkSection(&options, ManagedAgentPath(), agents),
+		checkClaudeMD(&options),
 	}
 	for _, relative := range ManagedWorkflowPaths() {
 		findings = append(findings, checkFile(&options, relative, workflow))
@@ -105,6 +108,24 @@ func checkSection(options *Options, relative, expected string) Finding {
 		return Finding{Path: relative, Status: StatusOK}
 	}
 	return Finding{Path: relative, Status: StatusOutdated, Detail: "assistant 段落与当前模板不一致"}
+}
+
+// checkClaudeMD 检查 CLAUDE.md：缺导入行、被改写或用户自有。
+func checkClaudeMD(options *Options) Finding {
+	path := filepath.Join(options.Dir, ManagedClaudePath())
+	existing, err := os.ReadFile(path)
+	switch {
+	case os.IsNotExist(err):
+		return Finding{Path: ManagedClaudePath(), Status: StatusMissing, Detail: "未安装"}
+	case err != nil:
+		return Finding{Path: ManagedClaudePath(), Status: StatusMissing, Detail: err.Error()}
+	case strings.Contains(string(existing), "@AGENTS.md"):
+		return Finding{Path: ManagedClaudePath(), Status: StatusOK}
+	case strings.Contains(string(existing), Marker):
+		return Finding{Path: ManagedClaudePath(), Status: StatusOutdated, Detail: "内容与当前模板不一致"}
+	default:
+		return Finding{Path: ManagedClaudePath(), Status: StatusUnmanaged, Detail: "已存在用户自有 CLAUDE.md（未改动）"}
+	}
 }
 
 // checkLegacyWorkflows 报告带 marker 的旧版 workflow（install 会清理）。
