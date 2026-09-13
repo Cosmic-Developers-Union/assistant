@@ -182,3 +182,32 @@ func TestOAuthLoginRejectsStateMismatch(t *testing.T) {
 		t.Errorf("OAuthLogin() error = %v, want state mismatch", err)
 	}
 }
+
+func TestBuildAuthorizeURLScope(t *testing.T) {
+	without := buildAuthorizeURL("https://gitea.example.com", "cid", "http://127.0.0.1:1", "st", "ch", "")
+	if strings.Contains(without, "scope=") {
+		t.Errorf("空 scope 不应带参数：%s", without)
+	}
+	with := buildAuthorizeURL("https://gitea.example.com", "cid", "http://127.0.0.1:1", "st", "ch", "all")
+	if !strings.Contains(with, "scope=all") {
+		t.Errorf("应带 scope 参数：%s", with)
+	}
+}
+
+func TestOAuthErrorHintsOnScopeMismatch(t *testing.T) {
+	err := oauthError("a grant exists with different scope", "https://gitea.example.com/")
+	message := err.Error()
+	for _, want := range []string{
+		"different scope",
+		"https://gitea.example.com/user/settings/applications",
+		"--oauth-scope",
+	} {
+		if !strings.Contains(message, want) {
+			t.Errorf("error 缺少 %q：%s", want, message)
+		}
+	}
+	plain := oauthError("access_denied", "https://gitea.example.com").Error()
+	if strings.Contains(plain, "--oauth-scope") {
+		t.Errorf("无关错误不应带 scope 提示：%s", plain)
+	}
+}

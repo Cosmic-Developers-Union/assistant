@@ -31,6 +31,10 @@ type OAuthOptions struct {
 	Host         string
 	ClientID     string
 	ClientSecret string
+	// Scope 是授权请求的 scope（逗号分隔，如 all 或 read:user,write:repository）；
+	// 空表示不发送 scope 参数。Gitea 会拒绝与已有授权记录 scope 不一致的请求
+	// （a grant exists with different scope），此时撤销旧授权或用本参数对齐。
+	Scope string
 	// Port 是本地回调端口；0 表示随机空闲端口。
 	Port int
 	// OpenBrowser 打开授权页；nil 时回退系统默认浏览器（失败仅提示 URL）。
@@ -52,6 +56,35 @@ type OAuthResult struct {
 type oauthCallback struct {
 	code string
 	err  error
+}
+
+// buildAuthorizeURL 组装授权页地址；scope 为空时不带 scope 参数。
+func buildAuthorizeURL(host, clientID, redirectURI, state, challenge, scope string) string {
+	values := url.Values{
+		"client_id":             {clientID},
+		"redirect_uri":          {redirectURI},
+		"response_type":         {"code"},
+		"state":                 {state},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+	}
+	if trimmed := strings.TrimSpace(scope); trimmed != "" {
+		values.Set("scope", trimmed)
+	}
+	return host + "/login/oauth/authorize?" + values.Encode()
+}
+
+// oauthError 把 Gitea 的 error_description 包装成可行动的提示。Gitea 会拒绝与
+// 已有授权记录 scope 不一致的授权请求（a grant exists with different scope）。
+func oauthError(message, host string) error {
+	hint := ""
+	if strings.Contains(message, "different scope") {
+		hint = fmt.Sprintf(
+			"；已存在不同 scope 的授权：在 %s/user/settings/applications 撤销该应用授权，"+
+				"或用 --oauth-scope 指定与旧授权一致的 scope 重试",
+			strings.TrimRight(host, "/"))
+	}
+	return fmt.Errorf("OAuth 授权失败：%s%s", message, hint)
 }
 
 // OAuthLogin 走 OAuth2 授权码 + PKCE：本地监听回调、打开浏览器、兑换令牌并
@@ -104,7 +137,7 @@ func OAuthLogin(ctx context.Context, options OAuthOptions) (OAuthResult, error) 
 			return
 		}
 		if message := query.Get("error_description"); message != "" {
-			callbacks <- oauthCallback{err: fmt.Errorf("OAuth 授权失败：%s", message)}
+			callbacks <- oauthCallback{err: oauthError(message, host)}
 			http.Error(writer, message, http.StatusBadRequest)
 			return
 		}
@@ -121,14 +154,7 @@ func OAuthLogin(ctx context.Context, options OAuthOptions) (OAuthResult, error) 
 	defer server.Close()
 	go func() { _ = server.Serve(listener) }()
 
-	authorizeURL := host + "/login/oauth/authorize?" + url.Values{
-		"client_id":             {options.ClientID},
-		"redirect_uri":          {redirectURI},
-		"response_type":         {"code"},
-		"state":                 {state},
-		"code_challenge":        {challenge},
-		"code_challenge_method": {"S256"},
-	}.Encode()
+	authorizeURL := buildAuthorizeURL(host, options.ClientID, redirectURI, state, challenge, options.Scope)
 	logf("OAuth 授权：请在浏览器完成登录与授权")
 	open := options.OpenBrowser
 	if open == nil {

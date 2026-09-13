@@ -33,6 +33,7 @@ type setupOptions struct {
 	Relogin            bool
 	OAuthClientID      string
 	OAuthClientSecret  string
+	OAuthScope         string
 	OAuthPort          int
 	Repos              []string
 	ReviewerName       string
@@ -80,6 +81,8 @@ func newSetupCommand(configFlag *string) *cobra.Command {
 		"OAuth2 Client ID（缺省用 Gitea 内置 tea 公共客户端；旧版 Gitea 需自建公共应用）",
 	)
 	flags.StringVar(&options.OAuthClientSecret, "oauth-client-secret", "", "OAuth2 Client Secret（公共客户端留空）")
+	flags.StringVar(&options.OAuthScope, "oauth-scope", "",
+		"授权 scope（如 all 或 read:user,write:repository；缺省不带 scope。已有授权记录换 scope 会被 Gitea 拒绝，需撤销旧授权或用本参数对齐）")
 	flags.IntVar(&options.OAuthPort, "oauth-port", 0, "OAuth 本地回调端口（缺省随机空闲端口；confidential 客户端需与注册的重定向 URI 端口一致）")
 	flags.StringSliceVar(&options.Repos, "repos", nil, "仓库 owner/name（逗号分隔可多个；缺省取配置文件；两者皆空时只初始化账号与令牌）")
 	flags.StringVar(&options.ReviewerName, "reviewer", "", "内容评审账号名（缺省 ai）")
@@ -196,6 +199,7 @@ func runSetup(command *cobra.Command, configPath string, options *setupOptions) 
 			Host:         host,
 			ClientID:     options.OAuthClientID,
 			ClientSecret: options.OAuthClientSecret,
+			Scope:        options.OAuthScope,
 			Port:         options.OAuthPort,
 			Log:          logf,
 		}
