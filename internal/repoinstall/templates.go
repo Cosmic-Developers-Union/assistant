@@ -18,15 +18,29 @@ const (
 // DefaultImage 是仓库 workflow 默认运行的 assistant 容器镜像。
 const DefaultImage = "ghcr.io/cosmic-developers-union/assistant:latest"
 
+// DefaultSkillsSource 是 review 技能通过 skills CLI 安装时的默认源（本仓库）。
+const DefaultSkillsSource = "Cosmic-Developers-Union/assistant"
+
 // 模板文件名（与 templates/ 目录内文件对应）。
 const (
-	skillTemplateName    = "skill.md.tmpl"
 	agentTemplateName    = "agents.md.tmpl"
 	workflowTemplateName = "workflow.yml.tmpl"
 )
 
-// ManagedSkillPath 返回 skill 相对路径。
+// ManagedSkillPath 返回 claude-code 的技能安装路径（skills CLI 的 agent 目录
+// 约定；opencode/codex 见 skillPathForTool）。
 func ManagedSkillPath() string { return ".claude/skills/review/SKILL.md" }
+
+// skillPathForTool 返回各 AI CLI 的技能安装路径。
+func skillPathForTool(tool string) (string, bool) {
+	switch tool {
+	case "claude":
+		return ".claude/skills/review/SKILL.md", true
+	case "opencode", "codex":
+		return ".agents/skills/review/SKILL.md", true
+	}
+	return "", false
+}
 
 // ManagedAgentPath 是 AGENTS.md。
 func ManagedAgentPath() string { return "AGENTS.md" }

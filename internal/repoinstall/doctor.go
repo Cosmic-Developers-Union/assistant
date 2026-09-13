@@ -40,10 +40,6 @@ func Doctor(options Options) ([]Finding, error) {
 		return nil, err
 	}
 	data := TemplateData{Reviewer: options.Reviewer, Merger: options.Merger, Image: options.Image}
-	skill, err := renderTemplate(skillTemplateName, data)
-	if err != nil {
-		return nil, err
-	}
 	agents, err := renderTemplate(agentTemplateName, data)
 	if err != nil {
 		return nil, err
@@ -54,12 +50,12 @@ func Doctor(options Options) ([]Finding, error) {
 	}
 
 	findings := []Finding{
-		checkFile(&options, ManagedSkillPath(), skill),
 		checkSection(&options, ManagedAgentPath(), agents),
 	}
 	for _, relative := range ManagedWorkflowPaths() {
 		findings = append(findings, checkFile(&options, relative, workflow))
 	}
+	findings = append(findings, skillsFindings(&options)...)
 	findings = append(findings, checkLegacyWorkflows(&options)...)
 	for _, tool := range options.Tools {
 		switch tool {

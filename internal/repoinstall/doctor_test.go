@@ -93,22 +93,3 @@ func TestDoctorDetectsConfigurationDrift(t *testing.T) {
 		}
 	}
 }
-
-// 用户自有的 skill 文件（无 marker）不能被 install 覆盖，doctor 报 unmanaged。
-func TestDoctorReportsUnmanagedSkill(t *testing.T) {
-	options := testOptions(t)
-	path := filepath.Join(options.Dir, ManagedSkillPath())
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("# mine\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	findings, err := Doctor(options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if status := statusOf(t, findings, ManagedSkillPath()); status != StatusUnmanaged {
-		t.Errorf("status = %s, want unmanaged", status)
-	}
-}

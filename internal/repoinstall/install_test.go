@@ -6,8 +6,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"assistant/skills"
 )
 
 func testOptions(t *testing.T) Options {
@@ -17,8 +20,36 @@ func testOptions(t *testing.T) Options {
 		Dir:             dir,
 		Tools:           SupportedTools(),
 		CodexConfigPath: filepath.Join(t.TempDir(), ".codex", "config.toml"),
+		RunSkills:       stubSkillsRunner,
 		Log:             func(string, ...any) {},
 	}
+}
+
+// stubSkillsRunner 模拟 skills CLI：按 agent 落盘/删除技能文件。
+func stubSkillsRunner(request SkillsRequest) error {
+	paths := map[string]string{
+		"claude-code": ".claude/skills/review/SKILL.md",
+		"opencode":    ".agents/skills/review/SKILL.md",
+		"codex":       ".agents/skills/review/SKILL.md",
+	}
+	for _, agent := range request.Agents {
+		relative, ok := paths[agent]
+		if !ok {
+			continue
+		}
+		path := filepath.Join(request.Dir, relative)
+		if request.Remove {
+			_ = os.Remove(path)
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(path, []byte(skills.Review), 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func readFile(t *testing.T, path string) string {
@@ -168,18 +199,48 @@ func TestUninstallKeepsUserContent(t *testing.T) {
 	}
 }
 
-func TestInstallRefusesUserOwnedSkill(t *testing.T) {
+// 技能安装/卸载委托给 skills CLI（bunx skills）：install 调 add、uninstall 调
+// remove，agent 名按 CLI 约定映射。
+func TestInstallDelegatesSkillsToCLI(t *testing.T) {
 	options := testOptions(t)
-	path := filepath.Join(options.Dir, ManagedSkillPath())
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
+	options.Tools = []string{"claude", "opencode"}
+	var requests []SkillsRequest
+	options.RunSkills = func(request SkillsRequest) error {
+		requests = append(requests, request)
+		return stubSkillsRunner(request)
 	}
-	if err := os.WriteFile(path, []byte("# 用户自己的 skill\n"), 0o644); err != nil {
-		t.Fatal(err)
+	if err := Install(context.Background(), options); err != nil {
+		t.Fatalf("Install() error = %v", err)
 	}
-	err := Install(context.Background(), options)
-	if err == nil || !strings.Contains(err.Error(), "marker") {
-		t.Errorf("Install() error = %v, want marker refusal", err)
+	wantAgents := []string{"claude-code", "opencode"}
+	if len(requests) != 1 || requests[0].Remove ||
+		!slices.Equal(requests[0].Agents, wantAgents) ||
+		requests[0].Source != DefaultSkillsSource {
+		t.Fatalf("install skills requests = %+v", requests)
+	}
+	if _, err := os.Stat(filepath.Join(options.Dir, ".agents/skills/review/SKILL.md")); err != nil {
+		t.Errorf("opencode 技能应已安装: %v", err)
+	}
+
+	requests = nil
+	if err := Uninstall(context.Background(), options); err != nil {
+		t.Fatalf("Uninstall() error = %v", err)
+	}
+	if len(requests) != 1 || !requests[0].Remove || !slices.Equal(requests[0].Agents, wantAgents) {
+		t.Fatalf("uninstall skills requests = %+v", requests)
+	}
+}
+
+func TestInstallSkipsSkillsWithNoneSource(t *testing.T) {
+	options := testOptions(t)
+	options.SkillsSource = "none"
+	called := false
+	options.RunSkills = func(SkillsRequest) error { called = true; return nil }
+	if err := Install(context.Background(), options); err != nil {
+		t.Fatalf("Install() error = %v", err)
+	}
+	if called {
+		t.Error("--skills-source none 时不应调用 skills CLI")
 	}
 }
 

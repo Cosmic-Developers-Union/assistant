@@ -21,9 +21,21 @@ type Options struct {
 	Reviewer string
 	Merger   string
 	// Image 是仓库 workflow 运行的 assistant 容器镜像（缺省官方镜像）。
-	Image  string
-	DryRun bool
-	Log    func(string, ...any)
+	Image string
+	// SkillsSource 是 skills CLI 的安装源（缺省本仓库）；"none" 表示不管理技能。
+	SkillsSource string
+	// RunSkills 覆盖 skills CLI 调用（测试注入）；缺省执行 bunx skills。
+	RunSkills func(SkillsRequest) error
+	DryRun    bool
+	Log       func(string, ...any)
+}
+
+// SkillsRequest 描述一次 skills CLI 调用。
+type SkillsRequest struct {
+	Dir    string
+	Source string
+	Agents []string
+	Remove bool
 }
 
 var supportedTools = []string{"claude", "opencode", "codex"}
@@ -69,6 +81,12 @@ func (o *Options) normalize() error {
 	}
 	if o.Image == "" {
 		o.Image = DefaultImage
+	}
+	if o.SkillsSource == "" {
+		o.SkillsSource = DefaultSkillsSource
+	}
+	if o.RunSkills == nil {
+		o.RunSkills = runSkillsCLI
 	}
 	if o.CodexConfigPath == "" {
 		home, err := os.UserHomeDir()
@@ -120,15 +138,14 @@ func Install(ctx context.Context, options Options) error {
 	if err := options.normalize(); err != nil {
 		return err
 	}
+	// 1) 技能：安装/更新交给 skills CLI（bunx skills add <repo> --skill review），
+	//    先清理旧版带 marker 的直接写入，避免与 CLI 冲突
+	removeMarkerFile(&options, filepath.Join(options.Dir, ManagedSkillPath()))
+	if err := installSkills(&options); err != nil {
+		return err
+	}
+	// 2) AGENTS.md / 仓库 workflow（模板绑定渲染）
 	data := TemplateData{Reviewer: options.Reviewer, Merger: options.Merger, Image: options.Image}
-	// 1) 评审 skill / AGENTS.md / 仓库 workflow（模板绑定渲染）
-	skill, err := renderTemplate(skillTemplateName, data)
-	if err != nil {
-		return err
-	}
-	if err := installFile(&options, filepath.Join(options.Dir, ManagedSkillPath()), skill); err != nil {
-		return err
-	}
 	agents, err := renderTemplate(agentTemplateName, data)
 	if err != nil {
 		return err
@@ -151,7 +168,7 @@ func Install(ctx context.Context, options Options) error {
 			return err
 		}
 	}
-	// 2) 各 AI CLI 的 MCP 配置
+	// 3) 各 AI CLI 的 MCP 配置
 	for _, tool := range options.Tools {
 		var err error
 		switch tool {
@@ -169,14 +186,15 @@ func Install(ctx context.Context, options Options) error {
 	return nil
 }
 
-// Uninstall 移除 install 写入的内容（只触碰带 marker 的内容）。
+// Uninstall 移除 install 写入的内容（技能由 skills CLI 卸载，其余只触碰带
+// marker 的内容）。
 func Uninstall(ctx context.Context, options Options) error {
 	if err := options.normalize(); err != nil {
 		return err
 	}
-	if err := uninstallFile(&options, filepath.Join(options.Dir, ManagedSkillPath())); err != nil {
-		return err
-	}
+	// 技能：skills CLI 卸载 + 旧版 marker 文件清理
+	uninstallSkills(&options)
+	removeMarkerFile(&options, filepath.Join(options.Dir, ManagedSkillPath()))
 	if err := uninstallSection(&options, filepath.Join(options.Dir, ManagedAgentPath())); err != nil {
 		return err
 	}

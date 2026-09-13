@@ -1,4 +1,8 @@
-<!-- managed-by: assistant -->
+---
+name: review
+description: 按本仓库的 assistant 流程评审 Pull Request（Gitea 原生 review 落库）与分诊 Issue。收到 review pr #N / triage issue #N 指令，或需要按 assistant 标签体系处理 PR/Issue 时使用。
+---
+
 # review
 
 本仓库的评审与分诊协议。执行 `review pr #N` / `triage issue #N` 时严格遵循。

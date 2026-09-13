@@ -22,6 +22,7 @@ import (
 	"assistant/internal/repoinstall"
 	"assistant/internal/setup"
 	"assistant/internal/status"
+	"assistant/skills"
 )
 
 const (
@@ -201,6 +202,19 @@ func TestInstalledWorkflowRunsOnGiteaRunner(t *testing.T) {
 		})
 }
 
+// stubE2ESkills 模拟 skills CLI：把仓库内的 review 技能源复制到 claude 目录
+// （e2e 不依赖 bun/网络；技能安装本身由 repoinstall 单测覆盖）。
+func stubE2ESkills(request repoinstall.SkillsRequest) error {
+	path := filepath.Join(request.Dir, repoinstall.ManagedSkillPath())
+	if request.Remove {
+		return os.Remove(path)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(skills.Review), 0o644)
+}
+
 // repoAPI 返回仓库 API 前缀。
 func repoAPI(host, fullName string) string {
 	return host + "/api/v1/repos/" + fullName
@@ -343,6 +357,7 @@ func installAssetsToMain(
 		Tools:           []string{"claude"},
 		CodexConfigPath: filepath.Join(dir, "codex.toml"),
 		Image:           image,
+		RunSkills:       stubE2ESkills,
 		Log:             t.Logf,
 	}
 	if err := repoinstall.Install(ctx, installOptions); err != nil {
