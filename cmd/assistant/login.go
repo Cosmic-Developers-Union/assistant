@@ -78,7 +78,11 @@ func runLogin(command *cobra.Command, configPath, argHost string, options *login
 	}
 
 	// 令牌登录：显式 --token，或复用 tea CLI 在本站点的登录（本地配置，只读）
-	if token, source := resolveLoginToken(host, options.Token, os.Getenv); token != "" {
+	token, source, teaHint := resolveLoginToken(host, options.Token, os.Getenv)
+	if token == "" && teaHint != "" {
+		logf("%s", teaHint)
+	}
+	if token != "" {
 		client, err := status.NewClient(host, token)
 		if err != nil {
 			return err
@@ -127,15 +131,26 @@ func runLogin(command *cobra.Command, configPath, argHost string, options *login
 }
 
 // resolveLoginToken 解析登录令牌：显式 --token 优先，否则复用 tea CLI 配置中
-// 本站点的登录；返回来源描述（空表示没有可用令牌）。
-func resolveLoginToken(host, explicitToken string, getenv func(string) string) (token, source string) {
+// 本站点的登录；返回来源描述（空表示没有可用令牌）与诊断提示（tea 有登录条目
+// 但没有令牌时给出可行动说明）。
+func resolveLoginToken(host, explicitToken string, getenv func(string) string) (token, source, hint string) {
 	if value := strings.TrimSpace(explicitToken); value != "" {
-		return value, "--token"
+		return value, "--token", ""
 	}
 	if value, path, ok := repoinstall.DetectTeaToken(host, getenv); ok {
-		return value, "tea config（" + path + "）"
+		return value, "tea config（" + path + "）", ""
 	}
-	return "", ""
+	if status := repoinstall.InspectTeaLogin(host, getenv); status.Found && !status.HasToken {
+		method := status.AuthMethod
+		if method == "" {
+			method = "未知认证方式"
+		}
+		hint = fmt.Sprintf(
+			"检测到 tea CLI 有本站点登录 %q（%s，%s）但没有保存令牌：请重新 `tea login` 保存令牌，"+
+				"或改用 --token 提供访问令牌",
+			status.Name, status.Path, method)
+	}
+	return "", "", hint
 }
 
 // upsertLoginInstance 按 host 更新/新增实例条目；保留未触碰的字段。

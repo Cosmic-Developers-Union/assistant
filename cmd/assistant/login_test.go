@@ -122,14 +122,25 @@ func TestResolveLoginToken(t *testing.T) {
 	}
 	t.Setenv("TEA_CONFIG", path)
 
-	if token, source := resolveLoginToken("https://gitea.example.com", "explicit-token", os.Getenv); token != "explicit-token" || source != "--token" {
+	if token, source, _ := resolveLoginToken("https://gitea.example.com", "explicit-token", os.Getenv); token != "explicit-token" || source != "--token" {
 		t.Errorf("显式令牌 = %q %q", token, source)
 	}
-	token, source := resolveLoginToken("https://gitea.example.com/", "", os.Getenv)
-	if token != "tea-token" || !strings.Contains(source, "tea config") {
-		t.Errorf("tea 复用 = %q %q, want tea-token", token, source)
+	token, source, hint := resolveLoginToken("https://gitea.example.com/", "", os.Getenv)
+	if token != "tea-token" || !strings.Contains(source, "tea config") || hint != "" {
+		t.Errorf("tea 复用 = %q %q hint=%q, want tea-token", token, source, hint)
 	}
-	if token, _ := resolveLoginToken("https://other.example.com", "", os.Getenv); token != "" {
-		t.Errorf("未登录站点不应命中：%q", token)
+	if token, _, hint := resolveLoginToken("https://other.example.com", "", os.Getenv); token != "" || hint != "" {
+		t.Errorf("未登录站点不应命中：%q hint=%q", token, hint)
+	}
+
+	// 有登录条目但没有令牌：给出可行动提示
+	noToken := filepath.Join(dir, "no-token.yml")
+	if err := os.WriteFile(noToken, []byte("logins:\n  - name: GeX\n    url: https://gitea.aicler.com\n    auth_method: oauth\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TEA_CONFIG", noToken)
+	token, _, hint = resolveLoginToken("https://gitea.aicler.com", "", os.Getenv)
+	if token != "" || !strings.Contains(hint, "没有保存令牌") || !strings.Contains(hint, "--token") {
+		t.Errorf("空令牌提示缺失：token=%q hint=%q", token, hint)
 	}
 }
