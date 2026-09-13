@@ -23,7 +23,7 @@ type commandOptions struct {
 	Wait       bool
 	Timeout    time.Duration
 	Interval   time.Duration
-	// ConfigPath 是多实例配置文件路径（--config / ASSISTANT_CONFIG / ./config.json）
+	// ConfigPath 是多实例配置文件路径（--config / ASSISTANT_CONFIG / 平台标准配置目录）
 	ConfigPath string
 }
 
@@ -55,7 +55,7 @@ func newRootCommand(stdout, stderr io.Writer, checker, syncer, merger managerRun
 		&options.ConfigPath,
 		"config",
 		"",
-		"多实例配置文件（缺省 ASSISTANT_CONFIG 或当前目录 config.json；都缺省时用环境变量单实例模式）",
+		"多实例配置文件（缺省 ASSISTANT_CONFIG 或平台标准配置目录；都缺省时用环境变量单实例模式）",
 	)
 	// 保留 Cobra 默认的 `completion` 子命令（bash/zsh/fish/powershell），
 	// 以及命令/旗标的动态补全。
@@ -113,6 +113,7 @@ func newRootCommand(stdout, stderr io.Writer, checker, syncer, merger managerRun
 	}
 	command.AddCommand(checkCommand, syncCommand, autoMergeCommand)
 	command.AddCommand(newDispatcherCommands(&options.Repository, &options.ConfigPath)...)
+	command.AddCommand(newLoginCommand(&options.ConfigPath))
 	command.AddCommand(newSetupCommand(&options.ConfigPath))
 	command.AddCommand(newActionsCommand(&options.ConfigPath))
 	command.AddCommand(newInstallCommand(), newUninstallCommand(), newMCPCommand(), newDoctorCommand())

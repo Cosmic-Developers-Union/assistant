@@ -12,6 +12,7 @@
 | 命令 | 角色 | 说明 |
 | --- | --- | --- |
 | `assistant setup` | 初始化 | 建机器人账号/令牌、配协作者与分支保护、补齐标签，并写入 `config.json` |
+| `assistant login` | 初始化 | OAuth 登录登记/刷新平台（写入 `admin_oauth`）；`login list`/`login remove` 管理平台 |
 | `assistant actions` | 初始化 | 为配置中的仓库写入 Actions secrets（merge 令牌等；身份约定 ai/merge，无需 variable） |
 | `assistant install` | 开发者 | 在仓库检出内配置 skills / AGENTS.md / workflow / 各 AI CLI 的 MCP |
 | `assistant uninstall` | 开发者 | 移除 `install` 写入的内容（只触碰带 marker 的） |
@@ -47,7 +48,7 @@ assistant completion fish > ~/.config/fish/completions/assistant.fish
 
 ## 多实例配置（config.json）
 
-不指定配置文件时，所有命令维持环境变量单实例模式（`GITEA_HOST` / `GITEA_ACCESS_TOKEN` / `GITEA_REPOSITORY`）。要同时管理多台 Gitea、多个仓库，写一份 `config.json`。查找顺序：`--config` > `ASSISTANT_CONFIG` > 当前目录 `config.json` > 平台标准配置目录 `<UserConfigDir>/Cosmic-Developers-Union/assistant/config.json`（Linux `~/.config`、macOS `~/Library/Application Support`、Windows `%AppData%`）；示例见 `config.example.json`。机器人命令与调度命令都会按 instance × repo 迭代：
+不指定配置文件时，所有命令维持环境变量单实例模式（`GITEA_HOST` / `GITEA_ACCESS_TOKEN` / `GITEA_REPOSITORY`）。要同时管理多台 Gitea、多个仓库，写一份 `config.json`。查找顺序：`--config` > `ASSISTANT_CONFIG` > 平台标准配置目录 `<UserConfigDir>/Cosmic-Developers-Union/assistant/config.json`（Linux `~/.config`、macOS `~/Library/Application Support`、Windows `%AppData%`）；**不读当前目录 `config.json`**（避免检出里的同名文件被误当运行配置），示例见 `config.example.json`。机器人命令与调度命令都会按 instance × repo 迭代：
 
 ```json
 {
@@ -78,6 +79,18 @@ assistant completion fish > ~/.config/fish/completions/assistant.fish
 - `repos`：仓库清单。字符串是 `owner/name` 简写（有 `dir`/`merger_token` 时写对象）；调度引擎的 `review`/`triage` 会话需要本地检出，多仓库时给出 `dir`（单仓库可省略，退回启动目录的检出）。
 - 路径默认值按仓库隔离：日志 `<检出>/logs`、锁 `<检出>/dispatcher.lock`、worktree `<临时目录>/agent-dispatcher/<owner>-<repo>/worktrees`。
 - 文件含令牌，`setup` 以 0600 写入；请勿提交到版本库（`.gitignore` 已忽略常见位置，建议自行确认）。
+
+### 平台管理：assistant login
+
+`login` 只负责平台条目与 OAuth 凭据，不做账号/仓库初始化（那是 `setup`）：
+
+```bash
+assistant login https://gitea.example.com     # OAuth 登录，写入/刷新 admin_oauth（不落 access token）
+assistant login list                          # 列出平台：凭据类型（oauth/token/none）、仓库数、ai/merge 账号
+assistant login remove https://gitea.example.com   # 移除平台条目（不触碰 Gitea 侧账号/仓库）
+```
+
+host 可省略：取配置中唯一实例，否则在带 Gitea remote 的检出内探测（`/api/v1/version`，多 remote 逐个尝试）。`--oauth-client-id/--oauth-client-secret/--oauth-port` 控制 OAuth 应用与回调端口。
 
 ### 初始化：assistant setup
 
@@ -115,7 +128,7 @@ OAuth 登录说明：默认使用 Gitea 内置的 `tea` 公共客户端；内置
 3. 收敛令牌：reviewer 全实例唯一（删除账号下其余令牌）；merger **按仓库独立**——每个项目一个 `assistant-<hash8>` 令牌，只清理同名旧令牌与历史共享名，不动其他仓库。建令牌端点仅接受 Basic Auth，必要时以管理员身份重置机器人密码后创建；
 4. 把两个账号加为仓库协作者：reviewer 写权限，**merger 管理员权限**（合并白名单成员 + 分支保护读取），并补齐与 `sync` 完全相同口径的标签体系；
 5. 在默认分支配置分支保护：`required approvals=2`（内容批准 + 状态会签）、**合并白名单只含 merger（只有它可以合入）**、驳回阻塞（`block_on_rejected_reviews`）、过期批准作废、落后分支阻塞、**勾选「管理员须遵守分支保护规则」（`block_admin_merge_override`，管理员也不得绕过）**，以及**「有官方审核阻止了代码合并」（`block_on_official_review_requests`）**：合并 job（merge 管理员身份）会把 `/review`、`@ai` 提及登记为正式评审请求，内容评审者提交 review 后由它撤回遗留请求、门禁解除（Gitea 只允许 PR 作者或仓库管理员选择 reviewer，`gitea-actions` 会被拒绝，因此请求维护不在 sync）。注意：**团队评审请求**不会因成员 review 自动清除，需人工移除后合并才解除；API 的 `requested_reviewers` 字段有显示滞后，不代表门禁实际状态；
-6. 把结果写回 `config.json`（0600；缺省落点优先当前目录已有文件，否则平台标准配置目录）。`--create-repos` 会在仓库不存在时自动创建私有仓库（auto_init，默认分支 main）。
+6. 把结果写回 `config.json`（0600；落点：`--config` / `ASSISTANT_CONFIG`，否则平台标准配置目录）。`--create-repos` 会在仓库不存在时自动创建私有仓库（auto_init，默认分支 main）。
 
 常用开关：`--dry-run`（只输出计划）、`--relogin`（强制 OAuth 重新登录）、`--allow-admin-override`（放开管理员绕过，缺省关闭）、`--reviewer` / `--merger`（账号名）、`--required-approvals`、`--email-domain`。
 

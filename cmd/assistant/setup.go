@@ -263,39 +263,27 @@ func runSetup(command *cobra.Command, configPath string, options *setupOptions) 
 }
 
 // loadInstanceFileForSetup 读取已有配置供 setup 增量更新：显式 --config /
-// ASSISTANT_CONFIG 指向不存在的文件是允许的（首次创建）；否则依次查当前目录
-// 与平台标准配置目录（都不存在时返回 nil）。
+// ASSISTANT_CONFIG 指向不存在的文件是允许的（首次创建）；否则用平台标准配置
+// 目录（不存在时返回 nil）。不读当前目录 config.json。
 func loadInstanceFileForSetup(configPath string) (string, *instances.File, error) {
 	path := strings.TrimSpace(configPath)
 	if path == "" {
 		path = strings.TrimSpace(os.Getenv("ASSISTANT_CONFIG"))
 	}
-	if path != "" {
-		if _, err := os.Stat(path); err == nil {
-			file, err := instances.Load(path)
-			return path, file, err
-		} else if !os.IsNotExist(err) {
-			return "", nil, err
+	if path == "" {
+		standard, err := instances.DefaultConfigPath()
+		if err != nil {
+			return "", nil, nil
 		}
-		return path, nil, nil
+		path = standard
 	}
-	if _, err := os.Stat("config.json"); err == nil {
-		file, err := instances.Load("config.json")
-		return "config.json", file, err
+	if _, err := os.Stat(path); err == nil {
+		file, err := instances.Load(path)
+		return path, file, err
 	} else if !os.IsNotExist(err) {
 		return "", nil, err
 	}
-	standard, err := instances.DefaultConfigPath()
-	if err != nil {
-		return "", nil, nil
-	}
-	if _, err := os.Stat(standard); err == nil {
-		file, err := instances.Load(standard)
-		return standard, file, err
-	} else if !os.IsNotExist(err) {
-		return "", nil, err
-	}
-	return "", nil, nil
+	return path, nil, nil
 }
 
 func cleanStrings(values []string) []string {

@@ -17,23 +17,14 @@ import (
 // resolveInstanceFile 解析多实例配置文件，按优先级查找：
 //  1. --config
 //  2. ASSISTANT_CONFIG
-//  3. 当前目录 config.json（存在才用）
-//  4. 平台标准配置目录 <UserConfigDir>/Cosmic-Developers-Union/assistant/config.json
+//  3. 平台标准配置目录 <UserConfigDir>/Cosmic-Developers-Union/assistant/config.json
 //
-// 都没有时返回 nil，调用方退回环境变量单实例模式。
+// 不读取当前目录 config.json：仓库检出里同名文件（示例、脚本产物）会被意外
+// 当成运行配置，行为随 cwd 漂移。都没有时返回 nil，调用方退回环境变量单实例模式。
 func resolveInstanceFile(options commandOptions) (string, *instances.File, error) {
 	path := strings.TrimSpace(options.ConfigPath)
-	explicit := path != ""
-	if !explicit {
+	if path == "" {
 		path = strings.TrimSpace(os.Getenv("ASSISTANT_CONFIG"))
-		explicit = path != ""
-	}
-	if !explicit {
-		if _, err := os.Stat("config.json"); err == nil {
-			path = "config.json"
-		} else if !os.IsNotExist(err) {
-			return "", nil, err
-		}
 	}
 	if path == "" {
 		standard, err := instances.DefaultConfigPath()
@@ -56,20 +47,15 @@ func resolveInstanceFile(options commandOptions) (string, *instances.File, error
 	return path, file, nil
 }
 
-// setupConfigWritePath 决定 setup 写配置的落点：--config / ASSISTANT_CONFIG
-// 显式指定优先；否则沿用当前目录已有的 config.json；否则用平台标准配置目录
-// （不存在则创建）。
+// setupConfigWritePath 决定 setup/login 写配置的落点：--config / ASSISTANT_CONFIG
+// 显式指定优先；否则用平台标准配置目录（不存在则创建）。不落当前目录，避免
+// 检出内出现运行配置。
 func setupConfigWritePath(configPath string) (string, error) {
 	if path := strings.TrimSpace(configPath); path != "" {
 		return path, nil
 	}
 	if path := strings.TrimSpace(os.Getenv("ASSISTANT_CONFIG")); path != "" {
 		return path, nil
-	}
-	if _, err := os.Stat("config.json"); err == nil {
-		return "config.json", nil
-	} else if !os.IsNotExist(err) {
-		return "", err
 	}
 	return instances.DefaultConfigPath()
 }

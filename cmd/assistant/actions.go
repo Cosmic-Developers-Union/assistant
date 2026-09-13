@@ -49,7 +49,7 @@ func runActions(command *cobra.Command, configPath string, options *actionsOptio
 		return err
 	}
 	if file == nil {
-		return fmt.Errorf("需要多实例配置：--config / ASSISTANT_CONFIG / ./config.json")
+		return fmt.Errorf("需要多实例配置：--config / ASSISTANT_CONFIG（assistant setup / login 写入）")
 	}
 
 	var runErrors []error
