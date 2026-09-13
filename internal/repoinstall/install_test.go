@@ -359,10 +359,14 @@ func TestInstallRendersBoundTemplates(t *testing.T) {
 		}
 	}
 	agents := readFile(t, filepath.Join(options.Dir, ManagedAgentPath()))
-	if !strings.Contains(agents, "@bot") || !strings.Contains(agents, "`merger`") {
-		t.Errorf("AGENTS.md not rendered:\n%s", agents)
+	// 内容源由维护者编写（可写死约定账号，不强制占位符）：逐字包含 + marker 包裹
+	if !strings.Contains(agents, strings.TrimSpace(content.AgentsSection)) {
+		t.Errorf("AGENTS.md 未包含内容源正文：\n%s", agents)
 	}
-	for _, relative := range append([]string{ManagedSkillPath(), ManagedAgentPath()}, ManagedWorkflowPaths()...) {
+	if !strings.Contains(agents, "<!-- "+Marker+" -->") || !strings.Contains(agents, "<!-- /"+Marker+" -->") {
+		t.Errorf("AGENTS.md 缺少 marker 包裹：\n%s", agents)
+	}
+	for _, relative := range append([]string{ManagedSkillPath(), ManagedAgentPath(), ManagedClaudePath()}, ManagedWorkflowPaths()...) {
 		content := readFile(t, filepath.Join(options.Dir, relative))
 		if strings.Contains(content, "<<") || strings.Contains(content, ">>") {
 			t.Errorf("%s still contains template actions", relative)
