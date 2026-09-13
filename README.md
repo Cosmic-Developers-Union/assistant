@@ -138,11 +138,12 @@ OAuth 登录说明：默认使用 Gitea 内置的 `tea` 公共客户端；内置
 
 - `GITEA_HOST`: Gitea 服务器地址（必需，完整的 HTTP/HTTPS URL）
 - `GITEA_ACCESS_TOKEN`: Gitea 访问令牌（必需，需要读写仓库权限）
-- `GITEA_BRANCH_PROTECTION_TOKEN`: 分支保护读取专用令牌（可选，仓库管理员 PAT）。分支保护端点要求 repo
-  admin 权限；未配置时读取被拒（HTTP 403）会自动回退为「任何失败 context 即阻塞」的严格模式
-- `GITEA_STATE_REVIEWER`: 状态评审者账号名（可选，如 `merge`）。配置后 sync 按作者角色区分内容/状态两条
-  review 通道，automerge 在合并前以该角色对 head 会签；未配置时保持单通道行为
-- `GITEA_STATE_TOKEN`: 状态评审者令牌（可选，与 `GITEA_STATE_REVIEWER` 配套）
+- `GITEA_BRANCH_PROTECTION_TOKEN`: 分支保护读取专用令牌（可选，仅宿主/env 手动运行需要；仓库 workflow 不需要——
+  merge job 的令牌本身是仓库管理员协作者）。分支保护端点要求 repo admin 权限；未配置时读取被拒（HTTP 403）
+  会自动回退为「任何失败 context 即阻塞」的严格模式
+- `GITEA_STATE_REVIEWER`: 状态评审者账号名（可选覆盖，缺省约定 `merge`）。sync 按作者角色区分内容/状态两条
+  review 通道，automerge 以该角色会签
+- `GITEA_STATE_TOKEN`: 状态评审者令牌（可选覆盖，与 `GITEA_STATE_REVIEWER` 配套）
 - `GITEA_REPOSITORY`: 指定仓库（可选，格式: owner/name，用于 CI 环境锁定仓库）
 
 优先级: `--repo` 命令行参数 > `GITEA_REPOSITORY` 环境变量。
@@ -159,8 +160,7 @@ assistant actions --config /etc/assistant/config.json [--dry-run]
 
 | 名称 | 类型 | 值 | workflow 中的环境变量 |
 | --- | --- | --- | --- |
-| `STATE_TOKEN` | secret | merge 令牌（会签/门禁驳回/合并/评审请求维护） | `GITEA_STATE_TOKEN`（automerge job 直接用 `GITEA_ACCESS_TOKEN`） |
-| `BRANCH_PROTECTION_TOKEN` | secret | 静态 `admin_token`（OAuth-only 实例跳过，workflow 回退严格门禁） | `GITEA_BRANCH_PROTECTION_TOKEN` |
+| `STATE_TOKEN` | secret | merge 令牌（评审请求维护/分支保护读取/会签/合并） | automerge job 的 `GITEA_ACCESS_TOKEN` |
 
 管理员凭据取自 `config.json`（`admin_token`，或 `admin_oauth` 刷新出的短期令牌）。
 
@@ -182,8 +182,7 @@ jobs:
           GITEA_HOST: ${{ github.server_url }}
           GITEA_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITEA_REPOSITORY: ${{ github.repository }}
-          GITEA_STATE_REVIEWER: merge     # 约定身份，无需配置
-  automerge:            # 需要 merge 令牌：评审请求维护 + 门禁 + 会签 + 合并
+  automerge:            # 只需要 merge 令牌：评审请求维护 + 分支保护读取 + 会签 + 合并
     needs: sync
     runs-on: ubuntu-latest
     container: { image: ghcr.io/<owner>/assistant:latest }
@@ -193,11 +192,9 @@ jobs:
           GITEA_HOST: ${{ github.server_url }}
           GITEA_ACCESS_TOKEN: ${{ secrets.STATE_TOKEN }}
           GITEA_REPOSITORY: ${{ github.repository }}
-          GITEA_STATE_REVIEWER: merge
-          GITEA_BRANCH_PROTECTION_TOKEN: ${{ secrets.BRANCH_PROTECTION_TOKEN }}
 ```
 
-> 合并白名单启用后只有 `merge` 账号能合入：人类与内置 Actions 令牌都会被拒绝，自动合并 job 必须把 `GITEA_ACCESS_TOKEN` 指向 merge 令牌。官方评审请求的登记/撤回也放在 merge job：Gitea 只允许 **PR 作者或仓库管理员**选择 reviewer，`gitea-actions` 会被拒绝（"Doer can't choose reviewer"），因此 sync（内置令牌）只做标签，不碰请求。
+> 合并白名单启用后只有 `merge` 账号能合入：人类与内置 Actions 令牌都会被拒绝，自动合并 job 必须把 `GITEA_ACCESS_TOKEN` 指向 merge 令牌。官方评审请求的登记/撤回也放在 merge job：Gitea 只允许 **PR 作者或仓库管理员**选择 reviewer，`gitea-actions` 会被拒绝（"Doer can't choose reviewer"），因此 sync（内置令牌）只做标签，不碰请求。merge 是仓库管理员协作者，分支保护读取也用同一个令牌，无需额外 secret。
 
 - 本地构建：`make image`（`IMAGE=ghcr.io/<owner>/assistant:dev` 可指定标签）
 - 发布：`.github/workflows/publish-image.yml` 在 GitHub 上把镜像推送到 `ghcr.io/<owner>/assistant`（main 推 `latest`，tag 推语义化版本，另附 `sha-*`）

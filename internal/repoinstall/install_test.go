@@ -77,7 +77,6 @@ func TestInstallCreatesArtifactsAndIsIdempotent(t *testing.T) {
 		"image: " + DefaultImage,
 		"GITEA_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
 		"GITEA_ACCESS_TOKEN: ${{ secrets.STATE_TOKEN }}",
-		"GITEA_STATE_REVIEWER: " + ConventionMerger,
 		"assistant sync --verbose",
 		"assistant automerge --verbose",
 		// Gitea/GitHub 只有 types 映射形式才注册事件；列表简写会被静默忽略
@@ -85,6 +84,13 @@ func TestInstallCreatesArtifactsAndIsIdempotent(t *testing.T) {
 	} {
 		if !strings.Contains(workflow, want) {
 			t.Errorf("workflow missing %s:\n%s", want, workflow)
+		}
+	}
+	// 身份是约定、merge 是仓库管理员：不再需要 STATE_REVIEWER variable 或
+	// 额外的分支保护令牌
+	for _, unwanted := range []string{"STATE_REVIEWER", "BRANCH_PROTECTION_TOKEN"} {
+		if strings.Contains(workflow, unwanted) {
+			t.Errorf("workflow 不应包含 %s:\n%s", unwanted, workflow)
 		}
 	}
 	// AGENTS.md 段落同样绑定
@@ -245,7 +251,7 @@ func TestInstallRendersBoundTemplates(t *testing.T) {
 		t.Fatalf("Install() error = %v", err)
 	}
 	workflow := readFile(t, filepath.Join(options.Dir, ManagedWorkflowPaths()[0]))
-	for _, want := range []string{"image: assistant:e2e", "GITEA_STATE_REVIEWER: merger"} {
+	for _, want := range []string{"image: assistant:e2e"} {
 		if !strings.Contains(workflow, want) {
 			t.Errorf("workflow missing %s:\n%s", want, workflow)
 		}

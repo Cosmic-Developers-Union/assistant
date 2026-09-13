@@ -294,10 +294,11 @@ func withManager(
 		verbosef("状态评审提交使用 GITEA_STATE_TOKEN 独立令牌")
 	}
 	managerOptions := []status.ManagerOption{status.WithProgress(verbosef)}
-	if configuration.StateReviewer != "" {
-		managerOptions = append(managerOptions, status.WithStateReviewer(configuration.StateReviewer))
-		verbosef("状态评审者: %s", configuration.StateReviewer)
-	}
+	// 身份是约定：内容评审者 ai（NewManager 默认），状态评审者/合并者 merge。
+	// env 模式没有账号配置，按约定补默认；GITEA_STATE_REVIEWER 仍可显式覆盖。
+	stateReviewer := firstNonEmpty(configuration.StateReviewer, "merge")
+	managerOptions = append(managerOptions, status.WithStateReviewer(stateReviewer))
+	verbosef("状态评审者: %s", stateReviewer)
 
 	// 优先使用 --repo 参数，其次使用环境变量 GITEA_REPOSITORY
 	repoToUse := options.Repository

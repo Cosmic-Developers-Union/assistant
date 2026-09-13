@@ -174,8 +174,8 @@ func TestConfigureActionsWritesExpectedRepoConfig(t *testing.T) {
 	if got := admin.secrets["acme/repo/"+ActionsSecretStateToken]; got != "merger-token" {
 		t.Errorf("state secret = %q", got)
 	}
-	if got := admin.secrets["acme/repo/"+ActionsSecretBranchProtectionToken]; got != "admin-token" {
-		t.Errorf("branch protection secret = %q", got)
+	if len(admin.secrets) != 1 {
+		t.Errorf("secrets = %+v, want only %s", admin.secrets, ActionsSecretStateToken)
 	}
 }
 
@@ -188,24 +188,6 @@ func TestConfigureActionsRequiresRepoToken(t *testing.T) {
 	}
 	if err := ConfigureActions(context.Background(), admin, instance, false, nil); err == nil {
 		t.Error("ConfigureActions() error = nil, want missing merger token error")
-	}
-}
-
-func TestConfigureActionsSkipsBranchProtectionWithoutStaticAdminToken(t *testing.T) {
-	admin := newFakeAdmin("acme/repo")
-	instance := instances.Instance{
-		Host:   "https://gitea.example.com",
-		Merger: instances.Account{Name: "merge"},
-		Repos:  []instances.Repo{{Name: "acme/repo", MergerToken: "merger-token"}},
-	}
-	if err := ConfigureActions(context.Background(), admin, instance, false, nil); err != nil {
-		t.Fatalf("ConfigureActions() error = %v", err)
-	}
-	if _, ok := admin.secrets["acme/repo/"+ActionsSecretBranchProtectionToken]; ok {
-		t.Error("branch protection secret should be skipped without static admin token")
-	}
-	if got := admin.secrets["acme/repo/"+ActionsSecretStateToken]; got != "merger-token" {
-		t.Errorf("state secret = %q, want merger-token", got)
 	}
 }
 
