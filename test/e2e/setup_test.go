@@ -171,8 +171,8 @@ func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 		if !protection.BlockOnRejectedReviews {
 			t.Error("BlockOnRejectedReviews = false, want true")
 		}
-		if protection.BlockOnOfficialReviewRequests {
-			t.Error("BlockOnOfficialReviewRequests = true, want false（会永久卡死自动合并）")
+		if protection.BlockOnOfficialReviewRequests != true {
+			t.Error("BlockOnOfficialReviewRequests = false, want true（/review 会登记请求，回应后自动清除）")
 		}
 		if !protection.BlockAdminMergeOverride {
 			t.Error("BlockAdminMergeOverride = false, want true（管理员须遵守分支保护规则）")
@@ -214,7 +214,11 @@ func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 	if err := syncClient.UseBranchProtectionToken(instance.AdminToken); err != nil {
 		t.Fatal(err)
 	}
-	manager := status.NewManager(syncClient, status.WithRepository(repository))
+	manager := status.NewManager(syncClient,
+		status.WithRepository(repository),
+		status.WithContentReviewer(instance.Reviewer.Name),
+		status.WithProgress(t.Logf),
+	)
 	if err := manager.Sync(ctx); err != nil {
 		t.Fatalf("Sync() error = %v", err)
 	}
@@ -284,6 +288,76 @@ func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 	}
 	if len(queue) != 1 || queue[0].Index != pull.Index {
 		t.Errorf("review queue = %+v, want pull #%d", queue, pull.Index)
+	}
+	// /review 已被登记为官方评审请求（block_on_official_review_requests 门禁
+	// 按它判定）
+	if !slices.Contains(updated.RequestedReviewers, instance.Reviewer.Name) {
+		t.Errorf("requested_reviewers = %v, want %s（/review 自动登记）",
+			updated.RequestedReviewers, instance.Reviewer.Name)
+	}
+
+	// ai 批准 → Gitea 删除其 request 行（API 的 requested_reviewers 字段有
+	// 显示滞后，不作为断言依据）；sync 的撤回是版本兼容兜底。
+	if err := reviewerClient.CreatePullReview(ctx, repository, pull.Index, status.ReviewInput{
+		State:    status.ReviewStateApproved,
+		Body:     "e2e approve",
+		CommitID: updated.HeadSHA,
+	}); err != nil {
+		t.Fatalf("CreatePullReview(ai) error = %v", err)
+	}
+	if err := manager.Sync(ctx); err != nil {
+		t.Fatalf("Sync() after approval error = %v", err)
+	}
+	afterApproval, err := syncClient.GetPullRequest(ctx, repository, pull.Index)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// merge 会签（第二票）后以 merge 身份合并：白名单 + 管理员须遵守 +
+	// official review request 门禁下仍能合入（回应后请求行已删）。
+	mergerClient, err := status.NewClient(host, instance.Repos[0].MergerToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mergerClient.CreatePullReview(ctx, repository, pull.Index, status.ReviewInput{
+		State:    status.ReviewStateApproved,
+		Body:     "e2e countersign",
+		CommitID: afterApproval.HeadSHA,
+	}); err != nil {
+		t.Fatalf("CreatePullReview(merge) error = %v", err)
+	}
+	// mergeability 由 Gitea 异步计算：等它就绪再合并，避免「Please try again later」
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		current, err := syncClient.GetPullRequest(ctx, repository, pull.Index)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if current.Mergeable {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("PR 长时间不可合并：%+v", current)
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	if err := mergerClient.MergePullRequest(ctx, repository, pull.Index); err != nil {
+		t.Fatalf("MergePullRequest(merge) error = %v（评审请求门禁/白名单异常）", err)
+	}
+	// 合并状态回写可能稍滞后，轮询确认
+	mergeDeadline := time.Now().Add(10 * time.Second)
+	for {
+		merged, err := syncClient.GetPullRequest(ctx, repository, pull.Index)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !merged.Open {
+			break
+		}
+		if time.Now().After(mergeDeadline) {
+			t.Fatalf("合并后 PR 仍为 open：%+v", merged)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 
 	// Actions 配置：写 variable/secret 并回读校验（secret 只写不可读，只能

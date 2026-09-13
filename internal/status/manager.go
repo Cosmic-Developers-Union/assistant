@@ -76,6 +76,9 @@ type Manager struct {
 	api              API
 	progressf        func(string, ...any)
 	targetRepository *Repository
+	// contentReviewer 是内容评审者账号名（默认 ai）：/review 与 @提及 会以它
+	// 登记官方评审请求，它回应后撤回遗留请求。
+	contentReviewer string
 	// stateReviewer 是状态评审者的账号名（merge 令牌身份）。配置后 sync 按
 	// 作者角色区分内容/状态两条 review 通道，automerge 合并前由状态评审者
 	// 会签；留空则不做角色区分（历史单通道行为），automerge 也不做会签。
@@ -103,8 +106,15 @@ func WithStateReviewer(login string) ManagerOption {
 	}
 }
 
+// WithContentReviewer 配置内容评审者账号名（默认 ai）。
+func WithContentReviewer(login string) ManagerOption {
+	return func(manager *Manager) {
+		manager.contentReviewer = login
+	}
+}
+
 func NewManager(api API, options ...ManagerOption) *Manager {
-	manager := &Manager{api: api}
+	manager := &Manager{api: api, contentReviewer: "ai"}
 	for _, option := range options {
 		option(manager)
 	}
@@ -260,12 +270,15 @@ func (m *Manager) reconcilePullRequest(
 	// 遮蔽作者对内容 reviewer 的请求，而 reviewer 已回应（含 COMMENT 讨论）后球
 	// 确定性回到作者。
 	reviewIntent := hasUnansweredReviewRequest(pullRequest, reviews)
+	freshRequest := false
 	if !reviewIntent {
 		// 原生「请求评审」按钮对已回应过的 reviewer 仍有效：点击会生成晚于最新
 		// 内容结论的请求记录，而 requested_reviewers 字段对重复请求是 no-op，
 		// 表达不了这层复审意图。
-		reviewIntent = hasFreshRequestRecord(reviews, contentLatest, contentFound)
+		freshRequest = hasFreshRequestRecord(reviews, contentLatest, contentFound)
+		reviewIntent = freshRequest
 	}
+	commentIntent := false
 	if !reviewIntent {
 		// 提及扫描只统计最新内容结论之后的评论，历史提及不会反复触发复审。
 		// 这是 reviewer 已回应后作者重新请求评审的评论通道。
@@ -277,10 +290,44 @@ func (m *Manager) reconcilePullRequest(
 		if err != nil {
 			return err
 		}
-		reviewIntent = hasReviewerMention(comments) || hasReviewCommand(comments)
+		if contentFound {
+			// Gitea 的 since 过滤是 >=（秒级）：与最新内容结论同秒的旧评论会被
+			// 返回，本地再做一次严格过滤，避免旧 /review 被当成新一轮意图。
+			filtered := comments[:0]
+			for _, comment := range comments {
+				if comment.Created.After(contentLatest.Submitted) {
+					filtered = append(filtered, comment)
+				}
+			}
+			comments = filtered
+		}
+		commentIntent = hasReviewerMention(comments) || hasReviewCommand(comments)
+		reviewIntent = commentIntent
 	}
 	if reviewIntent {
-		m.logf("%s#%d: 检测到评审意图（请求、@reviewer 提及或 /review 命令）", repository.FullName(), pullRequest.Index)
+		m.logf("%s#%d: 检测到评审意图（请求、@reviewer 提及或 /review 命令）flags content=%t fresh=%t comment=%t",
+			repository.FullName(), pullRequest.Index, contentFound, freshRequest, commentIntent)
+	}
+	// 一致性保护：review 刚提交的瞬间，Gitea 偶发返回缺 reviewer 的列表，
+	// 使「已回应」被误判为未回应（有内容结论却仍要 review）。此时重取一次
+	// reviews 再判定；正常路径不产生额外请求。
+	if reviewIntent && contentFound && !freshRequest && !commentIntent {
+		refreshed, refreshErr := m.api.ListPullReviews(ctx, repository, pullRequest.Index)
+		if refreshErr == nil {
+			reviews = refreshed
+			if latest, found := m.latestContentReview(refreshed); found {
+				contentLatest, contentFound = latest, true
+			}
+			reviewIntent = hasUnansweredReviewRequest(pullRequest, refreshed)
+			if !reviewIntent {
+				m.logf("%s#%d: 列表刷新后确认请求已回应，按内容结论收敛", repository.FullName(), pullRequest.Index)
+			}
+		}
+	}
+	if err := m.syncReviewRequests(
+		ctx, repository, pullRequest, contentFound, freshRequest, commentIntent,
+	); err != nil {
+		return err
 	}
 
 	// WIP/draft 的语义是作者仍在开发：Gitea 对 draft 恒报 Mergeable=false——合并
@@ -350,6 +397,49 @@ func (m *Manager) reconcilePullRequest(
 	}
 
 	return m.setPullRequestLabels(ctx, repository, pullRequest, repositoryLabels, targetLabel)
+}
+
+// syncReviewRequests 维护 PR 的官方评审请求记录（Gitea requested_reviewers）：
+//   - 评论意图（@提及 / /review 命令）补发正式评审请求——分支保护的
+//     block_on_official_review_requests 门禁按该记录判定，命令与提及点一下
+//     就等价于原生「请求评审」；
+//   - 内容评审者已回应、且没有更新的按钮复审记录时，撤回其遗留请求：Gitea
+//     提交 review 后不消费请求记录，不撤回会让该门禁永久阻塞合并。
+//
+// 团队请求无法按成员身份吸收，保持不动。
+func (m *Manager) syncReviewRequests(
+	ctx context.Context,
+	repository Repository,
+	pullRequest PullRequest,
+	contentFound bool,
+	freshRequest bool,
+	commentIntent bool,
+) error {
+	if m.contentReviewer == "" {
+		return nil
+	}
+	requested := false
+	for _, user := range pullRequest.RequestedReviewers {
+		if user == m.contentReviewer {
+			requested = true
+			break
+		}
+	}
+	if contentFound && requested && !freshRequest {
+		if err := m.api.DeleteReviewRequests(ctx, repository, pullRequest.Index, []string{m.contentReviewer}); err != nil {
+			return err
+		}
+		m.logf("%s#%d: 已撤回 %s 回应后的遗留评审请求", repository.FullName(), pullRequest.Index, m.contentReviewer)
+		requested = false
+	}
+	if commentIntent && !requested {
+		if err := m.api.CreateReviewRequests(ctx, repository, pullRequest.Index, []string{m.contentReviewer}); err != nil {
+			return err
+		}
+		m.logf("%s#%d: 已把评论中的评审意图登记为官方评审请求（%s）",
+			repository.FullName(), pullRequest.Index, m.contentReviewer)
+	}
+	return nil
 }
 
 func branchBehind(pullRequest PullRequest) (bool, bool) {

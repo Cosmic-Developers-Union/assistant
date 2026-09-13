@@ -293,7 +293,7 @@ func setupRepository(
 	if options.AllowAdminOverride {
 		adminOverride = "开启（管理员可绕过）"
 	}
-	logf("配置分支保护 %s（required approvals=%d，只允许 %s 合并，驳回阻塞，过期批准作废，落后分支阻塞，管理员绕过 %s）",
+	logf("配置分支保护 %s（required approvals=%d，只允许 %s 合并，驳回/未回应请求均阻塞，过期批准作废，落后分支阻塞，管理员绕过 %s）",
 		info.DefaultBranch, options.RequiredApprovals, options.MergerName, adminOverride)
 	if !options.DryRun {
 		if err := admin.EnsureBranchProtection(ctx, fullName, ProtectionOptions{

@@ -158,6 +158,9 @@ func newInstanceManager(
 		}
 	}
 	managerOptions := []status.ManagerOption{status.WithProgress(logf)}
+	if instance.Reviewer.Name != "" {
+		managerOptions = append(managerOptions, status.WithContentReviewer(instance.Reviewer.Name))
+	}
 	// 状态评审者令牌按仓库独立（旧配置退回实例级共用令牌）
 	stateToken := repo.MergerToken
 	if stateToken == "" {

@@ -20,32 +20,39 @@ type reviewChange struct {
 	Input       ReviewInput
 }
 
+type reviewRequestChange struct {
+	PullRequest int64
+	Reviewer    string
+}
+
 type fakeAPI struct {
-	repositories   []Repository
-	triageIssues   map[string][]Issue
-	reviewPulls    map[string][]Issue
-	openIssues     map[string][]Issue
-	pullRequests   map[string][]PullRequest
-	current        map[string]PullRequest
-	reviews        map[string][]Review
-	comments       map[string][]Comment
-	labels         map[string][]Label
-	protections    map[string][]BranchProtection
-	statuses       map[string][]CheckStatus
-	exclusive      []int64
-	createdLabels  []LabelDefinition
-	addedLabels    []labelChange
-	removedLabels  []labelChange
-	createdReviews []reviewChange
-	closedIssues   []int64
-	mergedPulls    []int64
-	mergeCalls     int
-	mergeError     error
-	reviewError    error
-	issueListError map[string]error
-	pullListError  map[string]error
-	protectError   map[string]error
-	nextLabelID    int64
+	repositories    []Repository
+	triageIssues    map[string][]Issue
+	reviewPulls     map[string][]Issue
+	openIssues      map[string][]Issue
+	pullRequests    map[string][]PullRequest
+	current         map[string]PullRequest
+	reviews         map[string][]Review
+	comments        map[string][]Comment
+	labels          map[string][]Label
+	protections     map[string][]BranchProtection
+	statuses        map[string][]CheckStatus
+	exclusive       []int64
+	createdLabels   []LabelDefinition
+	addedLabels     []labelChange
+	removedLabels   []labelChange
+	createdReviews  []reviewChange
+	createdRequests []reviewRequestChange
+	deletedRequests []reviewRequestChange
+	closedIssues    []int64
+	mergedPulls     []int64
+	mergeCalls      int
+	mergeError      error
+	reviewError     error
+	issueListError  map[string]error
+	pullListError   map[string]error
+	protectError    map[string]error
+	nextLabelID     int64
 	// selfLogin 是 AuthenticatedUser 返回的身份（会签方），默认 "merge"。
 	selfLogin string
 	// ops 按发生顺序记录 review 提交与合并动作，供时序断言使用。
@@ -110,7 +117,8 @@ func (f *fakeAPI) ListIssueCommentsSince(
 ) ([]Comment, error) {
 	var result []Comment
 	for _, comment := range f.comments[pullRequestKey(repository, index)] {
-		if since.IsZero() || comment.Created.After(since) {
+		// 模拟 Gitea 的 since 过滤：>=（秒级），边界评论由调用方再次严格过滤
+		if since.IsZero() || !comment.Created.Before(since) {
 			result = append(result, comment)
 		}
 	}
@@ -161,6 +169,20 @@ func (f *fakeAPI) CreatePullReview(_ context.Context, _ Repository, index int64,
 	f.createdReviews = append(f.createdReviews, reviewChange{PullRequest: index, Input: input})
 	f.ops = append(f.ops, "review:"+string(input.State))
 	return f.reviewError
+}
+
+func (f *fakeAPI) CreateReviewRequests(_ context.Context, _ Repository, index int64, reviewers []string) error {
+	for _, reviewer := range reviewers {
+		f.createdRequests = append(f.createdRequests, reviewRequestChange{PullRequest: index, Reviewer: reviewer})
+	}
+	return nil
+}
+
+func (f *fakeAPI) DeleteReviewRequests(_ context.Context, _ Repository, index int64, reviewers []string) error {
+	for _, reviewer := range reviewers {
+		f.deletedRequests = append(f.deletedRequests, reviewRequestChange{PullRequest: index, Reviewer: reviewer})
+	}
+	return nil
 }
 
 func (f *fakeAPI) AuthenticatedUser(context.Context) (string, error) {
@@ -578,6 +600,40 @@ func TestManagerQueuesReviewRequestOverOldRejection(t *testing.T) {
 	}
 }
 
+// 与最新内容结论同秒的旧 /review 评论不算新意图（Gitea since 过滤是 >=，
+// 本地必须严格过滤，否则会在批准后错误地重新登记评审请求）。
+func TestManagerIgnoresCommentAtSameSecondAsReview(t *testing.T) {
+	repository := Repository{Owner: "acme", Name: "video"}
+	labels := completeLabels()
+	approvedLabel := labelByName(t, labels, approvedLabelName)
+	awaitingMergeLabel := labelByName(t, labels, awaitingMergeLabelName)
+	api := newFakeAPI(repository, labels)
+	api.pullRequests[repository.FullName()] = []PullRequest{{Index: 44}}
+	pr := mergeablePullRequest(44, []Label{approvedLabel, awaitingMergeLabel})
+	pr.RequestedReviewers = []string{"ai"}
+	api.current[pullRequestKey(repository, 44)] = pr
+	api.reviews[pullRequestKey(repository, 44)] = []Review{
+		{ID: 1, State: ReviewStateApproved, Submitted: time.Unix(20, 0), User: "ai"},
+	}
+	api.comments[pullRequestKey(repository, 44)] = []Comment{
+		{ID: 1, Body: "/review", Created: time.Unix(20, 0)},
+	}
+
+	if err := NewManager(api).Sync(t.Context()); err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if len(api.createdRequests) != 0 {
+		t.Errorf("created requests = %+v, want none（同秒旧评论不是新意图）", api.createdRequests)
+	}
+	if len(api.addedLabels) != 0 || len(api.removedLabels) != 0 {
+		t.Errorf("added = %+v removed = %+v, want none", api.addedLabels, api.removedLabels)
+	}
+	wantWithdrawn := []reviewRequestChange{{PullRequest: 44, Reviewer: "ai"}}
+	if !slices.Equal(api.deletedRequests, wantWithdrawn) {
+		t.Errorf("deleted requests = %+v, want %+v", api.deletedRequests, wantWithdrawn)
+	}
+}
+
 // assistant（gitea-actions）自动驳回后，作者对 reviewer 的评审请求仍然有效：
 // 请求未被回应，进入 review 队列。
 func TestManagerHonorsPendingReviewRequestAfterRejection(t *testing.T) {
@@ -873,8 +929,58 @@ func TestManagerTreatsFreshRequestRecordAsIntent(t *testing.T) {
 	}
 }
 
+// 评论意图（/review、@提及）会被登记为官方评审请求；可用自定义评审者名。
+func TestManagerRegistersCommentIntentAsReviewRequest(t *testing.T) {
+	repository := Repository{Owner: "acme", Name: "video"}
+	labels := completeLabels()
+	reviewLabel := labelByName(t, labels, reviewLabelName)
+	awaitingReviewerLabel := labelByName(t, labels, awaitingReviewerLabelName)
+	api := newFakeAPI(repository, labels)
+	api.pullRequests[repository.FullName()] = []PullRequest{{Index: 40}, {Index: 41}}
+	api.current[pullRequestKey(repository, 40)] = mergeablePullRequest(40, nil)
+	api.comments[pullRequestKey(repository, 40)] = []Comment{{Body: "/review"}}
+	api.current[pullRequestKey(repository, 41)] = mergeablePullRequest(41, nil)
+	api.comments[pullRequestKey(repository, 41)] = []Comment{{Body: "麻烦 @ai 看一下"}}
+
+	if err := NewManager(api).Sync(t.Context()); err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	wantRequests := []reviewRequestChange{
+		{PullRequest: 40, Reviewer: "ai"},
+		{PullRequest: 41, Reviewer: "ai"},
+	}
+	if !slices.Equal(api.createdRequests, wantRequests) {
+		t.Errorf("created requests = %+v, want %+v", api.createdRequests, wantRequests)
+	}
+	wantAdded := []labelChange{
+		{Item: 40, Label: reviewLabel.ID},
+		{Item: 40, Label: awaitingReviewerLabel.ID},
+		{Item: 41, Label: reviewLabel.ID},
+		{Item: 41, Label: awaitingReviewerLabel.ID},
+	}
+	if !slices.Equal(api.addedLabels, wantAdded) {
+		t.Errorf("added labels = %+v, want %+v", api.addedLabels, wantAdded)
+	}
+}
+
+func TestManagerRegistersRequestForConfiguredReviewer(t *testing.T) {
+	repository := Repository{Owner: "acme", Name: "video"}
+	api := newFakeAPI(repository, completeLabels())
+	api.pullRequests[repository.FullName()] = []PullRequest{{Index: 42}}
+	api.current[pullRequestKey(repository, 42)] = mergeablePullRequest(42, nil)
+	api.comments[pullRequestKey(repository, 42)] = []Comment{{Body: "/review"}}
+
+	if err := NewManager(api, WithContentReviewer("bot")).Sync(t.Context()); err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if len(api.createdRequests) != 1 || api.createdRequests[0].Reviewer != "bot" {
+		t.Errorf("created requests = %+v, want bot", api.createdRequests)
+	}
+}
+
 // 早于最新内容结论的请求记录是历史残留：不覆盖已有的评审结论——批准仍是
-// 批准、驳回仍是驳回，已带正确标签时不产生任何写入。
+// 批准、驳回仍是驳回；同时撤回遗留请求（Gitea 不消费请求记录，不撤回会让
+// official review request 门禁永久阻塞合并）。
 func TestManagerIgnoresStaleRequestRecord(t *testing.T) {
 	repository := Repository{Owner: "acme", Name: "video"}
 	labels := completeLabels()
@@ -912,6 +1018,40 @@ func TestManagerIgnoresStaleRequestRecord(t *testing.T) {
 	}
 	if len(api.removedLabels) != 0 {
 		t.Errorf("removed labels = %+v, want none", api.removedLabels)
+	}
+	wantWithdrawn := []reviewRequestChange{
+		{PullRequest: 37, Reviewer: "ai"},
+		{PullRequest: 38, Reviewer: "ai"},
+	}
+	if !slices.Equal(api.deletedRequests, wantWithdrawn) {
+		t.Errorf("deleted requests = %+v, want %+v", api.deletedRequests, wantWithdrawn)
+	}
+	if len(api.createdRequests) != 0 {
+		t.Errorf("created requests = %+v, want none", api.createdRequests)
+	}
+}
+
+// 按钮复审记录晚于最新内容结论时不撤回请求：那是明确的新一轮复审意图。
+func TestManagerKeepsFreshRequestRecordWithoutWithdrawal(t *testing.T) {
+	repository := Repository{Owner: "acme", Name: "video"}
+	api := newFakeAPI(repository, completeLabels())
+	api.pullRequests[repository.FullName()] = []PullRequest{{Index: 43}}
+	pr := mergeablePullRequest(43, nil)
+	pr.RequestedReviewers = []string{"ai"}
+	api.current[pullRequestKey(repository, 43)] = pr
+	api.reviews[pullRequestKey(repository, 43)] = []Review{
+		{ID: 1, State: ReviewStateApproved, Submitted: time.Unix(10, 0), User: "ai"},
+		{ID: 2, State: ReviewStateRequestReview, Submitted: time.Unix(20, 0), User: "ai"},
+	}
+
+	if err := NewManager(api).Sync(t.Context()); err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if len(api.deletedRequests) != 0 {
+		t.Errorf("deleted requests = %+v, want none（复审请求保留）", api.deletedRequests)
+	}
+	if len(api.createdRequests) != 0 {
+		t.Errorf("created requests = %+v, want none（已有请求）", api.createdRequests)
 	}
 }
 

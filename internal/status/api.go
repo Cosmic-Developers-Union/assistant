@@ -149,6 +149,11 @@ type API interface {
 	AddLabel(context.Context, Repository, int64, int64) error
 	RemoveLabel(context.Context, Repository, int64, int64) error
 	CreatePullReview(context.Context, Repository, int64, ReviewInput) error
+	// CreateReviewRequests / DeleteReviewRequests 维护 PR 的官方评审请求
+	// （Gitea 的 requested_reviewers 记录，分支保护的 official review request
+	// 门禁按它判定）。
+	CreateReviewRequests(context.Context, Repository, int64, []string) error
+	DeleteReviewRequests(context.Context, Repository, int64, []string) error
 	// AuthenticatedUser 返回当前令牌的账号名，供会签方解析自己的身份。
 	AuthenticatedUser(context.Context) (string, error)
 }
@@ -701,6 +706,32 @@ func (c *Client) CreatePullReview(ctx context.Context, repository Repository, in
 	})
 	if err != nil {
 		return fmt.Errorf("create review for pull request #%d: %w", index, err)
+	}
+	return nil
+}
+
+// CreateReviewRequests 为 PR 添加官方评审请求（幂等；已存在时为 no-op）。
+func (c *Client) CreateReviewRequests(ctx context.Context, repository Repository, index int64, reviewers []string) error {
+	if len(reviewers) == 0 {
+		return nil
+	}
+	if _, err := c.sdk.PullRequests.CreateReviewRequests(ctx, repository.Owner, repository.Name, index, gitea.PullReviewRequestOptions{
+		Reviewers: reviewers,
+	}); err != nil {
+		return fmt.Errorf("create review requests for pull request #%d: %w", index, err)
+	}
+	return nil
+}
+
+// DeleteReviewRequests 撤回 PR 的官方评审请求（已不存在时为 no-op）。
+func (c *Client) DeleteReviewRequests(ctx context.Context, repository Repository, index int64, reviewers []string) error {
+	if len(reviewers) == 0 {
+		return nil
+	}
+	if _, err := c.sdk.PullRequests.DeleteReviewRequests(ctx, repository.Owner, repository.Name, index, gitea.PullReviewRequestOptions{
+		Reviewers: reviewers,
+	}); err != nil {
+		return fmt.Errorf("delete review requests for pull request #%d: %w", index, err)
 	}
 	return nil
 }

@@ -499,9 +499,11 @@ func (a *giteaAdmin) AddCollaborator(ctx context.Context, fullName, user, permis
 //   - 驳回阻塞、过期批准作废、落后分支阻塞；
 //   - 管理员须遵守分支保护规则（AllowAdminOverride=false 时勾选），防止
 //     身为管理员的 merger 绕过审批/检查；
-//   - 明确关闭 block_on_official_review_requests：它按 pending 的 official
-//     review request 阻止合并，而 Gitea 提交 review 后不消费
-//     requested_reviewers，勾选会把自动合并永久卡死。
+//   - block_on_official_review_requests 勾选：存在 pending 的官方评审请求时
+//     阻止合并。sync 会把 /review、@提及 登记为正式评审请求；内容评审者提交
+//     review 时 Gitea 删除其请求行、门禁自动解除（API 的 requested_reviewers
+//     字段有显示滞后，不代表门禁状态；sync 的撤回调用是版本兼容兜底）。团队
+//     评审请求不会因成员 review 自动清除，需人工移除后才会解除。
 func (a *giteaAdmin) EnsureBranchProtection(
 	ctx context.Context,
 	fullName string,
@@ -519,7 +521,6 @@ func (a *giteaAdmin) EnsureBranchProtection(
 		return fmt.Errorf("读取 %s 分支保护: %w", fullName, err)
 	}
 	enabled := true
-	disabled := false
 	blockAdmin := !options.AllowAdminOverride
 	whitelist := []string{options.MergerName}
 	for _, protection := range protections {
@@ -530,7 +531,7 @@ func (a *giteaAdmin) EnsureBranchProtection(
 		if _, _, err := a.sdk.Repositories.EditBranchProtection(ctx, owner, name, protection.RuleName, gitea.EditBranchProtectionOption{
 			RequiredApprovals:             &required,
 			BlockOnRejectedReviews:        &enabled,
-			BlockOnOfficialReviewRequests: &disabled,
+			BlockOnOfficialReviewRequests: &enabled,
 			DismissStaleApprovals:         &enabled,
 			BlockOnOutdatedBranch:         &enabled,
 			EnableMergeWhitelist:          &enabled,
@@ -545,7 +546,7 @@ func (a *giteaAdmin) EnsureBranchProtection(
 		BranchName:                    options.Branch,
 		RequiredApprovals:             options.RequiredApprovals,
 		BlockOnRejectedReviews:        true,
-		BlockOnOfficialReviewRequests: false,
+		BlockOnOfficialReviewRequests: true,
 		DismissStaleApprovals:         true,
 		BlockOnOutdatedBranch:         true,
 		EnableMergeWhitelist:          true,
