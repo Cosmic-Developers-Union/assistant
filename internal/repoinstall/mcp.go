@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"assistant/internal/dispatcher"
+	"assistant/internal/status"
 )
 
 // MCP 包装层默认值（与 gitea-mcp 的 stdio 用法一致）。
@@ -25,6 +26,8 @@ type MCPOptions struct {
 	// Host / Token 显式覆盖自动检测。
 	Host  string
 	Token string
+	// Probe 覆盖 Gitea 站点探测（测试注入）；默认请求 /api/v1/version。
+	Probe func(host string) bool
 	// Getenv 便于测试注入；默认 os.Getenv。
 	Getenv func(string) string
 	// Stdin/Stdout/Stderr 便于测试注入；默认进程标准流。
@@ -62,18 +65,24 @@ func ResolveMCP(ctx context.Context, options MCPOptions) (MCPSpec, error) {
 		dir = "."
 	}
 	spec := MCPSpec{}
-	// host
+	// host：显式参数/环境变量优先；否则在多个 remote 中探测 Gitea（origin 优先，
+	// GitHub/GitLab 等会被跳过）
 	if options.Host != "" {
 		spec.Host, spec.HostSource = strings.TrimRight(options.Host, "/"), "--host"
 	} else if envHost := strings.TrimSpace(getenv("GITEA_HOST")); envHost != "" {
 		spec.Host, spec.HostSource = strings.TrimRight(envHost, "/"), "GITEA_HOST"
-	} else if url, ok := dispatcher.OriginRemote(dir); ok {
-		if remote, ok := dispatcher.ParseGitRemoteURL(url); ok {
-			spec.Host, spec.HostSource = remote.Host, "origin remote"
+	} else {
+		probe := options.Probe
+		if probe == nil {
+			probe = func(host string) bool { return status.ProbeGitea(ctx, host) }
+		}
+		if remote, ok := dispatcher.SelectGiteaRemote(dir, probe); ok {
+			spec.Host, spec.HostSource = remote.Host, "remote "+remote.Name
 		}
 	}
 	if spec.Host == "" {
-		return MCPSpec{}, fmt.Errorf("无法检测 Gitea 实例：用 --host / GITEA_HOST，或在带 origin remote 的检出内运行")
+		return MCPSpec{}, fmt.Errorf(
+			"无法检测 Gitea 实例：用 --host / GITEA_HOST，或在带 Gitea remote 的检出内运行")
 	}
 	// token
 	if options.Token != "" {

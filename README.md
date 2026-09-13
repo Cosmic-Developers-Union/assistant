@@ -222,13 +222,13 @@ assistant uninstall            # 移除 assistant 生成的内容
 - `.gitea/workflows/assistant.yml`：单文件两个 job——sync（内置令牌）与 automerge（merge 令牌）；旧版 `automerge.yml` 带 marker 时自动清理；
 - MCP：Claude（`.mcp.json` + `.claude/settings.json` 放行 `mcp__gitea*`）、opencode（`opencode.json`，`gitea_*` 放行）、Codex（全局 `~/.codex/config.toml`，`approval_policy = "never"` 自动放行；若你已配置该键则保留）。zcode 暂不支持。
 
-`assistant doctor` 逐项输出 `OK / MISSING / OUTDATED / UNMANAGED / LEGACY / SKIPPED`：本地对照当前模板/镜像检查缺失、过期、非托管、遗留；服务端按 origin remote/`--repo` 定位实例，核对分支保护策略、标签体系、协作者权限（ai write / merge admin）与 `MERGE_TOKEN` secret（权限不足时 `SKIPPED`）。有问题时退出码 1。
+`assistant doctor` 逐项输出 `OK / MISSING / OUTDATED / UNMANAGED / LEGACY / SKIPPED`：本地对照当前模板/镜像检查缺失、过期、非托管、遗留；服务端按配置/remote 定位实例——多个 remote 会逐个探测 `/api/v1/version`（GitHub/GitLab 等非 Gitea 自动跳过），核对分支保护策略、标签体系、协作者权限（ai write / merge admin）与 `MERGE_TOKEN` secret（权限不足时 `SKIPPED`）。有问题时退出码 1。
 
 ### MCP 包装层与开发者令牌
 
 所有 MCP 配置都指向 `assistant mcp gitea`（不写死 token）：
 
-- host：`--host` > `GITEA_HOST` > `origin remote` 推导；
+- host：`--host` > `GITEA_HOST` > 多 remote 探测（origin 优先，`/api/v1/version` 判定 Gitea）；
 - token：`--token` > `GITEA_ACCESS_TOKEN` > `GITEA_ACCESS_TOKEN_FILE` > `~/.config/Cosmic-Developers-Union/assistant/token` > `~/.config/mmc/gitea-token`。
 
 与当前开发者绑定，与管理员/实例配置无关：换项目自动换 host，换人自动换 token。gitea-mcp 默认以 `go run gitea.com/gitea/gitea-mcp@latest -t stdio -S ...` 启动，可用 `GITEA_MCP_BIN` 指已安装的二进制、`GITEA_MCP_SCOPES` 调整 scope 列表。
@@ -287,7 +287,7 @@ assistant triage <n>      立即分诊单个 Issue
 
 配置优先级：**命令行参数 > 环境变量 > git remote 自动检测 / 默认值**。
 
-- **host 与仓库缺省从 origin remote 推导**（环境变量单实例模式）：http(s) remote（如 `http://gitea.example.com:3000/owner/repo.git`）可完整推出 API 根地址与 owner/repo；ssh/scp remote 只可靠推出仓库，host 以 `http://<主机名>` 尽力猜测，此时用 `--host` / `GITEA_HOST` 显式指定。
+- **host 与仓库缺省从 remote 探测推导**（环境变量单实例模式）：按顺序检查各 remote（origin 优先），用 `/api/v1/version` 探测 Gitea 站点，GitHub/GitLab 等会被跳过；http(s) remote（如 `http://gitea.example.com:3000/owner/repo.git`）可完整推出 API 根地址与 owner/repo，ssh/scp remote 只可靠推出仓库（host 以 `http://<主机名>` 尽力猜测），探测不命中时用 `--host` / `GITEA_HOST` 显式指定。
 - 时长参数（`--interval` / `--timeout` 及对应 `DISPATCH_*_MS` 环境变量）接受 `30s` / `10m` / `1h` / `2d` 或毫秒裸数字。
 - 路径默认值锚定宿主检出根（`git rev-parse --show-toplevel`），与启动 cwd 无关：日志 `<检出根>/logs`、锁 `<检出根>/dispatcher.lock`；worktree 在系统临时目录（多仓库时按 `<owner>-<repo>` 隔离）。
 - 其余环境变量：`DISPATCH_LOG_DIR`、`DISPATCH_WORKTREE_ROOT`、`DISPATCH_LOCK_FILE`、`DISPATCH_MODEL`、`DISPATCH_REVIEWER`、`DISPATCH_CLAUDE_BIN`。

@@ -184,11 +184,18 @@ func resolveEnvDispatcher(
 		dispatcherFlags(command, repoFlag, options),
 		repoDir, os.Getenv,
 		func() (dispatcher.GitRemote, bool) {
-			url, ok := dispatcher.OriginRemote(cwd)
-			if !ok {
+			remote, gitea := dispatcher.SelectGiteaRemote(cwd, func(host string) bool {
+				return status.ProbeGitea(context.Background(), host)
+			})
+			if remote.Host == "" {
 				return dispatcher.GitRemote{}, false
 			}
-			return dispatcher.ParseGitRemoteURL(url)
+			// 非 Gitea remote 仅在显式指定 host 时作为仓库路径来源，避免拿
+			// GitHub 等地址去连 Gitea API
+			if !gitea && options.Host == "" && strings.TrimSpace(os.Getenv("GITEA_HOST")) == "" {
+				return dispatcher.GitRemote{}, false
+			}
+			return remote, true
 		},
 	)
 	if err != nil {

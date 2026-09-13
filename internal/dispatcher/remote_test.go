@@ -85,3 +85,31 @@ func TestParseGitRemoteURLUnrecognized(t *testing.T) {
 		}
 	}
 }
+
+func TestListRemotesAndSelectGitea(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := runGit(dir, "init", "-q"); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	if _, err := runGit(dir, "remote", "add", "origin", "git@github.com:owner/repo.git"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGit(dir, "remote", "add", "gitea", "http://gitea.example.com:3000/owner/repo.git"); err != nil {
+		t.Fatal(err)
+	}
+	remotes := ListRemotes(dir)
+	if len(remotes) != 2 || remotes[0].Name != "origin" || remotes[0].Host != "http://github.com" {
+		t.Fatalf("remotes = %+v", remotes)
+	}
+	remote, ok := SelectGiteaRemote(dir, func(host string) bool {
+		return host == "http://gitea.example.com:3000"
+	})
+	if !ok || remote.Name != "gitea" || remote.Repository != "owner/repo" {
+		t.Fatalf("SelectGiteaRemote() = %+v/%v, want gitea remote", remote, ok)
+	}
+	// 探测全不命中：回落 origin（供显式 host 场景复用仓库路径）
+	fallback, ok := SelectGiteaRemote(dir, func(string) bool { return false })
+	if ok || fallback.Name != "origin" {
+		t.Fatalf("fallback = %+v/%v, want origin/false", fallback, ok)
+	}
+}
