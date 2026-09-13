@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -167,8 +168,9 @@ func TestSetupWithOAuthEndToEnd(t *testing.T) {
 	if err := setup.ConfigureActions(ctx, oauthAdmin, instance, false, t.Logf); err != nil {
 		t.Fatalf("ConfigureActions(oauth) error = %v", err)
 	}
-	if value := getActionVariable(t, env.Host, accessToken, adminLogin, repositoryName, setup.ActionsVariableStateReviewer); value != instance.Merger.Name {
-		t.Errorf("OAuth wrote GITEA_STATE_REVIEWER = %q, want %q", value, instance.Merger.Name)
+	secrets := listActionSecrets(t, env.Host, accessToken, adminLogin, repositoryName)
+	if !slices.Contains(secrets, setup.ActionsSecretStateToken) {
+		t.Errorf("OAuth actions secrets = %v, want %s", secrets, setup.ActionsSecretStateToken)
 	}
 
 	// 第二次初始化（不传 Existing）：机器人账号已存在、密码未知，管理员只有

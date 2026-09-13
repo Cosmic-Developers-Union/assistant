@@ -17,8 +17,13 @@ type Options struct {
 	Tools []string
 	// CodexConfigPath 覆盖 ~/.codex/config.toml 位置（测试用）。
 	CodexConfigPath string
-	DryRun          bool
-	Log             func(string, ...any)
+	// Reviewer / Merger 是内容/状态评审账号名（缺省约定 ai / merge）。
+	Reviewer string
+	Merger   string
+	// Image 是仓库 workflow 运行的 assistant 容器镜像（缺省官方镜像）。
+	Image  string
+	DryRun bool
+	Log    func(string, ...any)
 }
 
 var supportedTools = []string{"claude", "opencode", "codex"}
@@ -55,6 +60,15 @@ func (o *Options) normalize() error {
 	}
 	if o.Log == nil {
 		o.Log = func(string, ...any) {}
+	}
+	if o.Reviewer == "" {
+		o.Reviewer = ConventionReviewer
+	}
+	if o.Merger == "" {
+		o.Merger = ConventionMerger
+	}
+	if o.Image == "" {
+		o.Image = DefaultImage
 	}
 	if o.CodexConfigPath == "" {
 		home, err := os.UserHomeDir()
@@ -106,16 +120,34 @@ func Install(ctx context.Context, options Options) error {
 	if err := options.normalize(); err != nil {
 		return err
 	}
-	// 1) 评审 skill / AGENTS.md / 仓库 workflow
-	if err := installFile(&options, filepath.Join(options.Dir, ManagedSkillPath()), SkillTemplate, true); err != nil {
+	data := TemplateData{Reviewer: options.Reviewer, Merger: options.Merger, Image: options.Image}
+	// 1) 评审 skill / AGENTS.md / 仓库 workflow（模板绑定渲染）
+	skill, err := renderTemplate(skillTemplateName, data)
+	if err != nil {
 		return err
 	}
-	if err := installSection(&options, filepath.Join(options.Dir, ManagedAgentPath()), AgentTemplate); err != nil {
+	if err := installFile(&options, filepath.Join(options.Dir, ManagedSkillPath()), skill); err != nil {
 		return err
 	}
-	workflows := []string{WorkflowSyncTemplate, WorkflowAutoMergeTemplate}
-	for index, relative := range ManagedWorkflowPaths() {
-		if err := installFile(&options, filepath.Join(options.Dir, relative), workflows[index], true); err != nil {
+	agents, err := renderTemplate(agentTemplateName, data)
+	if err != nil {
+		return err
+	}
+	if err := installSection(&options, filepath.Join(options.Dir, ManagedAgentPath()), agents); err != nil {
+		return err
+	}
+	workflow, err := renderTemplate(workflowTemplateName, data)
+	if err != nil {
+		return err
+	}
+	for _, relative := range ManagedWorkflowPaths() {
+		if err := installFile(&options, filepath.Join(options.Dir, relative), workflow); err != nil {
+			return err
+		}
+	}
+	// 旧版独立 automerge workflow 已合并进 assistant.yml：带 marker 时清理
+	for _, relative := range LegacyWorkflowPaths() {
+		if err := uninstallFile(&options, filepath.Join(options.Dir, relative)); err != nil {
 			return err
 		}
 	}
@@ -153,6 +185,11 @@ func Uninstall(ctx context.Context, options Options) error {
 			return err
 		}
 	}
+	for _, relative := range LegacyWorkflowPaths() {
+		if err := uninstallFile(&options, filepath.Join(options.Dir, relative)); err != nil {
+			return err
+		}
+	}
 	for _, tool := range options.Tools {
 		var err error
 		switch tool {
@@ -170,9 +207,9 @@ func Uninstall(ctx context.Context, options Options) error {
 	return nil
 }
 
-// installFile 写入整文件：不存在则创建；已存在则必须是 assist/ant 生成（含
+// installFile 写入整文件：不存在则创建；已存在则必须是 assistant 生成（含
 // marker）才覆盖，避免覆盖用户手写内容。
-func installFile(options *Options, path, content string, requireMarker bool) error {
+func installFile(options *Options, path, content string) error {
 	existing, err := os.ReadFile(path)
 	switch {
 	case os.IsNotExist(err):
@@ -185,10 +222,8 @@ func installFile(options *Options, path, content string, requireMarker bool) err
 			return nil
 		}
 		return options.write(path, content)
-	case requireMarker:
-		return fmt.Errorf("%s 已存在且不是 assistant 生成（缺少 marker）；请先处理该文件", path)
 	default:
-		return options.write(path, content)
+		return fmt.Errorf("%s 已存在且不是 assistant 生成（缺少 marker）；请先处理该文件", path)
 	}
 }
 

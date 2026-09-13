@@ -10,12 +10,16 @@ import (
 )
 
 // AutoMerge 对带 status/approved + awaiting/merge 标签的 open PR 执行自动合并：
-// 重读最新状态确认批准仍有效、未落后、无冲突、必要检查全绿后，以 squash 方式
-// 合并。一次运行至多合并一个 PR——main 随之前移，其余所有 open PR 因此过期，
-// 由 sync 打回 changes-requested，作者 rebase 并重新获准后才能再次进入合并队列。
-// 由 Gitea Actions schedule（.gitea/workflows/automerge.yml）周期驱动，幂等安全：
-// 门禁不满足时本轮跳过，什么都不写。
+// 先以当前身份维护官方评审请求（Gitea 只允许 PR 作者或仓库管理员选择 reviewer，
+// 因此合并 job 的 merge 令牌是唯一能登记/撤回请求的自动化身份），再重读最新状态
+// 确认批准仍有效、未落后、无冲突、必要检查全绿后，以 squash 方式合并。一次运行
+// 至多合并一个 PR——main 随之前移，其余所有 open PR 因此过期，由 sync 打回
+// changes-requested，作者 rebase 并重新获准后才能再次进入合并队列。
+// 由 Gitea Actions（事件 + schedule）驱动，幂等安全：门禁不满足时本轮跳过。
 func (m *Manager) AutoMerge(ctx context.Context) error {
+	if err := m.ReconcileReviewRequests(ctx); err != nil {
+		return err
+	}
 	repositories, err := m.visibleRepositories(ctx)
 	if err != nil {
 		return err

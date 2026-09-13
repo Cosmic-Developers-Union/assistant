@@ -16,18 +16,18 @@ type actionsOptions struct {
 }
 
 // newActionsCommand 构造 actions 命令：把 config.json 中每个仓库所需的
-// Actions variables/secrets 幂等写入（仓库内 workflow 消费）。
+// Actions secrets 幂等写入（仓库内 workflow 消费）。
 func newActionsCommand(configFlag *string) *cobra.Command {
 	options := &actionsOptions{}
 	command := &cobra.Command{
 		Use:   "actions",
-		Short: "为配置中的仓库写入 Actions secrets/variables（状态评审者、令牌）",
+		Short: "为配置中的仓库写入 Actions secrets（merge 令牌）",
 		Long: "为 config.json 中的每个仓库幂等写入仓库级 Actions 配置：\n" +
-			"  - variable STATE_REVIEWER           = merger 账号名\n" +
-			"  - secret   STATE_TOKEN              = merger 令牌\n" +
-			"  - secret   BRANCH_PROTECTION_TOKEN  = 静态 admin_token（有则写）\n\n" +
-			"名称不带 GITEA_ 前缀（Gitea 保留前缀），workflow 里映射到\n" +
-			"GITEA_STATE_REVIEWER / GITEA_STATE_TOKEN / GITEA_BRANCH_PROTECTION_TOKEN。\n" +
+			"  - secret STATE_TOKEN              = 该项目专属 merge 令牌（必需）\n" +
+			"  - secret BRANCH_PROTECTION_TOKEN  = 静态 admin_token（有则写）\n\n" +
+			"身份是约定（内容评审 ai、状态评审/合并 merge），sync 用 Actions 内置\n" +
+			"令牌，因此无需 variable。名称不带 GITEA_ 前缀（Gitea 保留前缀），\n" +
+			"workflow 里映射到 GITEA_STATE_TOKEN / GITEA_BRANCH_PROTECTION_TOKEN。\n" +
 			"Gitea 的 secret 值只写不可读、无法比对，因此每次运行都会覆盖写入；\n" +
 			"令牌轮换（如 setup 重建令牌）后必须重新运行本命令，否则仓库 workflow\n" +
 			"会因陈旧令牌静默失败。管理员凭据取自配置（admin_token 或 admin_oauth）。",

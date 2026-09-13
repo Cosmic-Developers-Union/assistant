@@ -458,13 +458,19 @@ func (c *Client) GetPullRequest(ctx context.Context, repository Repository, inde
 // 提交（"标题 (#编号)"）。合并后删除 head 分支：feature 分支随合并完成使命，
 // 不留已合并分支。能否合并（新鲜度、必要检查、权限）由调用方门禁与 Gitea
 // 分支保护共同把关，这里不做前置判断。
+//
+// 注意 SDK 的 MergePullRequest 对 405 等拒绝只回 bool=false 而不回 error，
+// 必须检查 success 标志，否则门禁拒绝会被当成合并成功。
 func (c *Client) MergePullRequest(ctx context.Context, repository Repository, index int64) error {
-	_, _, err := c.sdk.PullRequests.MergePullRequest(ctx, repository.Owner, repository.Name, index, gitea.MergePullRequestOption{
+	success, _, err := c.sdk.PullRequests.MergePullRequest(ctx, repository.Owner, repository.Name, index, gitea.MergePullRequestOption{
 		Style:                  gitea.MergeStyleSquash,
 		DeleteBranchAfterMerge: new(true),
 	})
 	if err != nil {
 		return fmt.Errorf("merge pull request #%d: %w", index, err)
+	}
+	if !success {
+		return fmt.Errorf("merge pull request #%d: Gitea 拒绝合并（分支保护/权限/状态不满足）", index)
 	}
 	return nil
 }

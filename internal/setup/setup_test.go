@@ -22,7 +22,6 @@ type fakeAdmin struct {
 	protections   map[string]ProtectionOptions
 	labels        map[string]bool
 	oauth         *instances.OAuthCredential
-	variables     map[string]string
 	secrets       map[string]string
 }
 
@@ -37,7 +36,6 @@ func newFakeAdmin(repos ...string) *fakeAdmin {
 		collaborators: map[string]string{},
 		protections:   map[string]ProtectionOptions{},
 		labels:        map[string]bool{},
-		variables:     map[string]string{},
 		secrets:       map[string]string{},
 	}
 	for _, repo := range repos {
@@ -157,11 +155,6 @@ func (f *fakeAdmin) ReconcileLabels(_ context.Context, fullName, _ string) error
 	return nil
 }
 
-func (f *fakeAdmin) SetRepoVariable(_ context.Context, fullName, name, value string) error {
-	f.variables[fullName+"/"+name] = value
-	return nil
-}
-
 func (f *fakeAdmin) SetRepoSecret(_ context.Context, fullName, name, value string) error {
 	f.secrets[fullName+"/"+name] = value
 	return nil
@@ -177,9 +170,6 @@ func TestConfigureActionsWritesExpectedRepoConfig(t *testing.T) {
 	}
 	if err := ConfigureActions(context.Background(), admin, instance, false, nil); err != nil {
 		t.Fatalf("ConfigureActions() error = %v", err)
-	}
-	if got := admin.variables["acme/repo/"+ActionsVariableStateReviewer]; got != "merge" {
-		t.Errorf("variable = %q, want merge", got)
 	}
 	if got := admin.secrets["acme/repo/"+ActionsSecretStateToken]; got != "merger-token" {
 		t.Errorf("state secret = %q", got)
@@ -214,8 +204,8 @@ func TestConfigureActionsSkipsBranchProtectionWithoutStaticAdminToken(t *testing
 	if _, ok := admin.secrets["acme/repo/"+ActionsSecretBranchProtectionToken]; ok {
 		t.Error("branch protection secret should be skipped without static admin token")
 	}
-	if got := admin.variables["acme/repo/"+ActionsVariableStateReviewer]; got != "merge" {
-		t.Errorf("variable = %q, want merge", got)
+	if got := admin.secrets["acme/repo/"+ActionsSecretStateToken]; got != "merger-token" {
+		t.Errorf("state secret = %q, want merger-token", got)
 	}
 }
 
@@ -229,8 +219,8 @@ func TestConfigureActionsDryRunMakesNoWrites(t *testing.T) {
 	if err := ConfigureActions(context.Background(), admin, instance, true, nil); err != nil {
 		t.Fatalf("ConfigureActions() error = %v", err)
 	}
-	if len(admin.variables) != 0 || len(admin.secrets) != 0 {
-		t.Errorf("dry-run mutated: %+v %+v", admin.variables, admin.secrets)
+	if len(admin.secrets) != 0 {
+		t.Errorf("dry-run mutated: %+v", admin.secrets)
 	}
 }
 

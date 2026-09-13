@@ -7,11 +7,14 @@ services:
     restart: "no"
     environment:
       GITEA__database__DB_TYPE: sqlite3
-      GITEA__server__DOMAIN: localhost
-      GITEA__server__ROOT_URL: http://localhost:3300/
+      GITEA__server__DOMAIN: gitea
+      # workflow 的容器 job 需要能回连 Gitea：用 compose 网络内的服务名
+      # （宿主机测试仍用 127.0.0.1:3300 直连，不受影响）
+      GITEA__server__ROOT_URL: http://gitea:3000/
       GITEA__server__HTTP_PORT: "3000"
       GITEA__security__INSTALL_LOCK: "true"
       GITEA__service__DISABLE_REGISTRATION: "true"
+      GITEA__actions__ENABLED: "true"
       GITEA__log__LEVEL: warn
     ports:
       - "3300:3000"
@@ -24,5 +27,27 @@ services:
       timeout: 3s
       retries: 60
 
+  # act_runner：真实执行仓库内 workflow（sync / automerge 容器 job）。
+  # 注册令牌由 up.sh 通过 `gitea actions generate-runner-token` 生成并写入 .env。
+  runner:
+    image: gitea/act_runner:latest
+    container_name: assistant-e2e-runner
+    restart: "no"
+    environment:
+      GITEA_INSTANCE_URL: http://gitea:3000
+      GITEA_RUNNER_REGISTRATION_TOKEN: ${RUNNER_TOKEN:-}
+      GITEA_RUNNER_NAME: assistant-e2e-runner
+      # 标签指向本地构建的 assistant 镜像：job 的 container 与 runner 默认镜像一致
+      GITEA_RUNNER_LABELS: ubuntu-latest:docker://${ASSISTANT_E2E_IMAGE:-assistant:e2e}
+      CONFIG_FILE: /etc/act_runner/config.yaml
+    volumes:
+      - ./runner-config.yaml:/etc/act_runner/config.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - runner-data:/data
+    depends_on:
+      gitea:
+        condition: service_healthy
+
 volumes:
   gitea-data:
+  runner-data:

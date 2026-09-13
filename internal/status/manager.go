@@ -255,80 +255,12 @@ func (m *Manager) reconcilePullRequest(
 	if err != nil {
 		return err
 	}
-	// 双通道角色归属：内容结论（ai 等内容评审者的批准/驳回/COMMENT）驱动状态
-	// 标签；状态结论（状态评审者的会签与门禁驳回）只表达门禁健康度，不参与
-	// 内容判定——状态批准不等于内容批准，两条通道互不可替代。
-	contentLatest, contentFound := m.latestContentReview(reviews)
-
-	// 评审意图：存在尚未回应的待处理评审请求、晚于最新内容结论的评审请求记录
-	// （原生按钮对已回应 reviewer 的复审信号），或评论中出现 @ai/@reviewer 提及、
-	// 行首 /review 命令。
-	// 「是否已回应」按评审者身份判定：提交过正式 review 的 reviewer 名下的请求
-	// 视为历史（实测 reviewer 提交 review 后 Gitea 不消费 requested_reviewers，
-	// 重复请求同一 reviewer 在字段上也是 no-op，无法与旧请求区分）；从未回应的
-	// requested reviewer 与团队请求视为仍在等待回应。这样状态评审者的驳回不会
-	// 遮蔽作者对内容 reviewer 的请求，而 reviewer 已回应（含 COMMENT 讨论）后球
-	// 确定性回到作者。
-	reviewIntent := hasUnansweredReviewRequest(pullRequest, reviews)
-	freshRequest := false
-	if !reviewIntent {
-		// 原生「请求评审」按钮对已回应过的 reviewer 仍有效：点击会生成晚于最新
-		// 内容结论的请求记录，而 requested_reviewers 字段对重复请求是 no-op，
-		// 表达不了这层复审意图。
-		freshRequest = hasFreshRequestRecord(reviews, contentLatest, contentFound)
-		reviewIntent = freshRequest
-	}
-	commentIntent := false
-	if !reviewIntent {
-		// 提及扫描只统计最新内容结论之后的评论，历史提及不会反复触发复审。
-		// 这是 reviewer 已回应后作者重新请求评审的评论通道。
-		var since time.Time
-		if contentFound {
-			since = contentLatest.Submitted
-		}
-		comments, err := m.api.ListIssueCommentsSince(ctx, repository, pullRequest.Index, since)
-		if err != nil {
-			return err
-		}
-		if contentFound {
-			// Gitea 的 since 过滤是 >=（秒级）：与最新内容结论同秒的旧评论会被
-			// 返回，本地再做一次严格过滤，避免旧 /review 被当成新一轮意图。
-			filtered := comments[:0]
-			for _, comment := range comments {
-				if comment.Created.After(contentLatest.Submitted) {
-					filtered = append(filtered, comment)
-				}
-			}
-			comments = filtered
-		}
-		commentIntent = hasReviewerMention(comments) || hasReviewCommand(comments)
-		reviewIntent = commentIntent
-	}
-	if reviewIntent {
-		m.logf("%s#%d: 检测到评审意图（请求、@reviewer 提及或 /review 命令）flags content=%t fresh=%t comment=%t",
-			repository.FullName(), pullRequest.Index, contentFound, freshRequest, commentIntent)
-	}
-	// 一致性保护：review 刚提交的瞬间，Gitea 偶发返回缺 reviewer 的列表，
-	// 使「已回应」被误判为未回应（有内容结论却仍要 review）。此时重取一次
-	// reviews 再判定；正常路径不产生额外请求。
-	if reviewIntent && contentFound && !freshRequest && !commentIntent {
-		refreshed, refreshErr := m.api.ListPullReviews(ctx, repository, pullRequest.Index)
-		if refreshErr == nil {
-			reviews = refreshed
-			if latest, found := m.latestContentReview(refreshed); found {
-				contentLatest, contentFound = latest, true
-			}
-			reviewIntent = hasUnansweredReviewRequest(pullRequest, refreshed)
-			if !reviewIntent {
-				m.logf("%s#%d: 列表刷新后确认请求已回应，按内容结论收敛", repository.FullName(), pullRequest.Index)
-			}
-		}
-	}
-	if err := m.syncReviewRequests(
-		ctx, repository, pullRequest, contentFound, freshRequest, commentIntent,
-	); err != nil {
+	intent, err := m.detectReviewIntent(ctx, repository, pullRequest, reviews)
+	if err != nil {
 		return err
 	}
+	contentLatest, contentFound := intent.contentLatest, intent.contentFound
+	reviewIntent := intent.intent
 
 	// WIP/draft 的语义是作者仍在开发：Gitea 对 draft 恒报 Mergeable=false——合并
 	// 被阻断，与冲突无关（实测 merge-tree 干净的 draft PR 也报 false），冲突/落后/
@@ -399,6 +331,132 @@ func (m *Manager) reconcilePullRequest(
 	return m.setPullRequestLabels(ctx, repository, pullRequest, repositoryLabels, targetLabel)
 }
 
+// reviewIntentState 汇总单个 PR 的评审意图判定结果：标签收敛与官方评审请求
+// 维护共用同一结论。
+type reviewIntentState struct {
+	reviews       []Review
+	contentLatest Review
+	contentFound  bool
+	// intent 是最终结论（请求、按钮复审记录或评论意图任一成立）。
+	intent bool
+	// freshRequest 表示存在晚于最新内容结论的按钮复审记录。
+	freshRequest bool
+	// commentIntent 表示最新内容结论之后出现 @提及 或 /review 命令。
+	commentIntent bool
+}
+
+// detectReviewIntent 判定 PR 的评审意图：
+//   - 尚未回应的待处理评审请求（按 reviewer 身份判定：提交过正式 review 的
+//     reviewer 名下请求视为历史；从未回应者与团队请求视为等待回应）；
+//   - 晚于最新内容结论的按钮复审记录（原生「请求评审」对已回应 reviewer 的
+//     新信号；requested_reviewers 对重复请求是 no-op，表达不了这层意图）；
+//   - 最新内容结论之后的 @ai/@reviewer 提及或行首 /review 命令。
+//
+// review 刚提交的瞬间 Gitea 偶发返回缺 reviewer 的列表，此时重取一次 reviews
+// 消除误判；正常路径不产生额外请求。
+func (m *Manager) detectReviewIntent(
+	ctx context.Context,
+	repository Repository,
+	pullRequest PullRequest,
+	reviews []Review,
+) (reviewIntentState, error) {
+	state := reviewIntentState{reviews: reviews}
+	state.contentLatest, state.contentFound = m.latestContentReview(reviews)
+	state.intent = hasUnansweredReviewRequest(pullRequest, reviews)
+	if !state.intent {
+		state.freshRequest = hasFreshRequestRecord(reviews, state.contentLatest, state.contentFound)
+		state.intent = state.freshRequest
+	}
+	if !state.intent {
+		// 提及扫描只统计最新内容结论之后的评论，历史提及不会反复触发复审。
+		var since time.Time
+		if state.contentFound {
+			since = state.contentLatest.Submitted
+		}
+		comments, err := m.api.ListIssueCommentsSince(ctx, repository, pullRequest.Index, since)
+		if err != nil {
+			return state, err
+		}
+		if state.contentFound {
+			// Gitea 的 since 过滤是 >=（秒级）：与最新内容结论同秒的旧评论会被
+			// 返回，本地再做一次严格过滤，避免旧 /review 被当成新一轮意图。
+			filtered := comments[:0]
+			for _, comment := range comments {
+				if comment.Created.After(state.contentLatest.Submitted) {
+					filtered = append(filtered, comment)
+				}
+			}
+			comments = filtered
+		}
+		state.commentIntent = hasReviewerMention(comments) || hasReviewCommand(comments)
+		state.intent = state.commentIntent
+	}
+	if state.intent {
+		m.logf("%s#%d: 检测到评审意图（请求、@reviewer 提及或 /review 命令）flags content=%t fresh=%t comment=%t",
+			repository.FullName(), pullRequest.Index, state.contentFound, state.freshRequest, state.commentIntent)
+	}
+	if state.intent && state.contentFound && !state.freshRequest && !state.commentIntent {
+		refreshed, refreshErr := m.api.ListPullReviews(ctx, repository, pullRequest.Index)
+		if refreshErr == nil {
+			state.reviews = refreshed
+			if latest, found := m.latestContentReview(refreshed); found {
+				state.contentLatest, state.contentFound = latest, true
+			}
+			state.intent = hasUnansweredReviewRequest(pullRequest, refreshed)
+			if !state.intent {
+				m.logf("%s#%d: 列表刷新后确认请求已回应，按内容结论收敛", repository.FullName(), pullRequest.Index)
+			}
+		}
+	}
+	return state, nil
+}
+
+// ReconcileReviewRequests 维护 open PR 的官方评审请求（Gitea
+// requested_reviewers）：登记评论中的评审意图，撤回内容评审者回应后的遗留请求。
+//
+// Gitea 只允许 PR 作者或仓库管理员选择 reviewer：Actions 内置令牌
+// （gitea-actions）会被拒绝（实测 "Doer can't choose reviewer"），因此本操作
+// 必须以 merge（仓库管理员）身份运行，不能放进 gitea-actions 权限模型的 sync。
+func (m *Manager) ReconcileReviewRequests(ctx context.Context) error {
+	repositories, err := m.visibleRepositories(ctx)
+	if err != nil {
+		return err
+	}
+	var runErrors []error
+	for _, repository := range repositories {
+		pullRequests, err := m.api.ListOpenPullRequests(ctx, repository)
+		if err != nil {
+			runErrors = append(runErrors, fmt.Errorf("%s: %w", repository.FullName(), err))
+			continue
+		}
+		for _, listed := range pullRequests {
+			if err := m.reconcilePullRequestReviewRequests(ctx, repository, listed.Index); err != nil {
+				runErrors = append(runErrors, fmt.Errorf("%s#%d: %w", repository.FullName(), listed.Index, err))
+			}
+		}
+	}
+	return errors.Join(runErrors...)
+}
+
+func (m *Manager) reconcilePullRequestReviewRequests(ctx context.Context, repository Repository, index int64) error {
+	pullRequest, err := m.api.GetPullRequest(ctx, repository, index)
+	if err != nil {
+		return err
+	}
+	if !pullRequest.Open {
+		return nil
+	}
+	reviews, err := m.api.ListPullReviews(ctx, repository, index)
+	if err != nil {
+		return err
+	}
+	intent, err := m.detectReviewIntent(ctx, repository, pullRequest, reviews)
+	if err != nil {
+		return err
+	}
+	return m.syncReviewRequests(ctx, repository, pullRequest, intent.contentFound, intent.freshRequest, intent.commentIntent)
+}
+
 // syncReviewRequests 维护 PR 的官方评审请求记录（Gitea requested_reviewers）：
 //   - 评论意图（@提及 / /review 命令）补发正式评审请求——分支保护的
 //     block_on_official_review_requests 门禁按该记录判定，命令与提及点一下
@@ -406,7 +464,8 @@ func (m *Manager) reconcilePullRequest(
 //   - 内容评审者已回应、且没有更新的按钮复审记录时，撤回其遗留请求：Gitea
 //     提交 review 后不消费请求记录，不撤回会让该门禁永久阻塞合并。
 //
-// 团队请求无法按成员身份吸收，保持不动。
+// 团队请求无法按成员身份吸收，保持不动。调用方必须具备选择 reviewer 的权限
+// （PR 作者或仓库管理员），见 ReconcileReviewRequests。
 func (m *Manager) syncReviewRequests(
 	ctx context.Context,
 	repository Repository,

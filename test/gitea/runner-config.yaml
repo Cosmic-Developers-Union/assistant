@@ -1,0 +1,15 @@
+# act_runner 配置：job 容器加入 compose 网络，才能用服务名 gitea:3000 回连。
+log:
+  level: info
+
+runner:
+  file: /data/.runner
+  capacity: 2
+  timeout: 10m
+
+cache:
+  enabled: false
+
+container:
+  network: assistant-e2e_default
+  force_pull: false

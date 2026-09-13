@@ -355,28 +355,6 @@ func tokenLastEight(token string) string {
 	return token[len(token)-8:]
 }
 
-// SetRepoVariable 写仓库级 Actions variable：不存在时创建（POST）、存在时
-// 更新（PUT）——Gitea 的 PUT 语义是仅更新，对不存在的 variable 返回 404。
-func (a *giteaAdmin) SetRepoVariable(ctx context.Context, fullName, name, value string) error {
-	owner, repository, err := instances.ParseRepoName(fullName)
-	if err != nil {
-		return err
-	}
-	path := fmt.Sprintf("/api/v1/repos/%s/%s/actions/variables/%s",
-		url.PathEscape(owner), url.PathEscape(repository), url.PathEscape(name))
-	method := http.MethodPut
-	if _, getErr := a.do(ctx, http.MethodGet, path, a.auth(), nil, nil); getErr != nil {
-		if !isHTTPStatus(getErr, http.StatusNotFound) {
-			return fmt.Errorf("读 %s 的 Actions variable %s: %w", fullName, name, getErr)
-		}
-		method = http.MethodPost
-	}
-	if _, err := a.do(ctx, method, path, a.auth(), map[string]any{"value": value}, nil); err != nil {
-		return fmt.Errorf("写 %s 的 Actions variable %s: %w", fullName, name, err)
-	}
-	return nil
-}
-
 // SetRepoSecret 写仓库级 Actions secret（PUT 幂等覆盖；secret 值只写不可读，
 // 无法比对，只能每次覆盖）。
 func (a *giteaAdmin) SetRepoSecret(ctx context.Context, fullName, name, value string) error {

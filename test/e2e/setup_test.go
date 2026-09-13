@@ -34,6 +34,7 @@ type e2eEnv struct {
 	AdminUser     string
 	AdminPassword string
 	AdminToken    string
+	Image         string
 }
 
 func environment(t *testing.T) e2eEnv {
@@ -43,6 +44,7 @@ func environment(t *testing.T) e2eEnv {
 		AdminUser:     os.Getenv("ASSISTANT_E2E_ADMIN_USER"),
 		AdminPassword: os.Getenv("ASSISTANT_E2E_ADMIN_PASSWORD"),
 		AdminToken:    os.Getenv("ASSISTANT_E2E_ADMIN_TOKEN"),
+		Image:         os.Getenv("ASSISTANT_E2E_IMAGE"),
 	}
 	// up.sh 会把凭据写到包目录下的 .env
 	if env.Host == "" || env.AdminToken == "" {
@@ -61,6 +63,8 @@ func environment(t *testing.T) e2eEnv {
 					env.AdminPassword = value
 				case "ASSISTANT_E2E_ADMIN_TOKEN":
 					env.AdminToken = value
+				case "ASSISTANT_E2E_IMAGE":
+					env.Image = value
 				}
 			}
 		}
@@ -268,6 +272,9 @@ func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 	if err := manager.Sync(ctx); err != nil {
 		t.Fatalf("Sync() after /review error = %v", err)
 	}
+	if err := manager.ReconcileReviewRequests(ctx); err != nil {
+		t.Fatalf("ReconcileReviewRequests() after /review error = %v", err)
+	}
 	updated, err := syncClient.GetPullRequest(ctx, repository, pull.Index)
 	if err != nil {
 		t.Fatalf("GetPullRequest() error = %v", err)
@@ -307,6 +314,9 @@ func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 	}
 	if err := manager.Sync(ctx); err != nil {
 		t.Fatalf("Sync() after approval error = %v", err)
+	}
+	if err := manager.ReconcileReviewRequests(ctx); err != nil {
+		t.Fatalf("ReconcileReviewRequests() after approval error = %v", err)
 	}
 	afterApproval, err := syncClient.GetPullRequest(ctx, repository, pull.Index)
 	if err != nil {
@@ -369,9 +379,6 @@ func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 	if err := setup.ConfigureActions(ctx, actionsAdmin, instance, false, t.Logf); err != nil {
 		t.Fatalf("ConfigureActions() error = %v", err)
 	}
-	if value := getActionVariable(t, host, adminToken, adminLogin, repositoryName, setup.ActionsVariableStateReviewer); value != instance.Merger.Name {
-		t.Errorf("GITEA_STATE_REVIEWER = %q, want %q", value, instance.Merger.Name)
-	}
 	secrets := listActionSecrets(t, host, adminToken, adminLogin, repositoryName)
 	for _, want := range []string{setup.ActionsSecretStateToken, setup.ActionsSecretBranchProtectionToken} {
 		if !slices.Contains(secrets, want) {
@@ -408,19 +415,6 @@ func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 	if loaded.Instances[0].Reviewer.Token != instance.Reviewer.Token {
 		t.Errorf("config round-trip lost token")
 	}
-}
-
-// getActionVariable 读回仓库级 Actions variable（可读；响应字段是 data）。
-func getActionVariable(t *testing.T, host, token, owner, repo, name string) string {
-	t.Helper()
-	body := apiGet(t, host+"/api/v1/repos/"+owner+"/"+repo+"/actions/variables/"+name, token)
-	var payload struct {
-		Data string `json:"data"`
-	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		t.Fatalf("解析 variable 响应: %v（%s）", err, body)
-	}
-	return payload.Data
 }
 
 // listActionSecrets 列出仓库级 Actions secret 名（值只写不可读；响应是数组）。

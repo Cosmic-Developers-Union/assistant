@@ -84,8 +84,8 @@ type Admin interface {
 	AddCollaborator(ctx context.Context, fullName, user, permission string) error
 	EnsureBranchProtection(ctx context.Context, fullName string, options ProtectionOptions) error
 	ReconcileLabels(ctx context.Context, fullName, reviewerToken string) error
-	// SetRepoVariable / SetRepoSecret 写仓库级 Actions 配置（幂等覆盖）。
-	SetRepoVariable(ctx context.Context, fullName, name, value string) error
+	// SetRepoSecret 写仓库级 Actions secret（幂等覆盖）。身份名是约定
+	// （ai/merge），无需 variable。
 	SetRepoSecret(ctx context.Context, fullName, name, value string) error
 }
 

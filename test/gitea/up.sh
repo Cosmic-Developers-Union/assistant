@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# 启动临时 Gitea（docker compose），创建管理员并生成访问令牌，
-# 把 ASSISTANT_E2E_HOST / ASSISTANT_E2E_ADMIN_TOKEN 写入 test/e2e/.env。
+# 启动临时 Gitea + act_runner（docker compose），创建管理员并生成访问令牌，
+# 并构建本仓库 assistant 镜像供容器 job 使用（runner 标签与 workflow 的
+# container 都指向该镜像）。凭据写入 test/e2e/.env，compose 变量写入本目录 .env。
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -8,8 +9,13 @@ HOST="${ASSISTANT_E2E_HOST:-http://127.0.0.1:3300}"
 ADMIN_USER="${ASSISTANT_E2E_ADMIN_USER:-e2eadmin}"
 ADMIN_PASSWORD="${ASSISTANT_E2E_ADMIN_PASSWORD:-admin-e2e-password}"
 ADMIN_EMAIL="${ASSISTANT_E2E_ADMIN_EMAIL:-admin@assistant.local}"
+IMAGE="${ASSISTANT_E2E_IMAGE:-assistant:e2e}"
 
-docker compose up -d --wait
+echo "==> 构建 assistant 镜像 $IMAGE（runner 容器 job 用）"
+docker build -q -t "$IMAGE" ../.. >/dev/null
+
+echo "==> 启动临时 Gitea"
+docker compose up -d --wait gitea
 
 echo "==> 等待 Gitea API 就绪：$HOST"
 for _ in $(seq 1 60); do
@@ -51,12 +57,27 @@ if [ -z "$TOKEN" ] || [ "${#TOKEN}" -lt 20 ]; then
   exit 1
 fi
 
+echo "==> 生成 act_runner 注册令牌"
+RUNNER_TOKEN="$(docker compose exec -T --user git gitea gitea actions generate-runner-token | tr -d '\r\n')"
+if [ -z "$RUNNER_TOKEN" ]; then
+  echo "生成 runner 注册令牌失败" >&2
+  exit 1
+fi
+cat > .env <<EOF
+RUNNER_TOKEN=$RUNNER_TOKEN
+ASSISTANT_E2E_IMAGE=$IMAGE
+EOF
+
+echo "==> 启动 act_runner"
+docker compose up -d --wait runner
+
 mkdir -p ../e2e
 cat > ../e2e/.env <<EOF
 ASSISTANT_E2E_HOST=$HOST
 ASSISTANT_E2E_ADMIN_USER=$ADMIN_USER
 ASSISTANT_E2E_ADMIN_PASSWORD=$ADMIN_PASSWORD
 ASSISTANT_E2E_ADMIN_TOKEN=$TOKEN
+ASSISTANT_E2E_IMAGE=$IMAGE
 EOF
 
-echo "==> 就绪：$HOST（令牌已写入 test/e2e/.env）"
+echo "==> 就绪：$HOST（act_runner + 镜像 $IMAGE）"

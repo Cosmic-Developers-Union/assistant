@@ -1,0 +1,45 @@
+# managed-by: assistant（assistant install 生成，可重复安装覆盖）
+name: Gitea Assistant
+on:
+  issues:
+    types: [opened, edited, closed, reopened, labeled, unlabeled]
+  pull_request:
+    types: [opened, edited, closed, reopened, labeled, unlabeled, synchronize]
+  pull_request_review:
+    types: [submitted]
+  issue_comment:
+    types: [created]
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+jobs:
+  # 标准 sync：只做标签/评审请求维护，用 Actions 内置令牌（gitea-actions 权限模型）。
+  # 身份名是约定：内容评审者 ai、状态评审者/合并者 merge。
+  sync:
+    runs-on: ubuntu-latest
+    container:
+      image: <<.Image>>
+    steps:
+      - run: assistant sync --verbose
+        env:
+          GITEA_HOST: ${{ github.server_url }}
+          GITEA_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITEA_REPOSITORY: ${{ github.repository }}
+          GITEA_STATE_REVIEWER: <<.Merger>>
+  # 合并与官方评审请求维护：需要 merge（仓库管理员）令牌——Gitea 只允许 PR
+  # 作者或仓库管理员选择 reviewer，Actions 内置令牌会被拒绝
+  # （"Doer can't choose reviewer"）。事件驱动下 sync 之后立即执行：登记评论
+  # 意图为官方请求、撤回遗留请求，并在门禁满足时以 merge 身份合并。
+  automerge:
+    needs: sync
+    runs-on: ubuntu-latest
+    container:
+      image: <<.Image>>
+    steps:
+      - run: assistant automerge --verbose
+        env:
+          GITEA_HOST: ${{ github.server_url }}
+          GITEA_ACCESS_TOKEN: ${{ secrets.STATE_TOKEN }}
+          GITEA_REPOSITORY: ${{ github.repository }}
+          GITEA_STATE_REVIEWER: <<.Merger>>
+          GITEA_BRANCH_PROTECTION_TOKEN: ${{ secrets.BRANCH_PROTECTION_TOKEN }}

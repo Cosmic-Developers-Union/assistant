@@ -12,13 +12,13 @@
 | 命令 | 角色 | 说明 |
 | --- | --- | --- |
 | `assistant setup` | 初始化 | 建机器人账号/令牌、配协作者与分支保护、补齐标签，并写入 `config.json` |
-| `assistant actions` | 初始化 | 为配置中的仓库写入 Actions variables/secrets（状态评审者令牌等） |
-| `assistant install` | 开发者 | 在仓库检出内配置 skills / AGENTS.md / workflows / 各 AI CLI 的 MCP |
+| `assistant actions` | 初始化 | 为配置中的仓库写入 Actions secrets（merge 令牌等；身份约定 ai/merge，无需 variable） |
+| `assistant install` | 开发者 | 在仓库检出内配置 skills / AGENTS.md / workflow / 各 AI CLI 的 MCP |
 | `assistant uninstall` | 开发者 | 移除 `install` 写入的内容（只触碰带 marker 的） |
 | `assistant mcp gitea` | 开发者 | MCP 包装层：自动检测项目站点与开发者令牌后拉起 gitea-mcp |
 | `assistant check` | 机器人 | 按标签检索待 triage 的 Issue 和待 review 的 PR（只读） |
 | `assistant sync` | 机器人 | 规范 Issue 标签并把 PR 原生评审状态同步为状态标签（单次执行） |
-| `assistant automerge` | 机器人 | 合并门禁全绿的已批准 PR（一次至多一个，squash） |
+| `assistant automerge` | 机器人 | 维护官方评审请求（merge 管理员身份）并合并门禁全绿的已批准 PR（一次至多一个，squash） |
 | `assistant run` | 调度引擎 | 长驻主循环：检测待办 → 每待办一个会话 → 验证 → 清理 |
 | `assistant list` | 调度引擎 | 只读列出当前待办（验证 host/仓库/令牌/标签链路） |
 | `assistant review <n>` | 调度引擎 | 立即评审单个 PR（跳过检测，端到端调试用） |
@@ -113,14 +113,14 @@ OAuth 登录说明：默认使用 Gitea 内置的 `tea` 公共客户端；内置
 2. 复用/创建 `reviewer`（默认 `ai`）与 `merger`（默认 `merge`）账号（随机密码不落盘）；
 3. 收敛令牌：reviewer 全实例唯一（删除账号下其余令牌）；merger **按仓库独立**——每个项目一个 `assistant-<hash8>` 令牌，只清理同名旧令牌与历史共享名，不动其他仓库。建令牌端点仅接受 Basic Auth，必要时以管理员身份重置机器人密码后创建；
 4. 把两个账号加为仓库协作者：reviewer 写权限，**merger 管理员权限**（合并白名单成员 + 分支保护读取），并补齐与 `sync` 完全相同口径的标签体系；
-5. 在默认分支配置分支保护：`required approvals=2`（内容批准 + 状态会签）、**合并白名单只含 merger（只有它可以合入）**、驳回阻塞（`block_on_rejected_reviews`）、过期批准作废、落后分支阻塞、**勾选「管理员须遵守分支保护规则」（`block_admin_merge_override`，管理员也不得绕过）**，以及**「有官方审核阻止了代码合并」（`block_on_official_review_requests`）**：`sync` 会把 `/review`、`@ai` 提及登记为正式评审请求，内容评审者提交 review 时 Gitea 自动删除其请求行、门禁解除（sync 另有撤回调用作版本兼容兜底）。注意：**团队评审请求**不会因成员 review 自动清除，需人工移除后合并才解除；API 的 `requested_reviewers` 字段有显示滞后，不代表门禁实际状态；
+5. 在默认分支配置分支保护：`required approvals=2`（内容批准 + 状态会签）、**合并白名单只含 merger（只有它可以合入）**、驳回阻塞（`block_on_rejected_reviews`）、过期批准作废、落后分支阻塞、**勾选「管理员须遵守分支保护规则」（`block_admin_merge_override`，管理员也不得绕过）**，以及**「有官方审核阻止了代码合并」（`block_on_official_review_requests`）**：合并 job（merge 管理员身份）会把 `/review`、`@ai` 提及登记为正式评审请求，内容评审者提交 review 后由它撤回遗留请求、门禁解除（Gitea 只允许 PR 作者或仓库管理员选择 reviewer，`gitea-actions` 会被拒绝，因此请求维护不在 sync）。注意：**团队评审请求**不会因成员 review 自动清除，需人工移除后合并才解除；API 的 `requested_reviewers` 字段有显示滞后，不代表门禁实际状态；
 6. 把结果写回 `config.json`（0600；缺省落点优先当前目录已有文件，否则平台标准配置目录）。`--create-repos` 会在仓库不存在时自动创建私有仓库（auto_init，默认分支 main）。
 
 常用开关：`--dry-run`（只输出计划）、`--relogin`（强制 OAuth 重新登录）、`--allow-admin-override`（放开管理员绕过，缺省关闭）、`--reviewer` / `--merger`（账号名）、`--required-approvals`、`--email-domain`。
 
 ## 仓库辅助机器人
 
-- `sync`：补齐标签体系、规范 open Issue 标签（含 duplicate/wontfix 自动关闭）、把 PR 评审状态同步为状态标签。`status/review` 即「评审请求中」标记：原生 review 请求、`@ai`/`@reviewer` 提及、行首 `/review` 命令任一出现就进评审队列，不再被门禁（冲突/落后/必要检查失败）阻断——门禁只在 `automerge` 合并时校验，避免「检查被取消」直接卡住评审。单次执行、幂等，由 Gitea Actions 事件驱动运行。
+- `sync`：补齐标签体系、规范 open Issue 标签（含 duplicate/wontfix 自动关闭）、把 PR 评审状态同步为状态标签。`status/review` 即「评审请求中」标记：原生 review 请求、`@ai`/`@reviewer` 提及、行首 `/review` 命令任一出现就进评审队列，不再被门禁（冲突/落后/必要检查失败）阻断——门禁只在 `automerge` 合并时校验，避免「检查被取消」直接卡住评审。单次执行、幂等，由 Gitea Actions 事件驱动运行（只用内置令牌）。官方评审请求的登记/撤回由 `automerge`（merge 身份）承担，见下文。
 - `check`：按标签检索待处理项并输出报告。默认立即返回；`--wait` 持续轮询直到出现待办，`--timeout` 轮询到超时为止（两者互斥，时长支持 `d` / `w` 单位，如 `1d1m1s`）；`--interval` 控制间隔（默认 15s），Ctrl+C 可随时中断。
 - `automerge`：把带 `status/approved` + `awaiting/merge` 标签且门禁全绿（分支未落后 main、无冲突、必要检查通过）的 PR squash 合并；一次运行至多合并一个 PR。由 schedule 工作流每 5 分钟驱动。
 
@@ -149,18 +149,17 @@ OAuth 登录说明：默认使用 Gitea 内置的 `tea` 公共客户端；内置
 
 ## 仓库级 Actions 与容器镜像
 
-合并（automerge）按设计跑在**每个仓库自己的 Actions workflow** 里（schedule 驱动），因此需要仓库级 Actions 配置。`assistant setup` 只负责实例与仓库本身（账号/令牌/协作者/分支保护/标签）；仓库 Actions 配置由独立命令写入：
+仓库自动化由**每个仓库自己的 Actions workflow** 驱动（事件 + schedule），因此需要仓库级 Actions 配置。`assistant setup` 只负责实例与仓库本身（账号/令牌/协作者/分支保护/标签）；仓库 Actions 配置由独立命令写入：
 
 ```bash
 assistant actions --config /etc/assistant/config.json [--dry-run]
 ```
 
-每个仓库写入（名称不带 `GITEA_` 前缀——Gitea 保留前缀禁止用于 secret/variable 名，workflow 里再映射为 `GITEA_*` 环境变量）：
+身份是**约定**：内容评审者恒为 `ai`，状态评审者/合并者恒为 `merge`（宿主机 `config.json` 仍可覆盖，但仓库级自动化只承诺约定部署）。每个仓库只需要一个 secret：
 
 | 名称 | 类型 | 值 | workflow 中的环境变量 |
 | --- | --- | --- | --- |
-| `STATE_REVIEWER` | variable | merger 账号名（如 `merge`） | `GITEA_STATE_REVIEWER` |
-| `STATE_TOKEN` | secret | merger 令牌（会签/门禁驳回的官方身份） | `GITEA_STATE_TOKEN` |
+| `STATE_TOKEN` | secret | merge 令牌（会签/门禁驳回/合并/评审请求维护） | `GITEA_STATE_TOKEN`（automerge job 直接用 `GITEA_ACCESS_TOKEN`） |
 | `BRANCH_PROTECTION_TOKEN` | secret | 静态 `admin_token`（OAuth-only 实例跳过，workflow 回退严格门禁） | `GITEA_BRANCH_PROTECTION_TOKEN` |
 
 管理员凭据取自 `config.json`（`admin_token`，或 `admin_oauth` 刷新出的短期令牌）。
@@ -169,27 +168,36 @@ assistant actions --config /etc/assistant/config.json [--dry-run]
 
 ### 容器镜像
 
-`Dockerfile` 打出静态单二进制镜像，适合直接作为仓库 workflow 的执行环境（免去每步下载二进制）：
+`Dockerfile` 打出带 shell 的最小静态二进制镜像（act_runner 以 `sh -c` 执行 `run:` 步骤，distroless 无 shell 不可用）：
 
 ```yaml
-# 仓库内 .gitea/workflows/automerge.yml（示意）
+# 仓库内 .gitea/workflows/assistant.yml（示意）：两个 job，两种权限模型
 jobs:
-  automerge:
+  sync:                 # 只用内置令牌（gitea-actions 权限模型）：标签/评审请求意图
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/<owner>/assistant:latest
+    container: { image: ghcr.io/<owner>/assistant:latest }
+    steps:
+      - run: assistant sync --verbose
+        env:
+          GITEA_HOST: ${{ github.server_url }}
+          GITEA_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITEA_REPOSITORY: ${{ github.repository }}
+          GITEA_STATE_REVIEWER: merge     # 约定身份，无需配置
+  automerge:            # 需要 merge 令牌：评审请求维护 + 门禁 + 会签 + 合并
+    needs: sync
+    runs-on: ubuntu-latest
+    container: { image: ghcr.io/<owner>/assistant:latest }
     steps:
       - run: assistant automerge --verbose
         env:
           GITEA_HOST: ${{ github.server_url }}
-          # 合并白名单只允许 merge：自动合并必须以 merge 身份执行
           GITEA_ACCESS_TOKEN: ${{ secrets.STATE_TOKEN }}
-          GITEA_STATE_REVIEWER: ${{ vars.STATE_REVIEWER }}
-          GITEA_STATE_TOKEN: ${{ secrets.STATE_TOKEN }}
+          GITEA_REPOSITORY: ${{ github.repository }}
+          GITEA_STATE_REVIEWER: merge
           GITEA_BRANCH_PROTECTION_TOKEN: ${{ secrets.BRANCH_PROTECTION_TOKEN }}
 ```
 
-> 合并白名单启用后只有 `merge` 账号能合入：人类与内置 Actions 令牌都会被拒绝，自动合并 workflow 必须像上面这样把 `GITEA_ACCESS_TOKEN` 指向 `STATE_TOKEN`（merger 的项目专属令牌）。`sync` 等只读/打标签任务仍可用内置 `GITHUB_TOKEN`。
+> 合并白名单启用后只有 `merge` 账号能合入：人类与内置 Actions 令牌都会被拒绝，自动合并 job 必须把 `GITEA_ACCESS_TOKEN` 指向 merge 令牌。官方评审请求的登记/撤回也放在 merge job：Gitea 只允许 **PR 作者或仓库管理员**选择 reviewer，`gitea-actions` 会被拒绝（"Doer can't choose reviewer"），因此 sync（内置令牌）只做标签，不碰请求。
 
 - 本地构建：`make image`（`IMAGE=ghcr.io/<owner>/assistant:dev` 可指定标签）
 - 发布：`.github/workflows/publish-image.yml` 在 GitHub 上把镜像推送到 `ghcr.io/<owner>/assistant`（main 推 `latest`，tag 推语义化版本，另附 `sha-*`）
@@ -201,15 +209,16 @@ jobs:
 ```bash
 assistant install              # 配置全部（claude/opencode/codex）
 assistant install --dry-run    # 只输出将要写入的内容
+assistant install --image ...  # 覆盖 workflow 容器镜像
 assistant uninstall            # 移除 assistant 生成的内容
 ```
 
-写入内容全部带 marker、可重复执行、可精确卸载：
+写入内容由 `internal/repoinstall/templates/` 下的模板绑定渲染（身份约定 ai/merge，镜像可覆盖），全部带 marker、可重复执行、可精确卸载：
 
 - `.claude/skills/review/SKILL.md`：PR 审查与 Issue 分诊协议；
 - `AGENTS.md`：assistant 段落（追加，不覆盖用户已有内容）；
-- `.gitea/workflows/assistant.yml`、`automerge.yml`：容器镜像驱动的标签同步与自动合并；
-- MCP：Claude（`.mcp.json` + `.claude/settings.json` 放行 `mcp__gitea*`）、opencode（`opencode.json`，`gitea_*` 放行）、Codex（全局 `~/.codex/config.toml`，`approval_policy = "never"` 自动放行；若你已配置该键则保留并提示）。zcode 暂不支持。
+- `.gitea/workflows/assistant.yml`：单文件两个 job——sync（内置令牌）与 automerge（merge 令牌）；旧版 `automerge.yml` 带 marker 时自动清理；
+- MCP：Claude（`.mcp.json` + `.claude/settings.json` 放行 `mcp__gitea*`）、opencode（`opencode.json`，`gitea_*` 放行）、Codex（全局 `~/.codex/config.toml`，`approval_policy = "never"` 自动放行；若你已配置该键则保留）。zcode 暂不支持。
 
 ### MCP 包装层与开发者令牌
 
@@ -338,15 +347,15 @@ make clean         # 清理构建产物
 
 ### 端到端测试（临时 Gitea）
 
-`test/gitea/docker-compose.yaml` 提供一次性 Gitea（SQLite，HTTP `127.0.0.1:3300`），用于真实验证 `setup` 全流程（建号、令牌、协作者、分支保护、标签、sync 闭环）与多实例命令：
+`test/gitea/docker-compose.yaml` 提供一次性 Gitea + act_runner（SQLite，HTTP `127.0.0.1:3300`）：`up.sh` 会构建本地 `assistant:e2e` 镜像、启动 runner 并注册，e2e 覆盖 `setup` 全流程、真实 workflow 执行（issues/pull_request/issue_comment/pull_request_review 事件驱动的 sync + automerge）与 admin/write/read 三种权限协作者的交互：
 
 ```bash
-make test-e2e      # 起临时 Gitea → 跑 go test -tags e2e ./test/e2e/... → 清理
+make test-e2e      # 构建镜像 → 起 Gitea + runner → 跑 go test -tags e2e ./test/e2e/... → 清理
 make gitea-up      # 只启动，保留现场手动调试（凭据写入 test/e2e/.env）
 make gitea-down    # 停止并清除数据卷
 ```
 
-需要 Docker；e2e 测试在缺少凭据时自动跳过（`go test ./...` 不受影响）。
+需要 Docker（runner 通过 /var/run/docker.sock 以容器 job 执行 workflow）；e2e 测试在缺少凭据时自动跳过（`go test ./...` 不受影响）。
 
 发布的是统一二进制 `assistant`。仓库内的 Gitea Actions 工作流（发布、`sync`、`automerge`）需相应把下载/执行目标从旧的 `gitea-assistant` 改为 `assistant`；发布步骤仍使用带 `write:package` scope 的 PAT secret。
 

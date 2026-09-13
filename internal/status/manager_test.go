@@ -619,8 +619,12 @@ func TestManagerIgnoresCommentAtSameSecondAsReview(t *testing.T) {
 		{ID: 1, Body: "/review", Created: time.Unix(20, 0)},
 	}
 
-	if err := NewManager(api).Sync(t.Context()); err != nil {
+	manager := NewManager(api)
+	if err := manager.Sync(t.Context()); err != nil {
 		t.Fatalf("Sync() error = %v", err)
+	}
+	if err := manager.ReconcileReviewRequests(t.Context()); err != nil {
+		t.Fatalf("ReconcileReviewRequests() error = %v", err)
 	}
 	if len(api.createdRequests) != 0 {
 		t.Errorf("created requests = %+v, want none（同秒旧评论不是新意图）", api.createdRequests)
@@ -942,8 +946,12 @@ func TestManagerRegistersCommentIntentAsReviewRequest(t *testing.T) {
 	api.current[pullRequestKey(repository, 41)] = mergeablePullRequest(41, nil)
 	api.comments[pullRequestKey(repository, 41)] = []Comment{{Body: "麻烦 @ai 看一下"}}
 
-	if err := NewManager(api).Sync(t.Context()); err != nil {
+	manager := NewManager(api)
+	if err := manager.Sync(t.Context()); err != nil {
 		t.Fatalf("Sync() error = %v", err)
+	}
+	if err := manager.ReconcileReviewRequests(t.Context()); err != nil {
+		t.Fatalf("ReconcileReviewRequests() error = %v", err)
 	}
 	wantRequests := []reviewRequestChange{
 		{PullRequest: 40, Reviewer: "ai"},
@@ -970,11 +978,43 @@ func TestManagerRegistersRequestForConfiguredReviewer(t *testing.T) {
 	api.current[pullRequestKey(repository, 42)] = mergeablePullRequest(42, nil)
 	api.comments[pullRequestKey(repository, 42)] = []Comment{{Body: "/review"}}
 
-	if err := NewManager(api, WithContentReviewer("bot")).Sync(t.Context()); err != nil {
-		t.Fatalf("Sync() error = %v", err)
+	manager := NewManager(api, WithContentReviewer("bot"))
+	if err := manager.ReconcileReviewRequests(t.Context()); err != nil {
+		t.Fatalf("ReconcileReviewRequests() error = %v", err)
 	}
 	if len(api.createdRequests) != 1 || api.createdRequests[0].Reviewer != "bot" {
 		t.Errorf("created requests = %+v, want bot", api.createdRequests)
+	}
+}
+
+// 身份边界：sync（Actions 内置令牌 gitea-actions）不得触碰官方评审请求——
+// Gitea 只允许 PR 作者或仓库管理员选择 reviewer（gitea-actions 会被拒），
+// 请求维护由 merge 身份的 ReconcileReviewRequests 承担。
+func TestManagerSyncLeavesReviewRequestsToMergeIdentity(t *testing.T) {
+	repository := Repository{Owner: "acme", Name: "video"}
+	api := newFakeAPI(repository, completeLabels())
+	api.pullRequests[repository.FullName()] = []PullRequest{{Index: 45}}
+	pr := mergeablePullRequest(45, nil)
+	pr.RequestedReviewers = []string{"ai"}
+	api.current[pullRequestKey(repository, 45)] = pr
+	api.comments[pullRequestKey(repository, 45)] = []Comment{{Body: "/review"}}
+	api.reviews[pullRequestKey(repository, 45)] = []Review{
+		{ID: 1, State: ReviewStateApproved, Submitted: time.Unix(20, 0), User: "ai"},
+	}
+
+	manager := NewManager(api)
+	if err := manager.Sync(t.Context()); err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if len(api.createdRequests) != 0 || len(api.deletedRequests) != 0 {
+		t.Fatalf("sync 不应触碰评审请求：created=%+v deleted=%+v", api.createdRequests, api.deletedRequests)
+	}
+	if err := manager.ReconcileReviewRequests(t.Context()); err != nil {
+		t.Fatalf("ReconcileReviewRequests() error = %v", err)
+	}
+	wantWithdrawn := []reviewRequestChange{{PullRequest: 45, Reviewer: "ai"}}
+	if !slices.Equal(api.deletedRequests, wantWithdrawn) {
+		t.Errorf("deleted requests = %+v, want %+v", api.deletedRequests, wantWithdrawn)
 	}
 }
 
@@ -1007,8 +1047,12 @@ func TestManagerIgnoresStaleRequestRecord(t *testing.T) {
 		{ID: 4, State: ReviewStateRequestChanges, Submitted: time.Unix(20, 0), User: "ai"},
 	}
 
-	if err := NewManager(api).Sync(t.Context()); err != nil {
+	manager := NewManager(api)
+	if err := manager.Sync(t.Context()); err != nil {
 		t.Fatalf("Sync() error = %v", err)
+	}
+	if err := manager.ReconcileReviewRequests(t.Context()); err != nil {
+		t.Fatalf("ReconcileReviewRequests() error = %v", err)
 	}
 	if len(api.createdReviews) != 0 {
 		t.Errorf("created reviews = %+v, want none", api.createdReviews)
@@ -1044,8 +1088,9 @@ func TestManagerKeepsFreshRequestRecordWithoutWithdrawal(t *testing.T) {
 		{ID: 2, State: ReviewStateRequestReview, Submitted: time.Unix(20, 0), User: "ai"},
 	}
 
-	if err := NewManager(api).Sync(t.Context()); err != nil {
-		t.Fatalf("Sync() error = %v", err)
+	manager := NewManager(api)
+	if err := manager.ReconcileReviewRequests(t.Context()); err != nil {
+		t.Fatalf("ReconcileReviewRequests() error = %v", err)
 	}
 	if len(api.deletedRequests) != 0 {
 		t.Errorf("deleted requests = %+v, want none（复审请求保留）", api.deletedRequests)

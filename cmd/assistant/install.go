@@ -12,6 +12,7 @@ type repoToolOptions struct {
 	Dir       string
 	Tools     []string
 	CodexPath string
+	Image     string
 	DryRun    bool
 }
 
@@ -23,6 +24,7 @@ func (o *repoToolOptions) repoOptions(command *cobra.Command) repoinstall.Option
 		Dir:             o.Dir,
 		Tools:           o.Tools,
 		CodexConfigPath: o.CodexPath,
+		Image:           o.Image,
 		DryRun:          o.DryRun,
 		Log:             logf,
 	}
@@ -34,15 +36,16 @@ func newInstallCommand() *cobra.Command {
 	options := &repoToolOptions{}
 	command := &cobra.Command{
 		Use:   "install",
-		Short: "在当前仓库配置 assistant 工作流（skills/AGENTS.md/workflows/MCP）",
+		Short: "在当前仓库配置 assistant 工作流（skills/AGENTS.md/workflow/MCP）",
 		Long: "把仓库配置成 assistant 工作流：\n" +
 			"  - .claude/skills/review/SKILL.md（评审与分诊协议）\n" +
 			"  - AGENTS.md 的 assistant 段落（标签与流程约定）\n" +
-			"  - .gitea/workflows/assistant.yml、automerge.yml（容器镜像驱动）\n" +
+			"  - .gitea/workflows/assistant.yml（sync + automerge 两个 job）\n" +
 			"  - MCP 配置：claude（.mcp.json + .claude/settings.json 放行 gitea 工具）、\n" +
 			"    opencode（opencode.json）、codex（全局 ~/.codex/config.toml）\n\n" +
-			"所有生成内容带 marker，重复 install 幂等，uninstall 可精确移除。\n" +
-			"zcode 暂不支持。",
+			"模板按绑定数据动态渲染：身份是约定（内容评审 ai、状态评审/合并 merge），\n" +
+			"镜像默认官方 latest，可用 --image 覆盖。所有生成内容带 marker，重复\n" +
+			"install 幂等，uninstall 可精确移除。zcode 暂不支持。",
 		Args: cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			return repoinstall.Install(command.Context(), options.repoOptions(command))
@@ -53,6 +56,8 @@ func newInstallCommand() *cobra.Command {
 	flags.StringSliceVar(&options.Tools, "tools", nil,
 		"要配置的 AI CLI（缺省全部："+joinTools()+"; zcode 暂不支持）")
 	flags.StringVar(&options.CodexPath, "codex-config", "", "覆盖 ~/.codex/config.toml 路径")
+	flags.StringVar(&options.Image, "image", "",
+		"workflow 容器镜像（缺省 "+repoinstall.DefaultImage+"）")
 	flags.BoolVar(&options.DryRun, "dry-run", false, "只输出将要写入的内容，不做任何修改")
 	return command
 }

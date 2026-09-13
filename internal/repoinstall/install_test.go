@@ -71,6 +71,27 @@ func TestInstallCreatesArtifactsAndIsIdempotent(t *testing.T) {
 			t.Errorf("codex config missing %s: %s", want, codex)
 		}
 	}
+	// workflow：绑定渲染（默认镜像、约定身份 merge）、两个 job、sync 用内置令牌
+	workflow := readFile(t, filepath.Join(options.Dir, ManagedWorkflowPaths()[0]))
+	for _, want := range []string{
+		"image: " + DefaultImage,
+		"GITEA_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+		"GITEA_ACCESS_TOKEN: ${{ secrets.STATE_TOKEN }}",
+		"GITEA_STATE_REVIEWER: " + ConventionMerger,
+		"assistant sync --verbose",
+		"assistant automerge --verbose",
+		// Gitea/GitHub 只有 types 映射形式才注册事件；列表简写会被静默忽略
+		"types: [opened, edited, closed, reopened, labeled, unlabeled]",
+	} {
+		if !strings.Contains(workflow, want) {
+			t.Errorf("workflow missing %s:\n%s", want, workflow)
+		}
+	}
+	// AGENTS.md 段落同样绑定
+	agents := readFile(t, filepath.Join(options.Dir, ManagedAgentPath()))
+	if !strings.Contains(agents, "@"+ConventionReviewer) || !strings.Contains(agents, "`"+ConventionMerger+"`") {
+		t.Errorf("AGENTS.md not bound to conventions:\n%s", agents)
+	}
 
 	// 幂等：第二次运行不改变任何文件
 	before := map[string]string{}
@@ -211,5 +232,63 @@ func TestMCPCommandDefaults(t *testing.T) {
 	})
 	if command != "/usr/local/bin/gitea-mcp" || args[0] != "-t" {
 		t.Errorf("mcpCommand(bin) = %q %v", command, args)
+	}
+}
+
+// 模板按绑定数据渲染：自定义身份与镜像，且不残留模板动作。
+func TestInstallRendersBoundTemplates(t *testing.T) {
+	options := testOptions(t)
+	options.Reviewer = "bot"
+	options.Merger = "merger"
+	options.Image = "assistant:e2e"
+	if err := Install(context.Background(), options); err != nil {
+		t.Fatalf("Install() error = %v", err)
+	}
+	workflow := readFile(t, filepath.Join(options.Dir, ManagedWorkflowPaths()[0]))
+	for _, want := range []string{"image: assistant:e2e", "GITEA_STATE_REVIEWER: merger"} {
+		if !strings.Contains(workflow, want) {
+			t.Errorf("workflow missing %s:\n%s", want, workflow)
+		}
+	}
+	agents := readFile(t, filepath.Join(options.Dir, ManagedAgentPath()))
+	if !strings.Contains(agents, "@bot") || !strings.Contains(agents, "`merger`") {
+		t.Errorf("AGENTS.md not rendered:\n%s", agents)
+	}
+	for _, relative := range append([]string{ManagedSkillPath(), ManagedAgentPath()}, ManagedWorkflowPaths()...) {
+		content := readFile(t, filepath.Join(options.Dir, relative))
+		if strings.Contains(content, "<<") || strings.Contains(content, ">>") {
+			t.Errorf("%s still contains template actions", relative)
+		}
+	}
+}
+
+// 旧版独立 automerge.yml：install 迁移清理（仅限带 marker 的），用户手写的不碰。
+func TestInstallMigratesLegacyAutomergeWorkflow(t *testing.T) {
+	options := testOptions(t)
+	path := func() string { return filepath.Join(options.Dir, LegacyWorkflowPaths()[0]) }
+	if err := os.MkdirAll(filepath.Dir(path()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path(), []byte("<!-- managed-by: assistant -->\nold\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Install(context.Background(), options); err != nil {
+		t.Fatalf("Install() error = %v", err)
+	}
+	if _, err := os.Stat(path()); !os.IsNotExist(err) {
+		t.Error("managed legacy automerge workflow should be removed on install")
+	}
+	// 用户手写的同名文件：install 与 uninstall 都不得触碰
+	if err := os.WriteFile(path(), []byte("name: mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Install(context.Background(), options); err != nil {
+		t.Fatalf("second Install() error = %v", err)
+	}
+	if err := Uninstall(context.Background(), options); err != nil {
+		t.Fatalf("Uninstall() error = %v", err)
+	}
+	if _, err := os.Stat(path()); err != nil {
+		t.Error("user-owned automerge workflow must survive install/uninstall")
 	}
 }
