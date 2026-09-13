@@ -82,11 +82,16 @@ type Admin interface {
 	GetRepo(ctx context.Context, fullName string) (RepoInfo, bool, error)
 	CreateRepo(ctx context.Context, fullName string) error
 	AddCollaborator(ctx context.Context, fullName, user, permission string) error
+	// RemoveCollaborator 移除仓库协作者（不存在时 no-op；deinit --purge 用）。
+	RemoveCollaborator(ctx context.Context, fullName, user string) error
 	EnsureBranchProtection(ctx context.Context, fullName string, options ProtectionOptions) error
+	// DeleteBranchProtection 删除分支保护规则（不存在时 no-op；deinit --purge 用）。
+	DeleteBranchProtection(ctx context.Context, fullName, branch string) error
 	ReconcileLabels(ctx context.Context, fullName, reviewerToken string) error
-	// SetRepoSecret 写仓库级 Actions secret（幂等覆盖）。身份名是约定
-	// （ai/merge），无需 variable。
+	// SetRepoSecret / DeleteRepoSecret 写/删仓库级 Actions secret（幂等）。
+	// 身份名是约定（ai/merge），无需 variable。
 	SetRepoSecret(ctx context.Context, fullName, name, value string) error
+	DeleteRepoSecret(ctx context.Context, fullName, name string) error
 }
 
 // ProtectionOptions 是 setup 统一写入的分支保护配置。

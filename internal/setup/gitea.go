@@ -370,6 +370,55 @@ func (a *giteaAdmin) SetRepoSecret(ctx context.Context, fullName, name, value st
 	return nil
 }
 
+// RemoveCollaborator 移除仓库协作者（不存在时 no-op）。deinit --purge 用。
+func (a *giteaAdmin) RemoveCollaborator(ctx context.Context, fullName, user string) error {
+	if a.sdk == nil {
+		return fmt.Errorf("缺少管理员令牌，无法移除协作者")
+	}
+	owner, name, err := instances.ParseRepoName(fullName)
+	if err != nil {
+		return err
+	}
+	response, err := a.sdk.Repositories.DeleteCollaborator(ctx, owner, name, user)
+	if err != nil && (response == nil || response.StatusCode != http.StatusNotFound) {
+		return fmt.Errorf("移除 %s 的协作者 %s: %w", fullName, user, err)
+	}
+	return nil
+}
+
+// DeleteBranchProtection 删除分支保护规则（不存在时 no-op）。deinit --purge 用。
+func (a *giteaAdmin) DeleteBranchProtection(ctx context.Context, fullName, branch string) error {
+	if a.sdk == nil {
+		return fmt.Errorf("缺少管理员令牌，无法删除分支保护")
+	}
+	owner, name, err := instances.ParseRepoName(fullName)
+	if err != nil {
+		return err
+	}
+	response, err := a.sdk.Repositories.DeleteBranchProtection(ctx, owner, name, branch)
+	if err != nil && (response == nil || response.StatusCode != http.StatusNotFound) {
+		return fmt.Errorf("删除 %s 的分支保护 %s: %w", fullName, branch, err)
+	}
+	return nil
+}
+
+// DeleteRepoSecret 删除仓库级 Actions secret（不存在时 no-op）。deinit --purge 用。
+func (a *giteaAdmin) DeleteRepoSecret(ctx context.Context, fullName, name string) error {
+	owner, repository, err := instances.ParseRepoName(fullName)
+	if err != nil {
+		return err
+	}
+	path := fmt.Sprintf("/api/v1/repos/%s/%s/actions/secrets/%s",
+		url.PathEscape(owner), url.PathEscape(repository), url.PathEscape(name))
+	if _, err := a.do(ctx, http.MethodDelete, path, a.auth(), nil, nil); err != nil {
+		if isHTTPStatus(err, http.StatusNotFound) {
+			return nil
+		}
+		return fmt.Errorf("删除 %s 的 Actions secret %s: %w", fullName, name, err)
+	}
+	return nil
+}
+
 // resetPassword 由管理员重置机器人账号密码（仅用于以 Basic Auth 管理它自己
 // 的令牌；机器人不登录 UI，重置无副作用）。
 func (a *giteaAdmin) resetPassword(ctx context.Context, name string) (string, error) {

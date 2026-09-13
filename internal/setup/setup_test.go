@@ -145,6 +145,16 @@ func (f *fakeAdmin) AddCollaborator(_ context.Context, fullName, user, permissio
 	return nil
 }
 
+func (f *fakeAdmin) RemoveCollaborator(_ context.Context, fullName, user string) error {
+	delete(f.collaborators, fullName+"/"+user)
+	return nil
+}
+
+func (f *fakeAdmin) DeleteBranchProtection(_ context.Context, fullName, _ string) error {
+	delete(f.protections, fullName)
+	return nil
+}
+
 func (f *fakeAdmin) EnsureBranchProtection(_ context.Context, fullName string, options ProtectionOptions) error {
 	f.protections[fullName] = options
 	return nil
@@ -157,6 +167,11 @@ func (f *fakeAdmin) ReconcileLabels(_ context.Context, fullName, _ string) error
 
 func (f *fakeAdmin) SetRepoSecret(_ context.Context, fullName, name, value string) error {
 	f.secrets[fullName+"/"+name] = value
+	return nil
+}
+
+func (f *fakeAdmin) DeleteRepoSecret(_ context.Context, fullName, name string) error {
+	delete(f.secrets, fullName+"/"+name)
 	return nil
 }
 

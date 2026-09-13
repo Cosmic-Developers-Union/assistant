@@ -13,6 +13,8 @@
 | --- | --- | --- |
 | `assistant setup` | 初始化 | 建机器人账号/令牌、配协作者与分支保护、补齐标签，并写入 `config.json` |
 | `assistant login` | 初始化 | OAuth 登录登记/刷新平台（写入 `admin_oauth`）；`login list`/`login remove` 管理平台 |
+| `assistant init` | 初始化 | 只初始化当前仓库：复用平台凭据与 ai/merge 账号，配保护/标签/secret，并自动登记进 `config.json` |
+| `assistant deinit` | 初始化 | init 的反命令：从 `config.json` 移除当前仓库；`--purge` 同清理服务端（保护/协作者/secret） |
 | `assistant actions` | 初始化 | 为配置中的仓库写入 Actions secrets（merge 令牌等；身份约定 ai/merge，无需 variable） |
 | `assistant install` | 开发者 | 在仓库检出内配置 skills / AGENTS.md / workflow / 各 AI CLI 的 MCP |
 | `assistant uninstall` | 开发者 | 移除 `install` 写入的内容（只触碰带 marker 的） |
@@ -91,6 +93,20 @@ assistant login remove https://gitea.example.com   # 移除平台条目（不触
 ```
 
 host 可省略：取配置中唯一实例，否则在带 Gitea remote 的检出内探测（`/api/v1/version`，多 remote 逐个尝试）。`--oauth-client-id/--oauth-client-secret/--oauth-port` 控制 OAuth 应用与回调端口。
+
+### 仓库初始化：assistant init
+
+`setup` 面向整台实例（账号/令牌/多仓库），`init` 面向当前仓库——在仓库检出内运行即可，平台必须已由 `login`/`setup` 登记：
+
+```bash
+assistant init                 # 复用 remote 推导仓库；也可以用 --repo owner/name
+assistant init --create-repos  # 仓库不存在时创建
+assistant init --dry-run
+assistant deinit               # 仅从 config.json 移除当前仓库
+assistant deinit --purge       # 同时删除分支保护、移除 ai/merge 协作者、删除 MERGE_TOKEN secret
+```
+
+`init` 做的事：复用或补齐平台上的 `ai`/`merge` 账号与令牌 → 配协作者（ai write / merge admin）→ 分支保护（同 `setup` 口径）→ 标签体系 → 写入仓库级 `MERGE_TOKEN` secret → 把仓库条目（含 `merger_token`）自动加入 `config.json`。`deinit --purge` 是其反操作；本地安装产物（skills/AGENTS.md/workflow/MCP）用 `assistant uninstall` 清理。两者都支持 `--dry-run`。
 
 ### 初始化：assistant setup
 

@@ -46,6 +46,8 @@ func TestRootCommandShowsHelpWithoutArguments(t *testing.T) {
 		!strings.Contains(output, "mcp") ||
 		!strings.Contains(output, "doctor") ||
 		!strings.Contains(output, "login") ||
+		!strings.Contains(output, "init") ||
+		!strings.Contains(output, "deinit") ||
 		!strings.Contains(output, "run") ||
 		!strings.Contains(output, "list") ||
 		!strings.Contains(output, "review") ||
