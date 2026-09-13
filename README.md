@@ -256,6 +256,23 @@ status/triage     Issue ───────▶  triage issue #N               
 - **多实例**：使用 `config.json` 时，`run` 为每个 instance × repo 启动一个独立循环（各自加锁、各自 worktree 根），任一循环失败即整体退出。启动前逐 instance 做健康检查：版本端点可达 + reviewer/merger/admin 令牌认证通过，任一不可用则拒绝启动（不带病运行）。
 - **优雅退出**：首个 SIGINT/SIGTERM 等当前待办处理完；二次信号强杀。
 
+### Docker 评审环境（可选）
+
+会话可以跑进容器，宿主机只需 docker（免装 claude 与语言工具链）：
+
+```bash
+make review-image        # 构建评审镜像（REVIEW_IMAGE=... 可改标签）
+assistant run --docker-image ghcr.io/cosmic-developers-union/assistant-review:latest
+assistant review 42 --docker-image ...     # 一次性调试同样支持
+# 或环境变量：DISPATCH_DOCKER_IMAGE / DISPATCH_DOCKER_NETWORK（如 host）
+```
+
+- 镜像定义在 `images/review/Dockerfile`：gitea runner 基础镜像 + bun/skills CLI、Claude Code、Go 工具链与常用构建工具，缓存目录统一到 `/root`。
+- **路径一致挂载**：worktree 与宿主 `.mcp.json` 所在目录按相同绝对路径挂进容器，claude 的 `--mcp-config`、`--plugin-dir` 等参数无需改写；`.claude/` 已由 dispatcher 以宿主基线覆盖进 worktree（PR 自带的评审规则不起作用）。
+- **认证透传**：`ANTHROPIC_*` / `CLAUDE_*` 及代理变量按白名单 `-e KEY` 从宿主环境继承，其余环境不进容器。
+- **超时兜底**：SIGTERM docker 客户端不会停容器，dispatcher 额外按容器名执行 `docker kill`。
+- **网络**：容器默认 bridge；MCP 需要回连宿主机上的服务时用 `--docker-network host`（或自定义网络）。
+
 ### 命令行
 
 ```

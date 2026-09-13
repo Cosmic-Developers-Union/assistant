@@ -16,8 +16,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -224,12 +227,13 @@ type SessionOptions struct {
 	OnProgress    func(string)
 }
 
-// RunSession 驱动 claude 子进程并归集 stream-json 结果。
-func RunSession(options SessionOptions) SessionOutcome {
+// sessionCommand 组装会话命令：缺省直接跑 claude；Config.DockerImage 非空时
+// 跑在容器里——worktree 与 MCP 配置按相同绝对路径挂载（容器内外路径一致，
+// claude 的路径参数无需改写），认证环境变量按白名单透传（-e KEY 继承宿主值）。
+// 返回的 container 名用于超时终止（SIGTERM docker 客户端不会停容器）。
+func sessionCommand(options SessionOptions) (bin string, args []string, container string) {
 	config := options.Config
-	startedAt := time.Now()
-	outcome := NewSessionOutcome()
-	args := []string{
+	claudeArgs := []string{
 		"-p",
 		options.Prompt,
 		"--permission-mode",
@@ -246,10 +250,72 @@ func RunSession(options SessionOptions) SessionOutcome {
 		strconv.Itoa(MaxTurns),
 	}
 	if config.Model != "" {
-		args = append(args, "--model", config.Model)
+		claudeArgs = append(claudeArgs, "--model", config.Model)
 	}
+	if config.DockerImage == "" {
+		return config.ClaudeBin, claudeArgs, ""
+	}
+	container = fmt.Sprintf("assistant-review-%d-%d", os.Getpid(), time.Now().UnixNano())
+	args = []string{
+		"run", "--rm", "-i",
+		"--name", container,
+		"-v", options.Cwd + ":" + options.Cwd,
+		"-w", options.Cwd,
+	}
+	if options.MCPConfigPath != "" {
+		mcpDir := filepath.Dir(options.MCPConfigPath)
+		args = append(args, "-v", mcpDir+":"+mcpDir)
+	}
+	if config.DockerNetwork != "" {
+		args = append(args, "--network", config.DockerNetwork)
+	}
+	for _, key := range dockerPassthroughEnv() {
+		args = append(args, "-e", key)
+	}
+	args = append(args, config.DockerImage, config.ClaudeBin)
+	args = append(args, claudeArgs...)
+	return "docker", args, container
+}
 
-	command := exec.Command(config.ClaudeBin, args...)
+var (
+	dockerEnvPrefixes = []string{"ANTHROPIC_", "CLAUDE_"}
+	dockerEnvNames    = []string{
+		"DISABLE_TELEMETRY", "DO_NOT_TRACK",
+		"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+	}
+)
+
+// dockerPassthroughEnv 返回需要 -e 透传给评审容器的环境变量名（只传键，值由
+// docker 从宿主环境继承）。
+func dockerPassthroughEnv() []string {
+	var keys []string
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		match := slices.Contains(dockerEnvNames, key)
+		if !match {
+			for _, prefix := range dockerEnvPrefixes {
+				if strings.HasPrefix(key, prefix) {
+					match = true
+					break
+				}
+			}
+		}
+		if match {
+			keys = append(keys, key)
+		}
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+// RunSession 驱动 claude 子进程并归集 stream-json 结果。
+func RunSession(options SessionOptions) SessionOutcome {
+	config := options.Config
+	startedAt := time.Now()
+	outcome := NewSessionOutcome()
+
+	bin, args, container := sessionCommand(options)
+	command := exec.Command(bin, args...)
 	command.Dir = options.Cwd
 	stream := &streamWriter{outcome: &outcome, onProgress: options.OnProgress}
 	stderr := &tailWriter{}
@@ -257,7 +323,7 @@ func RunSession(options SessionOptions) SessionOutcome {
 	command.Stderr = stderr
 
 	if err := command.Start(); err != nil {
-		// spawn 失败：claudeBin 不存在 / 不可执行
+		// spawn 失败：claudeBin/docker 不存在或不可执行
 		outcome.Errors = append(outcome.Errors, err.Error())
 		return outcome
 	}
@@ -265,6 +331,10 @@ func RunSession(options SessionOptions) SessionOutcome {
 	var timedOut atomic.Bool
 	timer := time.AfterFunc(config.SessionTimeout, func() {
 		timedOut.Store(true)
+		// docker 客户端被终止不会停掉容器，按名 kill 兜底
+		if container != "" {
+			_ = exec.Command("docker", "kill", container).Run()
+		}
 		_ = command.Process.Signal(syscall.SIGTERM)
 		time.AfterFunc(killGrace, func() { _ = command.Process.Kill() })
 	})

@@ -19,20 +19,22 @@ import (
 
 // dispatcherOptions 是调度命令共享的命令行参数（未给出的项回退环境变量/默认值）。
 type dispatcherOptions struct {
-	Host         string
-	Token        string
-	Reviewer     string
-	Model        string
-	ClaudeBin    string
-	LogDir       string
-	WorktreeRoot string
-	LockFile     string
-	BaseBranch   string
-	SyncMirror   bool
-	Interval     string
-	Timeout      string
-	Concurrency  string
-	DryRun       bool
+	Host          string
+	Token         string
+	Reviewer      string
+	Model         string
+	ClaudeBin     string
+	LogDir        string
+	WorktreeRoot  string
+	LockFile      string
+	BaseBranch    string
+	SyncMirror    bool
+	Interval      string
+	Timeout       string
+	Concurrency   string
+	DockerImage   string
+	DockerNetwork string
+	DryRun        bool
 }
 
 // dispatchTarget 是一个 (instance, 仓库) 的完整运行上下文。
@@ -129,6 +131,10 @@ func addDispatcherConnectionFlags(command *cobra.Command, options *dispatcherOpt
 	flags.StringVar(&options.Reviewer, "reviewer", "", "完成判定匹配的 reviewer 账号（缺省 ai）")
 	flags.StringVar(&options.Model, "model", "", "会话模型（缺省用账号默认）")
 	flags.StringVar(&options.ClaudeBin, "claude-bin", "", "claude 可执行文件（缺省 PATH 上的 claude）")
+	flags.StringVar(&options.DockerImage, "docker-image", "",
+		"评审会话镜像：非空时会话跑在 docker 容器里（如 ghcr.io/cosmic-developers-union/assistant-review:latest）")
+	flags.StringVar(&options.DockerNetwork, "docker-network", "",
+		"会话容器的 docker 网络（如 host；缺省 bridge）")
 	flags.StringVar(&options.LogDir, "log-dir", "", "会话日志目录（缺省 <仓库检出>/logs）")
 	flags.StringVar(
 		&options.WorktreeRoot,
@@ -193,19 +199,21 @@ func resolveEnvDispatcher(
 
 func dispatcherFlags(command *cobra.Command, repoFlag string, options *dispatcherOptions) dispatcher.Flags {
 	flags := dispatcher.Flags{
-		Host:         options.Host,
-		Repository:   repoFlag,
-		AccessToken:  options.Token,
-		Interval:     options.Interval,
-		Timeout:      options.Timeout,
-		Model:        options.Model,
-		Reviewer:     options.Reviewer,
-		ClaudeBin:    options.ClaudeBin,
-		LogDir:       options.LogDir,
-		WorktreeRoot: options.WorktreeRoot,
-		LockFile:     options.LockFile,
-		BaseBranch:   options.BaseBranch,
-		Concurrency:  options.Concurrency,
+		Host:          options.Host,
+		Repository:    repoFlag,
+		AccessToken:   options.Token,
+		Interval:      options.Interval,
+		Timeout:       options.Timeout,
+		Model:         options.Model,
+		Reviewer:      options.Reviewer,
+		ClaudeBin:     options.ClaudeBin,
+		LogDir:        options.LogDir,
+		WorktreeRoot:  options.WorktreeRoot,
+		LockFile:      options.LockFile,
+		BaseBranch:    options.BaseBranch,
+		Concurrency:   options.Concurrency,
+		DockerImage:   options.DockerImage,
+		DockerNetwork: options.DockerNetwork,
 	}
 	// 显式 --sync-mirror=false 压过 DISPATCH_SYNC_MIRROR=1；未给出则交给环境变量
 	if command.Flags().Changed("sync-mirror") {

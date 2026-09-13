@@ -47,25 +47,32 @@ type Config struct {
 	Reviewer string
 	// ClaudeBin 是 claude 可执行文件（PATH 名或绝对路径）
 	ClaudeBin string
+	// DockerImage 非空时评审会话跑在 Docker 容器里（worktree 与 MCP 配置按
+	// 相同绝对路径挂载；认证环境变量按白名单透传）
+	DockerImage string
+	// DockerNetwork 是 docker run 的 --network（如 host / 自定义网络）
+	DockerNetwork string
 }
 
 // Flags 是命令行参数（未给出的项回退环境变量/默认值/自动检测）。SyncMirror
 // 用指针区分「显式 false」与「未给出」，前者压过环境变量。
 type Flags struct {
-	Host         string
-	Repository   string
-	AccessToken  string
-	Interval     string
-	Timeout      string
-	Model        string
-	Reviewer     string
-	ClaudeBin    string
-	LogDir       string
-	WorktreeRoot string
-	LockFile     string
-	BaseBranch   string
-	SyncMirror   *bool
-	Concurrency  string
+	Host          string
+	Repository    string
+	AccessToken   string
+	Interval      string
+	Timeout       string
+	Model         string
+	Reviewer      string
+	ClaudeBin     string
+	LogDir        string
+	WorktreeRoot  string
+	LockFile      string
+	BaseBranch    string
+	SyncMirror    *bool
+	Concurrency   string
+	DockerImage   string
+	DockerNetwork string
 }
 
 var durationPattern = regexp.MustCompile(`^(\d+)(ms|s|m|h|d)?$`)
@@ -213,13 +220,15 @@ func ResolveConfig(
 			env("DISPATCH_WORKTREE_ROOT"),
 			filepath.Join(os.TempDir(), "agent-dispatcher", "worktrees"),
 		),
-		LockFile:    firstNonEmpty(flags.LockFile, env("DISPATCH_LOCK_FILE"), filepath.Join(repoDir, "dispatcher.lock")),
-		BaseBranch:  firstNonEmpty(flags.BaseBranch, env("DISPATCH_BASE_BRANCH"), "main"),
-		SyncMirror:  syncMirror,
-		Concurrency: concurrency,
-		Model:       firstNonEmpty(flags.Model, env("DISPATCH_MODEL")),
-		Reviewer:    firstNonEmpty(flags.Reviewer, env("DISPATCH_REVIEWER"), "ai"),
-		ClaudeBin:   firstNonEmpty(flags.ClaudeBin, env("DISPATCH_CLAUDE_BIN"), "claude"),
+		LockFile:      firstNonEmpty(flags.LockFile, env("DISPATCH_LOCK_FILE"), filepath.Join(repoDir, "dispatcher.lock")),
+		BaseBranch:    firstNonEmpty(flags.BaseBranch, env("DISPATCH_BASE_BRANCH"), "main"),
+		SyncMirror:    syncMirror,
+		Concurrency:   concurrency,
+		Model:         firstNonEmpty(flags.Model, env("DISPATCH_MODEL")),
+		Reviewer:      firstNonEmpty(flags.Reviewer, env("DISPATCH_REVIEWER"), "ai"),
+		ClaudeBin:     firstNonEmpty(flags.ClaudeBin, env("DISPATCH_CLAUDE_BIN"), "claude"),
+		DockerImage:   firstNonEmpty(flags.DockerImage, env("DISPATCH_DOCKER_IMAGE")),
+		DockerNetwork: firstNonEmpty(flags.DockerNetwork, env("DISPATCH_DOCKER_NETWORK")),
 	}, nil
 }
 

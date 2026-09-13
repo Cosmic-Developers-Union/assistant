@@ -14,6 +14,9 @@ GITEA_OWNER ?= owner
 # 容器镜像名（供 CI / 仓库级 Actions 使用）
 IMAGE ?= assistant:dev
 
+# 评审会话镜像（assistant run --docker-image 使用）
+REVIEW_IMAGE ?= ghcr.io/cosmic-developers-union/assistant-review:dev
+
 # 安装前缀（make install；DESTDIR 支持打包场景）
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
@@ -82,6 +85,12 @@ image: ## 构建容器镜像（仓库级 Actions 用；推送到 registry 由 CI
 	@echo "==> 构建容器镜像 $(IMAGE)..."
 	docker build --build-arg VERSION="$$(git describe --tags --always 2>/dev/null || echo dev)" -t $(IMAGE) .
 	@echo "==> 构建完成: $(IMAGE)"
+
+.PHONY: review-image
+review-image: ## 构建评审会话镜像（Dockerfile 在 images/review/）
+	@echo "==> 构建评审会话镜像 $(REVIEW_IMAGE)..."
+	docker build -f images/review/Dockerfile -t $(REVIEW_IMAGE) .
+	@echo "==> 构建完成: $(REVIEW_IMAGE)"
 
 .PHONY: test-e2e
 test-e2e: ## 起临时 Gitea（docker compose）并运行端到端测试

@@ -262,3 +262,58 @@ func containsString(values []string, want string) bool {
 	}
 	return false
 }
+
+func TestSessionCommandBare(t *testing.T) {
+	options := SessionOptions{
+		Config:        Config{ClaudeBin: "claude", Model: "sonnet"},
+		Prompt:        "review pr #1",
+		Cwd:           "/work",
+		MCPConfigPath: "/repo/.mcp.json",
+	}
+	bin, args, container := sessionCommand(options)
+	if bin != "claude" || container != "" {
+		t.Fatalf("bin=%q container=%q, want claude/bare", bin, container)
+	}
+	for _, want := range []string{"-p", "review pr #1", "--model", "sonnet", "--mcp-config", "/repo/.mcp.json"} {
+		if !containsString(args, want) {
+			t.Errorf("args missing %q: %v", want, args)
+		}
+	}
+}
+
+func TestSessionCommandDocker(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "secret")
+	t.Setenv("UNRELATED_VAR", "x")
+	options := SessionOptions{
+		Config: Config{
+			ClaudeBin:     "claude",
+			DockerImage:   "assistant-review:dev",
+			DockerNetwork: "host",
+		},
+		Prompt:        "review pr #2",
+		Cwd:           "/tmp/worktrees/pr-2",
+		MCPConfigPath: "/srv/repo/.mcp.json",
+	}
+	bin, args, container := sessionCommand(options)
+	if bin != "docker" || container == "" {
+		t.Fatalf("bin=%q container=%q, want docker/named", bin, container)
+	}
+	joined := strings.Join(args, " ")
+	for _, want := range []string{
+		"run --rm -i",
+		"--name " + container,
+		"-v /tmp/worktrees/pr-2:/tmp/worktrees/pr-2",
+		"-w /tmp/worktrees/pr-2",
+		"-v /srv/repo:/srv/repo",
+		"--network host",
+		"-e ANTHROPIC_API_KEY",
+		"assistant-review:dev claude -p review pr #2",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("docker args missing %q: %v", want, args)
+		}
+	}
+	if strings.Contains(joined, "UNRELATED_VAR") {
+		t.Errorf("docker args leaked unrelated env: %v", args)
+	}
+}
