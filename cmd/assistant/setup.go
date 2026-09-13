@@ -215,6 +215,7 @@ func runSetup(command *cobra.Command, configPath string, options *setupOptions) 
 		AdminUser:          options.AdminUser,
 		AdminPassword:      adminPassword,
 		OAuth:              oauth,
+		OAuthClientID:      options.OAuthClientID,
 		Repos:              repos,
 		ReviewerName:       options.ReviewerName,
 		MergerName:         options.MergerName,

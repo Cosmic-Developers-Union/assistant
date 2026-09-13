@@ -28,11 +28,15 @@ import (
 
 // Options 是 setup 的输入。
 type Options struct {
-	Host              string
-	AdminToken        string
-	AdminUser         string
-	AdminPassword     string
-	OAuth             *OAuthOptions
+	Host          string
+	AdminToken    string
+	AdminUser     string
+	AdminPassword string
+	OAuth         *OAuthOptions
+	// OAuthClientID 指定 assistant 使用的 OAuth2 客户端（如管理员在
+	// <host>/-/admin/applications 创建的全局应用）；为空时自动注册/复用当前
+	// 管理员名下的 assistant 公共应用。
+	OAuthClientID     string
 	Repos             []string
 	ReviewerName      string
 	MergerName        string
@@ -145,9 +149,13 @@ func Run(ctx context.Context, options Options, admin Admin) (instances.Instance,
 		instance.Host = options.Host
 		instance.Repos = nil
 	}
-	// 注册/复用 assistant 自己的 OAuth2 公共客户端（login 用）。失败不阻断
-	// setup（旧版 Gitea 或无权限时 login 可显式 --oauth-client-id）。
-	if !options.DryRun {
+	// 注册/复用 assistant 的 OAuth2 公共客户端（login 用）。显式指定时直接采用
+	// （例如管理员在 /-/admin/applications 创建的全局应用）；自动注册失败不阻断
+	// setup（login 可显式 --oauth-client-id）。
+	if explicit := strings.TrimSpace(options.OAuthClientID); explicit != "" {
+		instance.OAuthClientID = explicit
+		logf("使用指定的 OAuth 客户端：%s", explicit)
+	} else if !options.DryRun {
 		clientID, ensureErr := admin.EnsureOAuthApplication(ctx, OAuthApplicationName, OAuthApplicationRedirect)
 		if ensureErr != nil {
 			logf("提示：未注册 assistant OAuth 应用（%v）；assistant login 需 --oauth-client-id", ensureErr)

@@ -443,3 +443,21 @@ func TestRandomPassword(t *testing.T) {
 		t.Errorf("passwords look weak: %q %q", first, second)
 	}
 }
+
+// 显式指定的 OAuth 客户端（如管理员在 /-/admin/applications 创建的全局应用）
+// 直接采用，不再自动注册用户级应用。
+func TestRunKeepsExplicitOAuthClientID(t *testing.T) {
+	admin := newFakeAdmin("acme/repo")
+	options := testOptions()
+	options.OAuthClientID = "global-client-id"
+	instance, err := Run(context.Background(), options, admin)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if instance.OAuthClientID != "global-client-id" {
+		t.Errorf("OAuthClientID = %q, want global-client-id", instance.OAuthClientID)
+	}
+	if len(admin.oauthApplications) != 0 {
+		t.Errorf("指定客户端后不应自动注册：%+v", admin.oauthApplications)
+	}
+}
