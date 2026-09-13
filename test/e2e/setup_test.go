@@ -117,6 +117,10 @@ func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 	if instance.Merger.Token != "" {
 		t.Errorf("Merger.Token = %q, want per-repo tokens only", instance.Merger.Token)
 	}
+	// 独立 OAuth 客户端：setup 用管理员令牌自动注册（login 复用，不再共享 tea 客户端）
+	if instance.OAuthClientID == "" {
+		t.Error("OAuthClientID = 空，want setup 自动注册的 assistant 公共客户端")
+	}
 
 	// 机器人令牌可用且身份正确（merger 用仓库专属令牌）
 	for _, account := range []instances.Account{instance.Reviewer, {Name: instance.Merger.Name, Token: instance.Repos[0].MergerToken}} {

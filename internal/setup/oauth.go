@@ -18,10 +18,6 @@ import (
 )
 
 const (
-	// DefaultOAuthClientID 是 Gitea 内置的 `tea` 公共客户端（PKCE，无密钥）。
-	// 内置客户端在旧版 Gitea 上是 confidential（不可用），届时用
-	// --oauth-client-id 传入自建的公共 OAuth2 应用。
-	DefaultOAuthClientID = "d57cb8c4-630c-4168-8324-ec79935e18d4"
 	// oauthTimeout 是等待用户在浏览器完成授权的时长。
 	oauthTimeout = 10 * time.Minute
 )
@@ -90,9 +86,6 @@ func oauthError(message, host string) error {
 // OAuthLogin 走 OAuth2 授权码 + PKCE：本地监听回调、打开浏览器、兑换令牌并
 // 校验身份。令牌用于 setup 期间的 API 调用（不写盘——OAuth 令牌会过期）。
 func OAuthLogin(ctx context.Context, options OAuthOptions) (OAuthResult, error) {
-	if options.ClientID == "" {
-		options.ClientID = DefaultOAuthClientID
-	}
 	if options.Port < 0 || options.Port > 65535 {
 		return OAuthResult{}, fmt.Errorf("oauth 回调端口非法：%d", options.Port)
 	}
@@ -108,6 +101,12 @@ func OAuthLogin(ctx context.Context, options OAuthOptions) (OAuthResult, error) 
 		httpClient = &http.Client{Timeout: httpTimeout}
 	}
 	host := strings.TrimRight(strings.TrimSpace(options.Host), "/")
+	if strings.TrimSpace(options.ClientID) == "" {
+		return OAuthResult{}, fmt.Errorf(
+			"缺少 OAuth2 Client ID：在 %s/user/settings/applications 创建公共应用（重定向 URI %s）并用 --oauth-client-id 指定，"+
+				"或先用管理员令牌运行 assistant setup 自动注册 %s 应用",
+			host, OAuthApplicationRedirect, OAuthApplicationName)
+	}
 
 	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", options.Port))
 	if err != nil {

@@ -123,6 +123,8 @@ assistant setup --host https://gitea.example.com \
   --admin-token-file /run/secrets/gitea-admin-token --repos owner/repo
 
 # 3. OAuth2 浏览器登录（授权码 + PKCE；令牌不落盘）
+#    用管理员令牌跑过的 setup 会自动注册独立的 assistant OAuth 应用；
+#    纯 OAuth 首次登录时需 --oauth-client-id（站点创建公共应用，重定向 URI http://127.0.0.1）
 assistant setup --host https://gitea.example.com --oauth --repos owner/repo
 
 # 4. 管理员账号密码现场换取长期令牌（缺 --admin-password 时交互式输入，不回显）

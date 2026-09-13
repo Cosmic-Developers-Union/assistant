@@ -10,33 +10,35 @@ import (
 )
 
 type fakeAdmin struct {
-	adminLogin    string
-	adminToken    string
-	users         map[string]bool
-	tokens        map[string]string
-	passwords     map[string]string
-	tokenSeq      int
-	repos         map[string]RepoInfo
-	createdRepos  []string
-	collaborators map[string]string
-	protections   map[string]ProtectionOptions
-	labels        map[string]bool
-	oauth         *instances.OAuthCredential
-	secrets       map[string]string
+	adminLogin        string
+	adminToken        string
+	users             map[string]bool
+	tokens            map[string]string
+	passwords         map[string]string
+	tokenSeq          int
+	repos             map[string]RepoInfo
+	createdRepos      []string
+	collaborators     map[string]string
+	protections       map[string]ProtectionOptions
+	labels            map[string]bool
+	oauth             *instances.OAuthCredential
+	secrets           map[string]string
+	oauthApplications map[string]string
 }
 
 func newFakeAdmin(repos ...string) *fakeAdmin {
 	fake := &fakeAdmin{
-		adminLogin:    "admin",
-		adminToken:    "admin-token",
-		users:         map[string]bool{"admin": true},
-		tokens:        map[string]string{},
-		passwords:     map[string]string{},
-		repos:         map[string]RepoInfo{},
-		collaborators: map[string]string{},
-		protections:   map[string]ProtectionOptions{},
-		labels:        map[string]bool{},
-		secrets:       map[string]string{},
+		adminLogin:        "admin",
+		adminToken:        "admin-token",
+		users:             map[string]bool{"admin": true},
+		tokens:            map[string]string{},
+		passwords:         map[string]string{},
+		repos:             map[string]RepoInfo{},
+		collaborators:     map[string]string{},
+		protections:       map[string]ProtectionOptions{},
+		labels:            map[string]bool{},
+		secrets:           map[string]string{},
+		oauthApplications: map[string]string{},
 	}
 	for _, repo := range repos {
 		fake.repos[repo] = RepoInfo{DefaultBranch: "main"}
@@ -175,6 +177,11 @@ func (f *fakeAdmin) DeleteRepoSecret(_ context.Context, fullName, name string) e
 	return nil
 }
 
+func (f *fakeAdmin) EnsureOAuthApplication(_ context.Context, name, redirectURI string) (string, error) {
+	f.oauthApplications[name] = redirectURI
+	return "client-" + name, nil
+}
+
 func TestConfigureActionsWritesExpectedRepoConfig(t *testing.T) {
 	admin := newFakeAdmin("acme/repo")
 	instance := instances.Instance{
@@ -247,6 +254,13 @@ func TestRunInitializesInstance(t *testing.T) {
 	}
 	if len(instance.Repos) != 1 || instance.Repos[0].MergerToken == "" {
 		t.Errorf("Repos = %+v, want per-repo merger token", instance.Repos)
+	}
+	if instance.OAuthClientID != "client-"+OAuthApplicationName {
+		t.Errorf("OAuthClientID = %q, want 自动注册的独立客户端", instance.OAuthClientID)
+	}
+	if admin.oauthApplications[OAuthApplicationName] != OAuthApplicationRedirect {
+		t.Errorf("OAuth 应用 redirect = %q, want %q",
+			admin.oauthApplications[OAuthApplicationName], OAuthApplicationRedirect)
 	}
 	if !strings.HasPrefix(instance.Repos[0].MergerToken, "token-"+instances.DefaultMergerName+"-") {
 		t.Errorf("repo merger token = %q", instance.Repos[0].MergerToken)

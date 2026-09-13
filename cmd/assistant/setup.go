@@ -78,7 +78,7 @@ func newSetupCommand(configFlag *string) *cobra.Command {
 		&options.OAuthClientID,
 		"oauth-client-id",
 		"",
-		"OAuth2 Client ID（缺省用 Gitea 内置 tea 公共客户端；旧版 Gitea 需自建公共应用）",
+		"OAuth2 公共客户端 ID（缺省复用配置中已注册的 assistant 应用；没有时先在站点创建公共应用，或用管理员令牌运行 setup 自动注册）",
 	)
 	flags.StringVar(&options.OAuthClientSecret, "oauth-client-secret", "", "OAuth2 Client Secret（公共客户端留空）")
 	flags.StringVar(&options.OAuthScope, "oauth-scope", "",
@@ -195,9 +195,13 @@ func runSetup(command *cobra.Command, configPath string, options *setupOptions) 
 
 	var oauth *setup.OAuthOptions
 	if useOAuth {
+		clientID := options.OAuthClientID
+		if clientID == "" && existing != nil {
+			clientID = existing.OAuthClientID
+		}
 		oauth = &setup.OAuthOptions{
 			Host:         host,
-			ClientID:     options.OAuthClientID,
+			ClientID:     clientID,
 			ClientSecret: options.OAuthClientSecret,
 			Scope:        options.OAuthScope,
 			Port:         options.OAuthPort,
