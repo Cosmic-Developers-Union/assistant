@@ -6,36 +6,24 @@
       "CLAUDE_CODE_EFFORT_LEVEL": "high"
     }
   },
+  "default_provider": "zhipu",
   "providers": {
-    "anthropic": {
-      "env": {
-        "ANTHROPIC_API_KEY": "sk-ant-api-key"
-      },
+    "zhipu": {
+      "api_key": "your-zai-api-key"
+    },
+    "opencode": {
+      "api_key": "sk-zen-...",
       "settings": {
-        "model": "claude-sonnet-4-5"
+        "model": "claude-sonnet-5"
       }
     },
-    "gateway": {
-      "env": {
-        "ANTHROPIC_BASE_URL": "https://gateway.example.com/api/anthropic",
-        "ANTHROPIC_AUTH_TOKEN": "gateway-auth-token"
-      },
-      "settings": {
-        "model": "glm-4.6"
-      },
-      "mcp": {
-        "gateway-search": {
-          "command": "npx",
-          "args": ["-y", "@example/search-mcp"]
-        }
-      }
+    "anthropic": {
+      "api_key": "sk-ant-api-key"
     }
   },
-  "default_provider": "anthropic",
   "instances": [
     {
       "host": "https://gitea.example.com",
-      "provider": "gateway",
       "admin_token": "admin-personal-access-token",
       "reviewer": {
         "name": "ai",
@@ -63,7 +51,7 @@
     "base_url": "https://ilinkai.weixin.qq.com",
     "bot_token": "created-by-assistant-weixin-login",
     "login_user_id": "wx-user-id",
-    "provider": "gateway",
+    "provider": "opencode",
     "admin_users": [
       "wx-user-id"
     ]

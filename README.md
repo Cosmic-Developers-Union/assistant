@@ -88,7 +88,7 @@ assistant completion fish > ~/.config/fish/completions/assistant.fish
 
 ### 多 provider（供应商）
 
-`providers` 是手写维护的供应商配置：不同供应商（Anthropic 官方、Anthropic 兼容网关、Bedrock/Vertex 等）的 env/settings/mcp 格式各异，框架只做原样透传合并，不解释供应商语义；另有全局 `optimizations` 层（同 provider 形态，见下）：
+`providers` 是供应商配置：**内置了开箱即用预设**（`zhipu`/`glm`、`kimi`、`moonshot`、`minimax`、`opencode`/`zen`、`anthropic`、`openai` 等），预设补齐端点、令牌变量、模型档位、超时与上下文窗口——多数情况下只写 `api_key`（或 `auth_token`）即可，其余键（`env`/`settings`/`mcp`）按需覆盖预设同名取值：
 
 - `env`：注入会话环境变量（可含密钥）；provider 自定义的 `mcp` server 会缺省继承它（server 自身 `env` 优先）；
 - `settings`：Claude Code 原生 settings 片段（如 `model`、`apiKeyHelper`、`awsAuthRefresh`），合并进会话 `--settings`（`env`/`permissions` 逐键合并，其余顶层键覆盖托管默认）；
@@ -98,21 +98,18 @@ assistant completion fish > ~/.config/fish/completions/assistant.fish
 
 ```json
 {
+  "default_provider": "zhipu",
   "providers": {
-    "gateway": {
-      "env": {
-        "ANTHROPIC_BASE_URL": "https://gateway.example.com/api/anthropic",
-        "ANTHROPIC_AUTH_TOKEN": "gateway-auth-token"
-      },
-      "settings": { "model": "glm-4.6" },
-      "mcp": {
-        "search": { "command": "npx", "args": ["-y", "@example/search-mcp"] }
-      }
+    "zhipu": { "api_key": "your-zai-api-key" },
+    "opencode": {
+      "api_key": "sk-zen-...",
+      "settings": { "model": "claude-sonnet-5" }
     }
-  },
-  "default_provider": "gateway"
+  }
 }
 ```
+
+未识别的 provider 名没有预设，按纯手写透传处理（`env`/`settings`/`mcp` 原样合并）；`env` 里给空串可删除预设默认。内置预设、各家的覆盖要点与坑位见 [`providers.md`](providers.md)。
 
 选择粒度逐级回退：`repo.provider` > `instance.provider` > `default_provider`；微信对话桥用 `weixin.provider`（缺省回退 `default_provider`）。引用了未定义的名字直接报错，不会静默用错供应商。
 
