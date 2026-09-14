@@ -3,8 +3,6 @@ package daemon
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -16,6 +14,7 @@ import (
 
 	"assistant/internal/claudecfg"
 	"assistant/internal/instances"
+	"assistant/internal/provider"
 )
 
 // chatSystemPrompt 是对话会话的附加 system 提示词：角色 + 工具边界。
@@ -102,9 +101,9 @@ func (c *Chat) Handle(ctx context.Context, conversationID, text string) (string,
 
 	sessionID, fresh := c.session(conversationID)
 	if sessionID == "" {
-		generated, err := newUUID()
-		if err != nil {
-			return "", err
+		generated := provider.NewSessionID()
+		if generated == "" {
+			return "", fmt.Errorf("生成会话 ID 失败（crypto/rand 不可用）")
 		}
 		sessionID, fresh = generated, true
 	}
@@ -141,12 +140,18 @@ func (c *Chat) Handle(ctx context.Context, conversationID, text string) (string,
 }
 
 // sessionArgs 组装 claude 调用参数：稳定会话 + 独立设置 + 自举 daemon MCP。
+// 供应商代码级特化（如 opencode 的会话请求头）在每轮对话启动前应用，复用该
+// 会话的稳定 UUID（同一会话多轮命中网关缓存）。
 func (c *Chat) sessionArgs(sessionID string, fresh bool, text string) ([]string, error) {
-	settingsPath, err := c.writeSettings()
+	overrides, err := provider.Apply(c.config.ProviderName, "chat", sessionID, c.config.Provider)
 	if err != nil {
 		return nil, err
 	}
-	mcpPath, err := c.writeMCPConfig()
+	settingsPath, err := c.writeSettings(overrides)
+	if err != nil {
+		return nil, err
+	}
+	mcpPath, err := c.writeMCPConfig(overrides)
 	if err != nil {
 		return nil, err
 	}
@@ -174,8 +179,8 @@ func (c *Chat) sessionArgs(sessionID string, fresh bool, text string) ([]string,
 
 // writeSettings 写入对话会话的独立设置（env + 权限放行 + provider 覆盖，含
 // daemon MCP 的放行）。
-func (c *Chat) writeSettings() (string, error) {
-	settings := claudecfg.SessionSettingsMap(c.config.Provider, "mcp__daemon", "mcp__daemon__*")
+func (c *Chat) writeSettings(overrides claudecfg.Overrides) (string, error) {
+	settings := claudecfg.SessionSettingsMap(overrides, "mcp__daemon", "mcp__daemon__*")
 	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return "", err
@@ -193,13 +198,13 @@ func (c *Chat) writeSettings() (string, error) {
 // writeMCPConfig 写入自举的 daemon MCP 配置（assistant mcp daemon 自己发现
 // 运行中的 daemon，无需地址/令牌参数）；provider 定义的原生 MCP server 一并
 // 合并（同名由 provider 覆盖）。
-func (c *Chat) writeMCPConfig() (string, error) {
+func (c *Chat) writeMCPConfig(overrides claudecfg.Overrides) (string, error) {
 	config := map[string]any{
 		"mcpServers": map[string]any{
 			"daemon": map[string]any{"command": "assistant", "args": []any{"mcp", "daemon"}},
 		},
 	}
-	claudecfg.MergeMCPServers(config, c.config.Provider)
+	claudecfg.MergeMCPServers(config, overrides)
 	data, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
 		return "", err
@@ -306,16 +311,4 @@ func runClaude(ctx context.Context, bin string, args []string, dir string) ([]by
 		return nil, fmt.Errorf("%s: %s", bin, truncate(message, 400))
 	}
 	return stdout.Bytes(), nil
-}
-
-// newUUID 生成 v4 UUID（不引入依赖）。
-func newUUID() (string, error) {
-	buffer := make([]byte, 16)
-	if _, err := rand.Read(buffer); err != nil {
-		return "", fmt.Errorf("生成会话 ID: %w", err)
-	}
-	buffer[6] = (buffer[6] & 0x0f) | 0x40
-	buffer[8] = (buffer[8] & 0x3f) | 0x80
-	encoded := hex.EncodeToString(buffer)
-	return fmt.Sprintf("%s-%s-%s-%s-%s", encoded[0:8], encoded[8:12], encoded[12:16], encoded[16:20], encoded[20:32]), nil
 }

@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"assistant/internal/claudecfg"
+	"assistant/internal/provider"
 )
 
 // SessionOutcome 是一次 claude 会话的归集结果。
@@ -380,14 +381,20 @@ func RunSession(options SessionOptions) SessionOutcome {
 		return outcome
 	}
 	defer cleanup()
-	settingsPath, err := writeClaudeSessionSettings(configDir, config.Provider)
+	// 供应商代码级特化（如 opencode 的会话请求头）：一次会话一个 id
+	overrides, err := provider.Apply(config.ProviderName, "review", "", config.Provider)
+	if err != nil {
+		outcome.Errors = append(outcome.Errors, err.Error())
+		return outcome
+	}
+	settingsPath, err := writeClaudeSessionSettings(configDir, overrides)
 	if err != nil {
 		outcome.Errors = append(outcome.Errors, err.Error())
 		return outcome
 	}
 	options.SettingsPath = settingsPath
 	// provider 定义原生 MCP server 时：与仓库 .mcp.json 合并后注入会话
-	mergedMCPPath, err := writeSessionMCPConfig(configDir, options.MCPConfigPath, config.Provider)
+	mergedMCPPath, err := writeSessionMCPConfig(configDir, options.MCPConfigPath, overrides)
 	if err != nil {
 		outcome.Errors = append(outcome.Errors, err.Error())
 		return outcome

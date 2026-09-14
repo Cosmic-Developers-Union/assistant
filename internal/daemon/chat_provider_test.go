@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	"assistant/internal/claudecfg"
@@ -23,7 +24,7 @@ func TestChatProviderOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewChat: %v", err)
 	}
-	settingsPath, err := chat.writeSettings()
+	settingsPath, err := chat.writeSettings(chat.config.Provider)
 	if err != nil {
 		t.Fatalf("writeSettings: %v", err)
 	}
@@ -54,7 +55,7 @@ func TestChatProviderOverrides(t *testing.T) {
 		t.Errorf("daemon MCP 放行丢失：%v", allow)
 	}
 
-	mcpPath, err := chat.writeMCPConfig()
+	mcpPath, err := chat.writeMCPConfig(chat.config.Provider)
 	if err != nil {
 		t.Fatalf("writeMCPConfig: %v", err)
 	}
@@ -75,4 +76,48 @@ func TestChatProviderOverrides(t *testing.T) {
 	if searchEnv["ANTHROPIC_BASE_URL"] != "https://gw.example.com" {
 		t.Errorf("provider env 未注入 MCP：%+v", searchEnv)
 	}
+}
+
+// provider 名命中代码级特化（opencode）：对话会话 settings 带会话请求头，
+// 且复用该会话的稳定 UUID（多轮命中网关缓存）。
+func TestChatProviderSessionHeader(t *testing.T) {
+	chat, err := NewChat(ChatConfig{
+		ClaudeBin:    "claude",
+		StateDir:     t.TempDir(),
+		ProviderName: "opencode",
+	})
+	if err != nil {
+		t.Fatalf("NewChat: %v", err)
+	}
+	sessionID := "11111111-2222-4333-8444-555555555555"
+	args, err := chat.sessionArgs(sessionID, true, "你好")
+	if err != nil {
+		t.Fatalf("sessionArgs: %v", err)
+	}
+	settingsPath := argumentAfter(args, "--settings")
+	if settingsPath == "" {
+		t.Fatalf("args 缺 --settings：%v", args)
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	env, _ := settings["env"].(map[string]any)
+	headers, _ := env["ANTHROPIC_CUSTOM_HEADERS"].(string)
+	if !strings.Contains(headers, "x-opencode-session: "+sessionID) {
+		t.Errorf("ANTHROPIC_CUSTOM_HEADERS = %q", headers)
+	}
+}
+
+func argumentAfter(args []string, flag string) string {
+	for index, arg := range args {
+		if arg == flag && index+1 < len(args) {
+			return args[index+1]
+		}
+	}
+	return ""
 }

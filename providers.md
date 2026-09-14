@@ -15,6 +15,11 @@
 
 - 生效顺序：assistant 托管默认 < `optimizations`（全局） < 选中 provider < 命令行（`--model` 等）。
 - 选择粒度：`repo.provider` > `instance.provider` > `default_provider`；微信桥 `weixin.provider`。
+- 供应商定义可以写在两处：`config.json` 的 `providers`，或**一个 provider 一个文件**放在
+  `<配置目录>/providers/<名字>.json`（内容即 provider 对象：`env`/`settings`/`mcp`；重名报错）。
+  文件形式不会被写回 `config.json`，适合密钥分离、逐家手写维护。
+- 少数供应商需要在会话启动时做动态调整（如 opencode 的会话请求头）：由**代码级特化**
+  处理，一个供应商一个文件（`internal/provider/`），见第 2 节 opencode。
 - 只作用于运行时会话（临时 `--settings`/`--mcp-config`），不写仓库 `.claude/settings.json`。
 - `env` 里的值也会缺省注入该 provider 自定义的 MCP server（server 自身 `env` 优先）。
 - 已由 assistant 托管、**不要重复配置**：`BASH_DEFAULT_TIMEOUT_MS`、`BASH_MAX_TIMEOUT_MS`、
@@ -175,21 +180,27 @@
 }
 ```
 
-### opencode（OpenCode Zen 网关）
+### opencode（OpenCode Zen / Go 网关）
 
 > 如果你指的是 opencode CLI 本体而不是 Zen 网关：当前会话执行器是 `claude`，provider 只能作用于
 > Anthropic 兼容端点，CLI 本体不在本框架内。
 
 - 接入：`ANTHROPIC_BASE_URL=https://opencode.ai/zen`（Claude Code 会请求 `/v1/messages`）+ Zen API key。
+- **会话请求头（必须）**：Go/Zen 端点自 2026-09-06 起要求每个会话一个稳定的 `x-opencode-session`
+  （缺失可能被拒），OpenCode 客户端还默认带 `x-session-affinity`（缓存亲和）。Claude Code 没有原生
+  会话头开关，用 `ANTHROPIC_CUSTOM_HEADERS`（换行分隔 `Key: Value`）注入——**这一项已内置代码级
+  特化**：只要 provider 名是 `opencode` / `zen` / `opencode-zen` / `opencode-go`（不区分大小写），
+  评审/分诊每次会话一个 UUID、微信对话复用其稳定会话 UUID；你在 `env` 里显式配置的同名头优先，
+  不会被覆盖。特化实现见 `internal/provider/opencode.go`，网关改名/新增要求时只改该文件。
 - 优化点：
   - Anthropic 协议档（`claude-*`、`qwen3.7-max/plus` 等）可直接用；Zen 表里标 `/chat/completions`
     的模型（deepseek/minimax/glm/gpt/grok/gemini 等）需要本地/自建翻译代理转成 Anthropic Messages。
   - 免费模型（如 `big-pickle`）可能用你的提示词训练，评审私有代码前评估。
   - `ENABLE_TOOL_SEARCH` 先保持默认（第三方 base_url 默认关闭）；确认 Zen 转发 `tool_reference` 再开。
-- 粘贴块（Anthropic 协议模型）：
+- 粘贴块（可作为 `<配置目录>/providers/opencode.json` 文件内容）：
 
 ```json
-"opencode": {
+{
   "env": {
     "ANTHROPIC_BASE_URL": "https://opencode.ai/zen",
     "ANTHROPIC_AUTH_TOKEN": "sk-zen-...",

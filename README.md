@@ -131,6 +131,8 @@ assistant completion fish > ~/.config/fish/completions/assistant.fish
 
 **只作用于运行时会话**：provider 覆盖进评审/分诊/对话会话的临时 `--settings` 与 `--mcp-config`，绝不写入仓库 `.claude/settings.json`/`.mcp.json`——密钥不进 git，仓库保持供应商无关。`run --dry-run` 会打印每个目标生效的 provider 与覆盖项数（值不落日志）。
 
+供应商定义可以内联在 `providers`，也可以**一个 provider 一个文件**放在 `<配置目录>/providers/<名字>.json`（内容即 provider 对象；两处重名报错；文件供应商不会被写回 `config.json`）。少数供应商需要在会话启动时做动态调整（例如 opencode 网关要求的 `x-opencode-session` 会话请求头，经 `ANTHROPIC_CUSTOM_HEADERS` 注入）：这由代码级特化处理——`internal/provider/` 下一个供应商一个文件，实现 `Handler` 并在 `init` 注册，即可在会话启动前读写 `env`/`settings`/`mcp`；没有注册 handler 的 provider 原样通过。
+
 ### 平台管理：assistant login
 
 `login` 只负责平台条目与 OAuth 凭据，不做账号/仓库初始化（那是 `setup`）：
