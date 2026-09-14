@@ -51,6 +51,9 @@ type dispatchTarget struct {
 	// managed 表示 repoDir 是默认受管克隆：缺失时自动 clone，运行期间每轮强制
 	// 对齐 origin 基线（config.SyncMirror 对受管克隆恒为开）
 	managed bool
+	// skipReason 非空表示该目标未就绪（缺少 install 产物等），daemon 跳过它但
+	// 保持其余仓库与状态 API/对话可用
+	skipReason string
 }
 
 // targetToken 返回操作该仓库的令牌：评审者令牌优先，退回实例管理员令牌。
@@ -507,31 +510,63 @@ func previewManagedTargets(command *cobra.Command, targets []dispatchTarget) {
 	}
 }
 
-// ensureManagedTargets 确保受管克隆存在（缺失时按平台/仓库 clone），并检查
-// 仓库内已具备运行所需约定（assistant install 产物）；非受管检出（显式 dir）
-// 不做任何触碰。
-func ensureManagedTargets(command *cobra.Command, targets []dispatchTarget) error {
-	for _, target := range targets {
+// prepareManagedTargets 就地准备受管克隆（缺失时按平台/仓库 clone）并检查仓库内
+// 已具备运行所需约定（assistant install 产物）；非受管检出（显式 dir）不触碰。
+// 单个仓库未就绪只标记 skipReason 并记录，不拖垮整个 daemon——其余仓库、状态 API
+// 与对话能力保持可用。
+func prepareManagedTargets(command *cobra.Command, targets []dispatchTarget) []dispatchTarget {
+	for index := range targets {
+		target := &targets[index]
 		if !target.managed {
 			continue
 		}
 		cloned, err := dispatcher.EnsureRepo(
 			target.repoDir, target.instance.Host, target.repo.Name, targetToken(target.instance))
 		if err != nil {
-			return err
+			target.skipReason = err.Error()
+			fmt.Fprintf(command.ErrOrStderr(), "跳过 %s：%v\n", target.repo.Name, err)
+			continue
 		}
 		if cloned {
 			fmt.Fprintf(command.ErrOrStderr(), "已克隆 %s → %s\n", target.repo.Name, target.repoDir)
 		}
+		missing := ""
 		for _, relative := range []string{".mcp.json", filepath.Join(".claude", "settings.json")} {
 			if _, err := os.Stat(filepath.Join(target.repoDir, relative)); err != nil {
-				return fmt.Errorf(
-					"%s 缺少 %s：先在仓库检出运行 `assistant install` 并提交该文件",
-					target.repo.Name, relative)
+				missing = relative
+				break
 			}
 		}
+		if missing != "" {
+			target.skipReason = "缺少 " + missing
+			fmt.Fprintf(command.ErrOrStderr(),
+				"跳过 %s：缺少 %s：先在仓库检出运行 `assistant install` 并提交该文件（推送后重启生效）\n",
+				target.repo.Name, missing)
+		}
 	}
-	return nil
+	return targets
+}
+
+// readyTargets 过滤掉未就绪目标（prepareManagedTargets 的结果）。
+func readyTargets(targets []dispatchTarget) []dispatchTarget {
+	ready := make([]dispatchTarget, 0, len(targets))
+	for _, target := range targets {
+		if target.skipReason == "" {
+			ready = append(ready, target)
+		}
+	}
+	return ready
+}
+
+// skipSummary 汇总未就绪原因（日志/错误信息用）。
+func skipSummary(targets []dispatchTarget) string {
+	var parts []string
+	for _, target := range targets {
+		if target.skipReason != "" {
+			parts = append(parts, fmt.Sprintf("%s（%s）", target.repo.Name, target.skipReason))
+		}
+	}
+	return strings.Join(parts, "、")
 }
 
 func dispatchLogger(w io.Writer) func(string) {
@@ -623,15 +658,19 @@ func runDispatchLoop(command *cobra.Command, repoFlag, configPath string, option
 	// dry-run 零副作用：受管克隆只提示将发生的动作，不 clone/不 fetch
 	if options.DryRun {
 		previewManagedTargets(command, targets)
-	} else if err := ensureManagedTargets(command, targets); err != nil {
-		return err
+	} else {
+		targets = prepareManagedTargets(command, targets)
 	}
 	log := dispatchLogger(command.OutOrStdout())
-	if err := checkTargetsHealth(command.Context(), targets, log); err != nil {
-		return err
+	ready := readyTargets(targets)
+	if !options.DryRun {
+		if err := checkTargetsHealth(command.Context(), ready, log); err != nil {
+			return err
+		}
 	}
 
-	// daemon 运行态：调度循环写入，状态 API 与对话会话的 MCP 读取
+	// daemon 运行态：调度循环写入，状态 API 与对话会话的 MCP 读取；未就绪仓库也
+	// 登记（带原因），对话/状态查询能解释「为什么这个仓库没在跑」
 	store := daemon.NewStore(version)
 	for _, target := range targets {
 		store.AddTarget(daemon.Target{
@@ -640,6 +679,8 @@ func runDispatchLoop(command *cobra.Command, repoFlag, configPath string, option
 			Dir:        target.repoDir,
 			BaseBranch: target.config.BaseBranch,
 			Managed:    target.managed,
+			Ready:      target.skipReason == "",
+			SkipReason: target.skipReason,
 		})
 	}
 	if !options.DryRun {
@@ -648,8 +689,8 @@ func runDispatchLoop(command *cobra.Command, repoFlag, configPath string, option
 		}
 	}
 
-	depsList := make([]dispatcher.Deps, 0, len(targets))
-	for _, target := range targets {
+	depsList := make([]dispatcher.Deps, 0, len(ready))
+	for _, target := range ready {
 		depsList = append(depsList, newDispatchDeps(target, command.OutOrStdout(), store))
 	}
 	if options.DryRun {
@@ -658,6 +699,13 @@ func runDispatchLoop(command *cobra.Command, repoFlag, configPath string, option
 				return err
 			}
 		}
+		return nil
+	}
+	if len(depsList) == 0 {
+		// 全部仓库未就绪：保持 daemon 常驻（状态 API/对话可用，日志给出修复指引），
+		// 而不是崩溃重启
+		log(fmt.Sprintf("没有可运行的仓库：%s；状态 API 与对话保持可用，修复后重启", skipSummary(targets)))
+		<-command.Context().Done()
 		return nil
 	}
 	return dispatcher.RunAll(command.Context(), depsList)
@@ -708,8 +756,12 @@ func runDispatchOneShot(
 		return fmt.Errorf("匹配到 %d 个仓库，请用 --repo owner/name 指定要处理的仓库", len(targets))
 	}
 	target := targets[0]
-	if err := ensureManagedTargets(command, targets); err != nil {
-		return err
+	if target.managed {
+		targets = prepareManagedTargets(command, targets)
+		target = targets[0]
+		if target.skipReason != "" {
+			return fmt.Errorf("仓库 %s 未就绪：%s", target.repo.Name, target.skipReason)
+		}
 	}
 	config := target.config
 	log := dispatchLogger(command.OutOrStdout())

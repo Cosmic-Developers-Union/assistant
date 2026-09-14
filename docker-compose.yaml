@@ -25,7 +25,9 @@ services:
   assistant:
     build:
       context: .
-      dockerfile: images/daemon/Dockerfile
+      # 与评审镜像同源（多 target 共用 review-env 层），不依赖 registry 拉取
+      dockerfile: images/review/Dockerfile
+      target: daemon
       args:
         VERSION: ${ASSISTANT_VERSION:-dev}
     image: ${DAEMON_IMAGE:-ghcr.io/cosmic-developers-union/assistant-daemon:latest}

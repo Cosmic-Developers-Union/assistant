@@ -23,6 +23,10 @@ type Target struct {
 	Dir        string `json:"dir"`
 	BaseBranch string `json:"base_branch"`
 	Managed    bool   `json:"managed"`
+	// Ready 为 false 表示本仓库被跳过（缺少 install 产物/克隆失败等），
+	// SkipReason 说明原因；daemon 不会为它开会话
+	Ready      bool   `json:"ready"`
+	SkipReason string `json:"skip_reason,omitempty"`
 }
 
 // Item 是一个待办。

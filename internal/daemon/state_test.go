@@ -14,14 +14,18 @@ import (
 func TestStoreLifecycle(t *testing.T) {
 	store := NewStore("v-test")
 	host, repository := "https://gitea.example.com", "acme/repo"
-	store.AddTarget(Target{Host: host, Repository: repository, Dir: "/srv/repo"})
+	store.AddTarget(Target{Host: host, Repository: repository, Dir: "/srv/repo", Ready: true})
+	store.AddTarget(Target{Host: host, Repository: "acme/broken", Ready: false, SkipReason: "缺少 .mcp.json"})
 	started := time.Now().Add(-time.Minute)
 	store.SetQueue(host, repository, time.Now(), []Item{{Kind: "pull", Number: 7, Title: "fix"}})
 	store.Start(host, repository, Item{Kind: "pull", Number: 7, Title: "fix"}, started)
 
 	status := store.Snapshot()
-	if len(status.Targets) != 1 || len(status.Queue) != 1 || len(status.Sessions) != 1 {
+	if len(status.Targets) != 2 || len(status.Queue) != 1 || len(status.Sessions) != 1 {
 		t.Fatalf("status = %+v", status)
+	}
+	if !status.Targets[0].Ready || status.Targets[1].Ready || status.Targets[1].SkipReason == "" {
+		t.Errorf("targets = %+v", status.Targets)
 	}
 	if status.Queue[0].Items[0].Number != 7 || status.Sessions[0].StartedAt.IsZero() {
 		t.Errorf("queue/session = %+v %+v", status.Queue[0], status.Sessions[0])

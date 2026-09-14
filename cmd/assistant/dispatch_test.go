@@ -139,3 +139,59 @@ func TestRepoDirOverride(t *testing.T) {
 		t.Fatalf("err = %v, want 提示用 --repo 限定", err)
 	}
 }
+
+// 受管仓库未就绪（缺 install 产物）只跳过该仓库：其余照跑，daemon 不退出。
+func TestPrepareManagedTargetsSkipsUnprovisioned(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	command := &cobra.Command{}
+	command.SetOut(&bytes.Buffer{})
+	stderr := &bytes.Buffer{}
+	command.SetErr(stderr)
+
+	targetFor := func(name string) dispatchTarget {
+		instance := instances.Instance{
+			Host:     "https://gitea.example.com",
+			Reviewer: instances.Account{Name: "ai", Token: "reviewer-token"},
+			Merger:   instances.Account{Name: "merge"},
+		}
+		target, err := resolveInstanceTarget(command, instance, instances.Repo{Name: name}, &dispatcherOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return target
+	}
+
+	ready := targetFor("acme/ready")
+	if err := os.MkdirAll(filepath.Join(ready.repoDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(ready.repoDir, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, relative := range []string{".mcp.json", ".claude/settings.json"} {
+		if err := os.WriteFile(filepath.Join(ready.repoDir, relative), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	missing := targetFor("acme/missing")
+	if err := os.MkdirAll(filepath.Join(missing.repoDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	targets := prepareManagedTargets(command, []dispatchTarget{ready, missing})
+	if targets[0].skipReason != "" {
+		t.Errorf("已就绪仓库不应跳过：%s", targets[0].skipReason)
+	}
+	if targets[1].skipReason == "" || !strings.Contains(targets[1].skipReason, ".mcp.json") {
+		t.Errorf("缺产物仓库应跳过：%q", targets[1].skipReason)
+	}
+	if !strings.Contains(stderr.String(), "跳过 acme/missing") || !strings.Contains(stderr.String(), "assistant install") {
+		t.Errorf("日志缺少跳过指引：%s", stderr.String())
+	}
+	if readyList := readyTargets(targets); len(readyList) != 1 || readyList[0].repo.Name != "acme/ready" {
+		t.Errorf("readyTargets = %+v", readyList)
+	}
+	if summary := skipSummary(targets); !strings.Contains(summary, "acme/missing") {
+		t.Errorf("skipSummary = %q", summary)
+	}
+}

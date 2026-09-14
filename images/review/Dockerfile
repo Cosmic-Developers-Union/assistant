@@ -1,10 +1,15 @@
 # syntax=docker/dockerfile:1
-# 评审会话镜像：dispatcher 以
-#   docker run <image> claude ...
-# 在其中跑 headless 评审（见 `assistant run --docker-image`）。容器内外路径一致
-# （worktree 与 .mcp.json 按相同绝对路径挂载），因此不需要 ENTRYPOINT。
+# 评审/daemon 共用镜像定义（多 target）：
+#   --target review   评审会话镜像：dispatcher 以 `docker run <image> claude ...`
+#                     在其中跑 headless 评审（见 `assistant run --docker-image`）。
+#                     容器内外路径一致（worktree 与 .mcp.json 按相同绝对路径挂载），
+#                     因此不需要 ENTRYPOINT。
+#   --target daemon   daemon 镜像：评审环境 + assistant 自身二进制，供
+#                     docker-compose.yaml 常驻 `assistant run`（调度/状态 API/微信桥）。
+# 两个 target 共享同一 review-env 层，避免环境定义分叉。
 ARG BASE_IMAGE=docker.gitea.com/runner-images:ubuntu-24.04
-FROM ${BASE_IMAGE}
+
+FROM ${BASE_IMAGE} AS review-env
 LABEL authors="ge"
 
 USER root
@@ -26,12 +31,16 @@ RUN set -eu; \
     curl --fail --show-error --location --retry 5 https://bun.sh/install | bash; \
     /root/.bun/bin/bun --version
 
-# Claude Code CLI：npm 优先，失败回退官方脚本（低带宽场景带重试）
+# Claude Code CLI：npm 优先，失败回退官方脚本（低带宽场景带重试）；安装脚本
+# 可能落在 /root/.local/bin（非 root 运行 daemon 时不可达），统一补到 /usr/local/bin
 RUN set -eu; \
     npm install -g @anthropic-ai/claude-code --registry=https://registry.npmjs.org/ \
       || npm install -g @anthropic-ai/claude-code --registry=https://registry.npmjs.org/; \
     if ! command -v claude &> /dev/null; then \
       curl -fsSL https://claude.ai/cli/install.sh | sh || true; \
+    fi; \
+    if [ ! -x /usr/local/bin/claude ] && [ -x /root/.local/bin/claude ]; then \
+      install -m 0755 /root/.local/bin/claude /usr/local/bin/claude; \
     fi; \
     command -v claude &> /dev/null && claude --version || echo "Claude Code installation pending"
 
@@ -58,3 +67,22 @@ RUN mkdir -p /root/go/bin /root/go/pkg/mod /root/.cache/go-build /root/.cache/bu
     /root/.cache/npm /root/.cache/pip /root/.cache/uv
 
 CMD ["bash"]
+
+# 评审会话镜像（会话容器形态）
+FROM review-env AS review
+
+# daemon 镜像：先构建 assistant 二进制，再叠加到评审环境
+FROM golang:1.27 AS assistant-build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
+    -o /assistant ./cmd/assistant
+
+FROM review-env AS daemon
+COPY --from=assistant-build /assistant /usr/local/bin/assistant
+# 配置/克隆/日志都在挂载的用户目录下；worktree 在 /tmp（compose 用 tmpfs 提供）
+ENTRYPOINT ["/usr/local/bin/assistant"]
+CMD ["run"]

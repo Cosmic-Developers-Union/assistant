@@ -302,7 +302,7 @@ status/triage     Issue ───────▶  triage issue #N               
 
 - **会话工作区与当前目录解耦**：PR 评审在 `refs/pull/<N>/head` 的独立 worktree 里进行；Issue 分诊同样在基线 head 的 detach worktree 里跑。worktree 默认在 `<系统临时目录>/agent-dispatcher/<host>-<owner>-<repo>/worktrees/{pr,issue}-<N>`（`--worktree-root` 可改），会话结束立即移除——宿主检出只被 fetch/worktree 命令触碰，所有实验都在临时目录。
 - **评审标准锚定基线，PR 不可自改**：worktree 建成后立即以宿主检出的 `.claude/` 整体覆盖（skills、settings）——worktree 按 PR head 检出，随带的 `.claude` 是 PR 自己的版本，照单全收等于允许 PR 改弱自己被审的规则。宿主检出缺 `.claude/` 时拒绝起会话（fail-closed）。
-- **受管克隆（config.json 模式）**：`instances[].repos` 未配置 `dir` 的仓库用受管克隆——落点 `<数据目录>/Cosmic-Developers-Union/assistant/repos/<host>/<owner>/<name>`（`XDG_DATA_HOME`，缺省 `~/.local/share`）。`run` 启动时缺失自动 `git clone`（用 reviewer/admin 令牌认证，origin 保持无凭据 URL），之后每轮检测前强制对齐 `origin/<基线分支>`（`--base-branch` / `DISPATCH_BASE_BRANCH`，缺省 `main`）——`git fetch --prune origin` → `git checkout -f -B <基线> origin/<基线>` → `git clean -fd`，任何本地分叉一律丢弃。日志与单飞锁在检出外的状态目录 `<数据目录>/.../state/<host>/<owner>/<name>/`，不会被 clean 波及。受管克隆要求仓库已提交 `assistant install` 产物（`.mcp.json`、`.claude/settings.json`），缺失时启动报错并提示先 install。
+- **受管克隆（config.json 模式）**：`instances[].repos` 未配置 `dir` 的仓库用受管克隆——落点 `<数据目录>/Cosmic-Developers-Union/assistant/repos/<host>/<owner>/<name>`（`XDG_DATA_HOME`，缺省 `~/.local/share`）。`run` 启动时缺失自动 `git clone`（用 reviewer/admin 令牌认证，origin 保持无凭据 URL），之后每轮检测前强制对齐 `origin/<基线分支>`（`--base-branch` / `DISPATCH_BASE_BRANCH`，缺省 `main`）——`git fetch --prune origin` → `git checkout -f -B <基线> origin/<基线>` → `git clean -fd`，任何本地分叉一律丢弃。日志与单飞锁在检出外的状态目录 `<数据目录>/.../state/<host>/<owner>/<name>/`，不会被 clean 波及。受管克隆要求仓库已提交 `assistant install` 产物（`.mcp.json`、`.claude/settings.json`）：缺失的仓库会被**跳过并记录原因**（daemon 保持常驻，状态 API 里该仓库 `ready=false` + `skip_reason`，对话里可直接问「为什么没在跑」），补齐并推送后重启即可；所有仓库都未就绪时 daemon 也不会退出，只提示修复方向。
 - **镜像同步（显式 `dir` 的共享检出）**：`--sync-mirror` / `DISPATCH_SYNC_MIRROR=1` 开启后同样每轮强制对齐基线；受管克隆恒为开。共享开发检出勿开启。
 - **会话驱动**：`claude -p` 子进程，命令面与手工运维一致（`--permission-mode auto`、`--autocompact auto`、stream-json 输出）。无人值守必需项：`--strict-mcp-config --mcp-config` 从宿主仓库 `.mcp.json` 显式注入 gitea MCP，外加 `--max-turns` / abort 超时兜底 runaway 会话。
 - **独立会话配置**：每次会话在临时目录生成 `--settings`（同一份 env/权限放行，见上文 install 的托管键），并加 `--setting-sources project`（只加载项目级设置）、`--no-session-persistence`（不落会话历史）；**不读取也不写入任何用户级配置**（`~/.claude`）。需要 Claude Code 2.1+（`claude --help` 能看到这些参数；评审镜像安装的是 latest）。
@@ -397,14 +397,15 @@ export DISPATCH_SYNC_MIRROR=1     # 每轮把宿主检出强制对齐 origin/mai
 daemon 整体跑在容器里：宿主机**用户目录原样挂载**（claude 登录态、config.json、受管克隆都在里面，容器内外路径一致），`/tmp` 用 **tmpfs**（评审 worktree 全在 `/tmp`，落内存、退出即清），状态 API 只发布到宿主 `127.0.0.1:8770`：
 
 ```bash
-make daemon-image       # 评审镜像 + assistant 二进制（REVIEW_IMAGE 可换基座）
-docker compose up -d
+make compose-up         # 预建挂载点并启动（等价：docker compose up -d，首次会构建镜像）
 docker compose logs -f
 docker compose exec assistant assistant weixin login   # 首次扫码（终端直接渲染二维码）
 ```
 
+`docker compose up` 会从 `images/review/Dockerfile` 的 `daemon` target 构建镜像（与评审镜像共用 `review-env` 层，无需从 registry 拉取预构建镜像）；`make daemon-image` 可单独构建。
+
 - 挂载是**细粒度**的（不用整目录 `$HOME`）：`~/.claude`（登录态）、`~/.config/Cosmic-Developers-Union/assistant`（config.json / daemon.json / chat 会话）、`~/.local/share/Cosmic-Developers-Union/assistant`（受管克隆与状态）读写，`~/.config/tea`（凭据）只读；git 身份与 `docker.sock` 按需（compose 内已注释示例）。
-- 挂载点需先在宿主存在（docker 对不存在的路径会建 root 属主目录）：`mkdir -p ~/.claude ~/.config/Cosmic-Developers-Union/assistant ~/.local/share/Cosmic-Developers-Union/assistant`（跑过一次 `assistant login`/`setup` 也会生成）。
+- 挂载点需先在宿主存在（docker 对不存在的路径会建 root 属主目录）：用 `make compose-up` 会自动预建，或手动 `mkdir -p ~/.claude ~/.config/Cosmic-Developers-Union/assistant ~/.local/share/Cosmic-Developers-Union/assistant`（跑过一次 `assistant login`/`setup` 也会生成）。
 - UID/GID/HOME 由 compose 插值（缺省 `1000:1000` + 宿主 `$HOME`）；以宿主用户运行，写回挂载目录的文件属主不变。请在 `.env` 或环境里按需 `export ASSISTANT_UID=$(id -u) ASSISTANT_GID=$(id -g)`。
 - `/tmp` 为 `tmpfs`（`exec,mode=1777,size=16g`）：评审 worktree 全在内存盘、退出即清；16G 是上限，占用受宿主可用内存约束，可调。
 - 需要 `--docker-image` 把评审会话再放进容器时，打开 `docker.sock` 挂载（docker-out-of-docker）；宿主上的 Gitea 可通过 `extra_hosts: host.docker.internal:host-gateway` 访问（文件内已注释示例）。

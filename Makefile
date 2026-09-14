@@ -90,19 +90,26 @@ image: ## 构建容器镜像（仓库级 Actions 用；推送到 registry 由 CI
 	@echo "==> 构建完成: $(IMAGE)"
 
 .PHONY: review-image
-review-image: ## 构建评审会话镜像（Dockerfile 在 images/review/）
+review-image: ## 构建评审会话镜像（target review；Dockerfile 在 images/review/）
 	@echo "==> 构建评审会话镜像 $(REVIEW_IMAGE)..."
-	docker build -f images/review/Dockerfile -t $(REVIEW_IMAGE) .
+	docker build -f images/review/Dockerfile --target review -t $(REVIEW_IMAGE) .
 	@echo "==> 构建完成: $(REVIEW_IMAGE)"
 
 .PHONY: daemon-image
-daemon-image: ## 构建 daemon 镜像（评审镜像 + assistant 二进制；docker compose 使用）
+daemon-image: ## 构建 daemon 镜像（评审环境 + assistant 二进制；docker compose 使用）
 	@echo "==> 构建 daemon 镜像 $(DAEMON_IMAGE)..."
-	docker build -f images/daemon/Dockerfile \
-		--build-arg REVIEW_IMAGE=$(REVIEW_IMAGE) \
+	docker build -f images/review/Dockerfile --target daemon \
 		--build-arg VERSION="$$(git describe --tags --always 2>/dev/null || echo dev)" \
 		-t $(DAEMON_IMAGE) .
 	@echo "==> 构建完成: $(DAEMON_IMAGE)"
+
+.PHONY: compose-up
+compose-up: ## 预建挂载点并启动 docker compose 部署（daemon；等价 compose up -d）
+	@echo "==> 预建挂载点..."
+	@mkdir -p "$(HOME)/.claude" "$(HOME)/.config/Cosmic-Developers-Union/assistant" \
+		"$(HOME)/.local/share/Cosmic-Developers-Union/assistant"
+	@echo "==> 启动 docker compose..."
+	docker compose up -d
 
 .PHONY: test-e2e
 test-e2e: ## 起临时 Gitea（docker compose）并运行端到端测试
