@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"assistant/internal/claudecfg"
@@ -47,6 +48,113 @@ type aliasHandler interface {
 }
 
 var registry = map[string]Handler{}
+
+// Preset 是供应商的开箱即用内置配置：选到该 provider 时自动打底（端点、模型
+// 映射、超时、窗口等），用户配置覆盖其上。多数供应商只需用户补一个
+// api_key/auth_token（简写映射到 TokenEnv），无需了解任何变量名。
+type Preset struct {
+	// Name 是主名字；Aliases 是等价别名（都不区分大小写）
+	Name    string
+	Aliases []string
+	// TokenEnv 是 api_key/auth_token 简写映射到的环境变量名；空则
+	// ANTHROPIC_AUTH_TOKEN
+	TokenEnv string
+	// RequiresBaseURL 为真时必须由用户（或预设）给出 ANTHROPIC_BASE_URL，
+	// 否则在配置校验期报错（如 openai 必须指向翻译代理）
+	RequiresBaseURL bool
+	// Env / Settings / MCP 是预设默认覆盖
+	Env      map[string]string
+	Settings map[string]any
+	MCP      map[string]any
+}
+
+// Overrides 返回预设的覆盖视图。
+func (p Preset) Overrides() claudecfg.Overrides {
+	return claudecfg.Overrides{Env: p.Env, Settings: p.Settings, MCP: p.MCP}
+}
+
+var presets = map[string]Preset{}
+
+// RegisterPreset 注册内置预设（主名与别名索引）；重名直接 panic。
+func RegisterPreset(preset Preset) {
+	if strings.TrimSpace(preset.Name) == "" {
+		panic("provider: RegisterPreset 需要非空名字")
+	}
+	for _, name := range append([]string{preset.Name}, preset.Aliases...) {
+		key := normalizeName(name)
+		if key == "" {
+			panic("provider: preset 名字不能为空")
+		}
+		if _, exists := presets[key]; exists {
+			panic("provider: preset 名字重复：" + name)
+		}
+		presets[key] = preset
+	}
+}
+
+// LookupPreset 按 provider 名查找内置预设。
+func LookupPreset(name string) (Preset, bool) {
+	preset, ok := presets[normalizeName(name)]
+	return preset, ok
+}
+
+// HasPreset 报告该 provider 名是否有内置预设（日志/诊断用）。
+func HasPreset(name string) bool {
+	_, ok := LookupPreset(name)
+	return ok
+}
+
+// PresetNames 返回所有预设主名（排序，诊断用）。
+func PresetNames() []string {
+	seen := map[string]bool{}
+	names := []string{}
+	for _, preset := range presets {
+		if seen[preset.Name] {
+			continue
+		}
+		seen[preset.Name] = true
+		names = append(names, preset.Name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// Resolve 组装某 provider 的最终配置层覆盖（未含代码级 handler 的会话调整，
+// 那是 Apply 的职责）：
+//
+//	托管默认 < 内置预设 < 全局优化点 < 用户 provider 覆盖 < api_key/auth_token
+//
+// 令牌简写按预设的 TokenEnv 落地（无预设时 ANTHROPIC_AUTH_TOKEN）；用户 env
+// 里取值为空的键表示移除低层默认（例如不想要预设的模型映射）。
+func Resolve(name string, global claudecfg.Overrides, user claudecfg.Overrides, token string) (claudecfg.Overrides, error) {
+	preset, hasPreset := LookupPreset(name)
+	merged := claudecfg.Overrides{}
+	if hasPreset {
+		merged = preset.Overrides()
+	}
+	merged = claudecfg.ComposeOverrides(merged, global)
+	merged = claudecfg.ComposeOverrides(merged, user)
+	// 用户空值 = 移除该键（预设默认可被显式关闭）
+	for key, value := range user.Env {
+		if strings.TrimSpace(value) == "" {
+			delete(merged.Env, key)
+		}
+	}
+	if strings.TrimSpace(token) != "" {
+		tokenEnv := "ANTHROPIC_AUTH_TOKEN"
+		if hasPreset && strings.TrimSpace(preset.TokenEnv) != "" {
+			tokenEnv = preset.TokenEnv
+		}
+		merged = claudecfg.ComposeOverrides(merged, claudecfg.Overrides{
+			Env: map[string]string{tokenEnv: token},
+		})
+	}
+	if hasPreset && preset.RequiresBaseURL && strings.TrimSpace(merged.Env["ANTHROPIC_BASE_URL"]) == "" {
+		return claudecfg.Overrides{}, fmt.Errorf(
+			"provider %s 需要 ANTHROPIC_BASE_URL：该类供应商没有 Anthropic 兼容端点，请在 provider.env 指向翻译代理", preset.Name)
+	}
+	return merged, nil
+}
 
 // Register 注册 handler（按主名字与小写别名索引）；重名直接 panic——
 // 这是装配期错误，应在程序启动前暴露。

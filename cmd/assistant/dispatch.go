@@ -15,6 +15,7 @@ import (
 	"assistant/internal/daemon"
 	"assistant/internal/dispatcher"
 	"assistant/internal/instances"
+	"assistant/internal/provider"
 	"assistant/internal/status"
 
 	"github.com/spf13/cobra"
@@ -424,7 +425,11 @@ func resolveInstanceTarget(
 		return dispatchTarget{}, err
 	}
 	providerName := file.ProviderName(&instance, &repo)
-	config.Provider = file.EffectiveOverrides(providerName)
+	effective, err := file.EffectiveOverrides(providerName)
+	if err != nil {
+		return dispatchTarget{}, fmt.Errorf("%s（provider %s）: %w", repo.Name, providerName, err)
+	}
+	config.Provider = effective
 	config.ProviderName = providerName
 	config.Optimizations = file.Optimizations.Overrides()
 	client, err := newDispatchClient(config)
@@ -515,13 +520,16 @@ func previewProviders(command *cobra.Command, targets []dispatchTarget) {
 			continue
 		}
 		name := target.config.ProviderName
+		preset := ""
 		if name == "" {
 			name = "内置缺省"
+		} else if provider.HasPreset(name) {
+			preset = " 内置预设"
 		}
 		env, settings, mcp := target.config.Provider.Counts()
 		fmt.Fprintf(command.ErrOrStderr(),
-			"dry-run：%s 使用 provider %s（env %d 项：%s；settings %d 项；mcp %d 个）%s——注入会话 --settings/--mcp-config，不写仓库文件\n",
-			target.repo.Name, name, env, strings.Join(maskedEnvKeys(target.config.Provider.Env), "、"), settings, mcp, global)
+			"dry-run：%s 使用 provider %s%s（env %d 项：%s；settings %d 项；mcp %d 个）%s——注入会话 --settings/--mcp-config，不写仓库文件\n",
+			target.repo.Name, name, preset, env, strings.Join(maskedEnvKeys(target.config.Provider.Env), "、"), settings, mcp, global)
 	}
 }
 
@@ -725,6 +733,8 @@ func runDispatchLoop(command *cobra.Command, repoFlag, configPath string, option
 			name := target.config.ProviderName
 			if name == "" {
 				name = "内置缺省"
+			} else if provider.HasPreset(name) {
+				name += " 内置预设"
 			}
 			global := ""
 			if globalEnv+globalSettings+globalMCP > 0 {

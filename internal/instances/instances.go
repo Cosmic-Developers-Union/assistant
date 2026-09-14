@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"assistant/internal/claudecfg"
+	"assistant/internal/provider"
 )
 
 // 默认机器人账号名：reviewer 是内容评审者，merger 是状态评审者（会签/合并）。
@@ -153,6 +154,7 @@ func (r Repo) MarshalJSON() ([]byte, error) {
 type Provider struct {
 	// Env 是注入会话的环境变量（可含密钥）：只进运行时 --settings，不写入
 	// 仓库文件；provider 自定义的 MCP server 亦缺省继承它（server 自身优先）。
+	// 取值为空的键表示移除内置预设的同名默认。
 	Env map[string]string `json:"env,omitempty"`
 	// Settings 是 Claude Code 原生 settings 片段（如 model、apiKeyHelper、
 	// awsAuthRefresh）：合并进运行时会话 settings，provider 取值优先。
@@ -160,8 +162,21 @@ type Provider struct {
 	// MCP 是原生 MCP server 定义（.mcp.json 形态）：合并进会话 --mcp-config，
 	// 同名 server 由 provider 覆盖（仓库既有的 gitea 等不受影响）。
 	MCP map[string]any `json:"mcp,omitempty"`
+	// APIKey / AuthToken 是开箱即用的令牌简写（写哪个都行，api_key 优先）：
+	// 由内置预设决定落到哪个环境变量（Anthropic 官方 ANTHROPIC_API_KEY，
+	// 第三方多为 ANTHROPIC_AUTH_TOKEN），多数供应商只写这一个字段即可。
+	APIKey    string `json:"api_key,omitempty"`
+	AuthToken string `json:"auth_token,omitempty"`
 	// extra 保存未识别键，原样保留（校验与写回不丢）。
 	extra map[string]json.RawMessage
+}
+
+// Token 返回令牌简写（api_key 优先）。
+func (p Provider) Token() string {
+	if strings.TrimSpace(p.APIKey) != "" {
+		return strings.TrimSpace(p.APIKey)
+	}
+	return strings.TrimSpace(p.AuthToken)
 }
 
 // UnmarshalJSON 松弛解析 provider 定义：只识别 env/settings/mcp，其余键原样
@@ -172,6 +187,7 @@ func (p *Provider) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("provider 定义必须是 JSON 对象: %w", err)
 	}
 	p.Env, p.Settings, p.MCP, p.extra = nil, nil, nil, nil
+	p.APIKey, p.AuthToken = "", ""
 	for key, value := range fields {
 		switch key {
 		case "env":
@@ -191,6 +207,14 @@ func (p *Provider) UnmarshalJSON(data []byte) error {
 		case "mcp":
 			if err := json.Unmarshal(value, &p.MCP); err != nil {
 				return fmt.Errorf("provider.mcp 必须是对象: %w", err)
+			}
+		case "api_key":
+			if err := json.Unmarshal(value, &p.APIKey); err != nil {
+				return fmt.Errorf("provider.api_key 必须是字符串: %w", err)
+			}
+		case "auth_token":
+			if err := json.Unmarshal(value, &p.AuthToken); err != nil {
+				return fmt.Errorf("provider.auth_token 必须是字符串: %w", err)
 			}
 		default:
 			if p.extra == nil {
@@ -228,6 +252,16 @@ func (p Provider) MarshalJSON() ([]byte, error) {
 	}
 	if len(p.MCP) > 0 {
 		if err := encode("mcp", p.MCP); err != nil {
+			return nil, err
+		}
+	}
+	if strings.TrimSpace(p.APIKey) != "" {
+		if err := encode("api_key", p.APIKey); err != nil {
+			return nil, err
+		}
+	}
+	if strings.TrimSpace(p.AuthToken) != "" {
+		if err := encode("auth_token", p.AuthToken); err != nil {
 			return nil, err
 		}
 	}
@@ -517,9 +551,15 @@ func (f *File) validateProviders() error {
 		if name == "" {
 			return nil
 		}
-		if _, ok := f.LookupProvider(name); !ok {
+		user, ok := f.LookupProvider(name)
+		if !ok {
 			return fmt.Errorf("%s 引用的 provider %q 未在 providers 中定义（可用：%s）",
 				label, name, strings.Join(f.providerNames(), "、"))
+		}
+		// 预设展开（令牌简写、必须的 base_url 等）在配置校验期就报错，
+		// 而不是等会话启动
+		if _, err := provider.Resolve(name, f.Optimizations.Overrides(), user.Overrides(), user.Token()); err != nil {
+			return fmt.Errorf("%s: %w", label, err)
 		}
 		return nil
 	}
@@ -599,10 +639,15 @@ func (f *File) ProviderNameOf(name string) Provider {
 	return provider
 }
 
-// EffectiveOverrides 返回实体生效的运行时覆盖：全局 optimizations 打底，选中
-// provider（repo > instance > 全局默认）覆盖其上。
-func (f *File) EffectiveOverrides(providerName string) claudecfg.Overrides {
-	return claudecfg.ComposeOverrides(f.Optimizations.Overrides(), f.ProviderNameOf(providerName).Overrides())
+// EffectiveOverrides 返回实体生效的运行时覆盖：
+//
+//	托管默认 < 内置预设（provider 包，开箱即用） < 全局 optimizations <
+//	用户 provider 覆盖 < api_key/auth_token 简写
+//
+// 未识别的 provider 名没有预设，行为与纯手写配置一致。
+func (f *File) EffectiveOverrides(providerName string) (claudecfg.Overrides, error) {
+	user := f.ProviderNameOf(providerName)
+	return provider.Resolve(providerName, f.Optimizations.Overrides(), user.Overrides(), user.Token())
 }
 
 // ProviderFileNames 返回文件供应商的名字（测试/诊断用）。

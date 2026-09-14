@@ -9,6 +9,7 @@ import (
 
 	"assistant/internal/daemon"
 	"assistant/internal/instances"
+	"assistant/internal/provider"
 	"assistant/internal/weixin"
 
 	"github.com/spf13/cobra"
@@ -208,11 +209,16 @@ func startDaemonServices(
 	// 对话会话与评审会话共用同一 provider 体系：weixin.provider > 全局默认；
 	// 全局 optimizations 打底，provider 覆盖其上
 	providerName := file.WeixinProviderName()
-	provider := file.EffectiveOverrides(providerName)
-	if env, settings, mcp := provider.Counts(); env+settings+mcp > 0 {
+	providerOverrides, err := file.EffectiveOverrides(providerName)
+	if err != nil {
+		return fmt.Errorf("微信桥 provider %s: %w", providerName, err)
+	}
+	if env, settings, mcp := providerOverrides.Counts(); env+settings+mcp > 0 {
 		name := providerName
 		if name == "" {
 			name = "内置缺省"
+		} else if provider.HasPreset(name) {
+			name += " 内置预设"
 		}
 		globalEnv, globalSettings, globalMCP := file.Optimizations.Overrides().Counts()
 		global := ""
@@ -226,7 +232,7 @@ func startDaemonServices(
 	chat, err := daemon.NewChat(daemon.ChatConfig{
 		ClaudeBin:    firstNonEmpty(weixinConfig.ClaudeBin, options.ClaudeBin),
 		Model:        firstNonEmpty(weixinConfig.Model, options.Model),
-		Provider:     provider,
+		Provider:     providerOverrides,
 		ProviderName: providerName,
 		Timeout:      timeout,
 		Log:          logf,

@@ -17,7 +17,19 @@ const (
 // opencode-go）的 provider。
 type opencodeHandler struct{}
 
-func init() { Register(opencodeHandler{}) }
+func init() {
+	// 开箱即用预设：Zen 网关原生提供 Claude 模型（模型档位无需映射），
+	// 用户只需补令牌。
+	RegisterPreset(Preset{
+		Name:     "opencode",
+		Aliases:  []string{"zen", "opencode-zen", "opencode-go"},
+		TokenEnv: "ANTHROPIC_AUTH_TOKEN",
+		Env: map[string]string{
+			"ANTHROPIC_BASE_URL": "https://opencode.ai/zen",
+		},
+	})
+	Register(opencodeHandler{})
+}
 
 func (opencodeHandler) Name() string { return "opencode" }
 

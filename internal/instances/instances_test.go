@@ -311,7 +311,10 @@ func TestEffectiveOverridesComposition(t *testing.T) {
 	if err := file.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
-	overrides := file.EffectiveOverrides("gateway")
+	overrides, err := file.EffectiveOverrides("gateway")
+	if err != nil {
+		t.Fatalf("EffectiveOverrides: %v", err)
+	}
 	if overrides.Env["DISABLE_TELEMETRY"] != "1" || overrides.Env["ANTHROPIC_AUTH_TOKEN"] != "token" {
 		t.Errorf("Env = %+v", overrides.Env)
 	}
@@ -324,7 +327,11 @@ func TestEffectiveOverridesComposition(t *testing.T) {
 	if _, ok := overrides.MCP["search"]; !ok {
 		t.Errorf("全局 mcp server 应保留：%+v", overrides.MCP)
 	}
-	if empty := (&File{}).EffectiveOverrides(""); !empty.Empty() {
+	empty, err := (&File{}).EffectiveOverrides("")
+	if err != nil {
+		t.Fatalf("EffectiveOverrides: %v", err)
+	}
+	if !empty.Empty() {
 		t.Errorf("空配置应为空覆盖：%+v", empty)
 	}
 	// 全局优化点非法 env 值同样在校验期报错
@@ -372,7 +379,11 @@ func TestProviderFiles(t *testing.T) {
 	if !ok || provider.Env["ANTHROPIC_BASE_URL"] != "https://opencode.ai/zen" {
 		t.Fatalf("文件 provider 未生效：%+v ok=%v", provider.Env, ok)
 	}
-	if overrides := file.EffectiveOverrides("opencode"); overrides.Env["ANTHROPIC_AUTH_TOKEN"] != "sk-zen" {
+	overrides, err := file.EffectiveOverrides("opencode")
+	if err != nil {
+		t.Fatalf("EffectiveOverrides: %v", err)
+	}
+	if overrides.Env["ANTHROPIC_AUTH_TOKEN"] != "sk-zen" || overrides.Env["ANTHROPIC_BASE_URL"] != "https://opencode.ai/zen" {
 		t.Errorf("EffectiveOverrides = %+v", overrides.Env)
 	}
 	// 保存后不把文件供应商内联，重新加载仍然工作（不会重名冲突）
@@ -416,5 +427,38 @@ func TestProviderFiles(t *testing.T) {
 	}
 	if _, err := Load(configPath); err == nil || !strings.Contains(err.Error(), "opencode.json") {
 		t.Fatalf("坏 JSON 应报错并含路径，got %v", err)
+	}
+}
+
+// 预设展开在配置校验期生效：openai 缺 base_url 即便只写 api_key 也会在 Load 报错。
+func TestProviderPresetValidation(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	content := `{"default_provider": "openai",
+		"providers": {"openai": {"api_key": "sk-x"}},
+		"instances": [{"host": "https://gitea.example.com", "repos": []}]}`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(configPath); err == nil || !strings.Contains(err.Error(), "ANTHROPIC_BASE_URL") {
+		t.Fatalf("openai 缺 base_url 应报错，got %v", err)
+	}
+	// 补上 base_url（翻译代理）后通过，且 api_key 简写按预设落地
+	content = `{"default_provider": "openai",
+		"providers": {"openai": {"api_key": "sk-x", "env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:4000"}}},
+		"instances": [{"host": "https://gitea.example.com", "repos": []}]}`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	file, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	overrides, err := file.EffectiveOverrides("openai")
+	if err != nil {
+		t.Fatalf("EffectiveOverrides: %v", err)
+	}
+	if overrides.Env["ANTHROPIC_AUTH_TOKEN"] != "sk-x" || overrides.Env["ANTHROPIC_BASE_URL"] != "http://127.0.0.1:4000" {
+		t.Errorf("预设+简写未生效：%+v", overrides.Env)
 	}
 }
