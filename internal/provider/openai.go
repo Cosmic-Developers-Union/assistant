@@ -9,7 +9,7 @@ func init() {
 	RegisterPreset(Preset{
 		Name:            "openai",
 		Aliases:         []string{"gpt"},
-		TokenEnv:        "ANTHROPIC_AUTH_TOKEN",
+		TokenEnvs:       []string{"ANTHROPIC_AUTH_TOKEN"},
 		RequiresBaseURL: true,
 	})
 }

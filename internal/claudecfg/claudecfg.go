@@ -164,6 +164,11 @@ func MergeMCPServers(document map[string]any, overrides Overrides) map[string]an
 		servers = map[string]any{}
 	}
 	for name, raw := range overrides.MCP {
+		if raw == nil {
+			// null 表示移除基线同名 server（可关闭预设自带的供应商 MCP）
+			delete(servers, name)
+			continue
+		}
 		server, ok := raw.(map[string]any)
 		if !ok {
 			servers[name] = raw

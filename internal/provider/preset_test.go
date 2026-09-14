@@ -10,16 +10,16 @@ import (
 // 令牌简写按预设落到正确的环境变量，预设默认（端点/超时/模型映射）自动打底。
 func TestResolvePresetAndTokenShorthand(t *testing.T) {
 	tests := []struct {
-		name     string
-		tokenEnv string
-		baseURL  string
+		name      string
+		tokenEnvs []string
+		baseURL   string
 	}{
-		{"zhipu", "ANTHROPIC_AUTH_TOKEN", "https://api.z.ai/api/anthropic"},
-		{"glm", "ANTHROPIC_AUTH_TOKEN", "https://api.z.ai/api/anthropic"},
-		{"kimi", "ANTHROPIC_API_KEY", "https://api.kimi.com/coding/"},
-		{"minimax", "ANTHROPIC_AUTH_TOKEN", "https://api.minimax.io/anthropic"},
-		{"opencode", "ANTHROPIC_AUTH_TOKEN", "https://opencode.ai/zen"},
-		{"zen", "ANTHROPIC_AUTH_TOKEN", "https://opencode.ai/zen"},
+		{"zhipu", []string{"ANTHROPIC_AUTH_TOKEN", "Z_AI_API_KEY"}, "https://api.z.ai/api/anthropic"},
+		{"glm", []string{"ANTHROPIC_AUTH_TOKEN", "Z_AI_API_KEY"}, "https://api.z.ai/api/anthropic"},
+		{"kimi", []string{"ANTHROPIC_API_KEY"}, "https://api.kimi.com/coding/"},
+		{"minimax", []string{"ANTHROPIC_AUTH_TOKEN", "MINIMAX_API_KEY"}, "https://api.minimax.io/anthropic"},
+		{"opencode", []string{"ANTHROPIC_AUTH_TOKEN"}, "https://opencode.ai/zen"},
+		{"zen", []string{"ANTHROPIC_AUTH_TOKEN"}, "https://opencode.ai/zen"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -27,8 +27,10 @@ func TestResolvePresetAndTokenShorthand(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Resolve: %v", err)
 			}
-			if overrides.Env[test.tokenEnv] != "secret-token" {
-				t.Errorf("%s = %q, want token", test.tokenEnv, overrides.Env[test.tokenEnv])
+			for _, tokenEnv := range test.tokenEnvs {
+				if overrides.Env[tokenEnv] != "secret-token" {
+					t.Errorf("%s = %q, want token（令牌简写应覆盖 MCP 所需变量）", tokenEnv, overrides.Env[tokenEnv])
+				}
 			}
 			if overrides.Env["ANTHROPIC_BASE_URL"] != test.baseURL {
 				t.Errorf("base_url = %q, want %q", overrides.Env["ANTHROPIC_BASE_URL"], test.baseURL)
@@ -124,5 +126,113 @@ func TestPresetRegistry(t *testing.T) {
 		if !strings.Contains(names, want) {
 			t.Errorf("PresetNames() 缺 %q：%s", want, names)
 		}
+	}
+}
+
+// 供应商官方 MCP 随预设自动注入：zhipu 视觉理解（npx）与 MiniMax coding-plan
+// （uvx）；api_key 简写同时写进各自 MCP 需要的环境变量（server env 缺省继承）。
+func TestPresetVendorMCP(t *testing.T) {
+	zhipu, err := Resolve("zhipu", claudecfg.Overrides{}, claudecfg.Overrides{}, "zai-key")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	zhipuServer := mcpServer(t, claudecfg.MergeMCPServers(nil, zhipu), "zai-mcp-server")
+	if zhipuServer["command"] != "npx" {
+		t.Errorf("zhipu MCP command = %v", zhipuServer["command"])
+	}
+	args, _ := zhipuServer["args"].([]any)
+	if len(args) != 2 || args[0] != "-y" || args[1] != "@z_ai/mcp-server@latest" {
+		t.Errorf("zhipu MCP args = %v", zhipuServer["args"])
+	}
+	zhipuEnv, _ := zhipuServer["env"].(map[string]any)
+	if zhipuEnv["Z_AI_MODE"] != "ZAI" {
+		t.Errorf("zhipu MCP Z_AI_MODE = %v", zhipuEnv["Z_AI_MODE"])
+	}
+	if zhipuEnv["Z_AI_API_KEY"] != "zai-key" {
+		t.Errorf("zhipu MCP 未继承 api_key：%v", zhipuEnv)
+	}
+	// 全档 glm-5.3-flash[1m] + 1M 压缩窗口（flash 绝对优先）
+	for _, key := range []string{"ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL"} {
+		if zhipu.Env[key] != "glm-5.3-flash[1m]" {
+			t.Errorf("zhipu %s = %q", key, zhipu.Env[key])
+		}
+	}
+	if zhipu.Env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] != "1000000" {
+		t.Errorf("zhipu 压缩窗口 = %q", zhipu.Env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"])
+	}
+	bigmodel, err := Resolve("bigmodel", claudecfg.Overrides{}, claudecfg.Overrides{}, "zai-key")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	bigmodelServer := mcpServer(t, claudecfg.MergeMCPServers(nil, bigmodel), "zai-mcp-server")
+	bigmodelEnv, _ := bigmodelServer["env"].(map[string]any)
+	if bigmodelEnv["Z_AI_MODE"] != "ZHIPU" {
+		t.Errorf("bigmodel MCP Z_AI_MODE = %v", bigmodelEnv["Z_AI_MODE"])
+	}
+
+	minimax, err := Resolve("minimax", claudecfg.Overrides{}, claudecfg.Overrides{}, "sk-cp-1")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	server := mcpServer(t, claudecfg.MergeMCPServers(nil, minimax), "MiniMax")
+	if server["command"] != "uvx" {
+		t.Errorf("minimax MCP command = %v", server["command"])
+	}
+	serverEnv, _ := server["env"].(map[string]any)
+	if serverEnv["MINIMAX_API_HOST"] != "https://api.minimax.io" || serverEnv["MINIMAX_API_KEY"] != "sk-cp-1" {
+		t.Errorf("minimax MCP env = %v", serverEnv)
+	}
+	minimaxCN, err := Resolve("minimax-cn", claudecfg.Overrides{}, claudecfg.Overrides{}, "sk-cp-1")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	cnServer := mcpServer(t, claudecfg.MergeMCPServers(nil, minimaxCN), "MiniMax")
+	cnEnv, _ := cnServer["env"].(map[string]any)
+	if cnEnv["MINIMAX_API_HOST"] != "https://api.minimax.cn" {
+		t.Errorf("minimax-cn MCP env = %v", cnEnv)
+	}
+
+	// 用户显式配置的 MCP env 优先于注入（server 自身取值优先）
+	custom, err := Resolve("minimax", claudecfg.Overrides{}, claudecfg.Overrides{
+		MCP: map[string]any{
+			"MiniMax": map[string]any{
+				"command": "uvx",
+				"args":    []any{"minimax-coding-plan-mcp"},
+				"env":     map[string]any{"MINIMAX_API_HOST": "https://custom.example.com"},
+			},
+		},
+	}, "sk-cp-1")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	customServer := mcpServer(t, claudecfg.MergeMCPServers(nil, custom), "MiniMax")
+	customEnv, _ := customServer["env"].(map[string]any)
+	if customEnv["MINIMAX_API_HOST"] != "https://custom.example.com" || customEnv["MINIMAX_API_KEY"] != "sk-cp-1" {
+		t.Errorf("用户 MCP env 应优先且仍注入密钥：%v", customEnv)
+	}
+}
+
+func mcpServer(t *testing.T, document map[string]any, name string) map[string]any {
+	t.Helper()
+	servers, _ := document["mcpServers"].(map[string]any)
+	server, _ := servers[name].(map[string]any)
+	if server == nil {
+		t.Fatalf("MCP server %q 缺失：%+v", name, document)
+	}
+	return server
+}
+
+// 预设 MCP 可以关闭：用户 mcp 里把同名 server 设为 null。
+func TestPresetMCPRemoval(t *testing.T) {
+	overrides, err := Resolve("minimax", claudecfg.Overrides{}, claudecfg.Overrides{
+		MCP: map[string]any{"MiniMax": nil},
+	}, "sk-cp-1")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	document := claudecfg.MergeMCPServers(nil, overrides)
+	servers, _ := document["mcpServers"].(map[string]any)
+	if _, exists := servers["MiniMax"]; exists {
+		t.Errorf("null 应移除预设 MCP：%+v", servers)
 	}
 }

@@ -56,9 +56,10 @@ type Preset struct {
 	// Name 是主名字；Aliases 是等价别名（都不区分大小写）
 	Name    string
 	Aliases []string
-	// TokenEnv 是 api_key/auth_token 简写映射到的环境变量名；空则
-	// ANTHROPIC_AUTH_TOKEN
-	TokenEnv string
+	// TokenEnvs 是 api_key/auth_token 简写要写入的环境变量名（可多个：如
+	// minimax 同时写 ANTHROPIC_AUTH_TOKEN 与其 MCP 需要的 MINIMAX_API_KEY）；
+	// 为空默认 ANTHROPIC_AUTH_TOKEN
+	TokenEnvs []string
 	// RequiresBaseURL 为真时必须由用户（或预设）给出 ANTHROPIC_BASE_URL，
 	// 否则在配置校验期报错（如 openai 必须指向翻译代理）
 	RequiresBaseURL bool
@@ -141,13 +142,17 @@ func Resolve(name string, global claudecfg.Overrides, user claudecfg.Overrides, 
 		}
 	}
 	if strings.TrimSpace(token) != "" {
-		tokenEnv := "ANTHROPIC_AUTH_TOKEN"
-		if hasPreset && strings.TrimSpace(preset.TokenEnv) != "" {
-			tokenEnv = preset.TokenEnv
+		tokenEnvs := []string{"ANTHROPIC_AUTH_TOKEN"}
+		if hasPreset && len(preset.TokenEnvs) > 0 {
+			tokenEnvs = preset.TokenEnvs
 		}
-		merged = claudecfg.ComposeOverrides(merged, claudecfg.Overrides{
-			Env: map[string]string{tokenEnv: token},
-		})
+		tokenValues := make(map[string]string, len(tokenEnvs))
+		for _, name := range tokenEnvs {
+			if trimmed := strings.TrimSpace(name); trimmed != "" {
+				tokenValues[trimmed] = token
+			}
+		}
+		merged = claudecfg.ComposeOverrides(merged, claudecfg.Overrides{Env: tokenValues})
 	}
 	if hasPreset && preset.RequiresBaseURL && strings.TrimSpace(merged.Env["ANTHROPIC_BASE_URL"]) == "" {
 		return claudecfg.Overrides{}, fmt.Errorf(

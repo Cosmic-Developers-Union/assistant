@@ -6,8 +6,8 @@ package provider
 //	{"api_key": "sk-ant-..."}
 func init() {
 	RegisterPreset(Preset{
-		Name:     "anthropic",
-		Aliases:  []string{"claude", "official"},
-		TokenEnv: "ANTHROPIC_API_KEY",
+		Name:      "anthropic",
+		Aliases:   []string{"claude", "official"},
+		TokenEnvs: []string{"ANTHROPIC_API_KEY"},
 	})
 }

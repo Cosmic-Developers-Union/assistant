@@ -10,9 +10,9 @@ package provider
 // Moonshot 开放平台用 provider 名 moonshot（不同 key、不同端点）。
 func init() {
 	RegisterPreset(Preset{
-		Name:     "kimi",
-		Aliases:  []string{"kimi-code", "kimi-coding"},
-		TokenEnv: "ANTHROPIC_API_KEY",
+		Name:      "kimi",
+		Aliases:   []string{"kimi-code", "kimi-coding"},
+		TokenEnvs: []string{"ANTHROPIC_API_KEY"},
 		Env: map[string]string{
 			"ANTHROPIC_BASE_URL":              "https://api.kimi.com/coding/",
 			"ANTHROPIC_MODEL":                 "kimi-for-coding",
@@ -26,9 +26,9 @@ func init() {
 		},
 	})
 	RegisterPreset(Preset{
-		Name:     "moonshot",
-		Aliases:  []string{"kimi-platform", "moonshot-ai"},
-		TokenEnv: "ANTHROPIC_AUTH_TOKEN",
+		Name:      "moonshot",
+		Aliases:   []string{"kimi-platform", "moonshot-ai"},
+		TokenEnvs: []string{"ANTHROPIC_AUTH_TOKEN"},
 		Env: map[string]string{
 			"ANTHROPIC_BASE_URL":              "https://api.moonshot.cn/anthropic",
 			"ANTHROPIC_MODEL":                 "kimi-k3",
