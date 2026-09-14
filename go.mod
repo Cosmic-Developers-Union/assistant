@@ -5,9 +5,11 @@ go 1.27.0
 require (
 	gitea.dev/sdk v1.2.0
 	github.com/joho/godotenv v1.5.1
+	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/term v0.46.0
 	gopkg.in/yaml.v3 v3.0.1
+	rsc.io/qr v0.2.0
 )
 
 require (

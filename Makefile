@@ -17,6 +17,9 @@ IMAGE ?= assistant:dev
 # 评审会话镜像（assistant run --docker-image 使用）
 REVIEW_IMAGE ?= ghcr.io/cosmic-developers-union/assistant-review:dev
 
+# daemon 镜像（docker-compose.yaml：调度 + 状态 API + 微信桥常驻容器）
+DAEMON_IMAGE ?= ghcr.io/cosmic-developers-union/assistant-daemon:latest
+
 # 安装前缀（make install；DESTDIR 支持打包场景）
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
@@ -91,6 +94,15 @@ review-image: ## 构建评审会话镜像（Dockerfile 在 images/review/）
 	@echo "==> 构建评审会话镜像 $(REVIEW_IMAGE)..."
 	docker build -f images/review/Dockerfile -t $(REVIEW_IMAGE) .
 	@echo "==> 构建完成: $(REVIEW_IMAGE)"
+
+.PHONY: daemon-image
+daemon-image: ## 构建 daemon 镜像（评审镜像 + assistant 二进制；docker compose 使用）
+	@echo "==> 构建 daemon 镜像 $(DAEMON_IMAGE)..."
+	docker build -f images/daemon/Dockerfile \
+		--build-arg REVIEW_IMAGE=$(REVIEW_IMAGE) \
+		--build-arg VERSION="$$(git describe --tags --always 2>/dev/null || echo dev)" \
+		-t $(DAEMON_IMAGE) .
+	@echo "==> 构建完成: $(DAEMON_IMAGE)"
 
 .PHONY: test-e2e
 test-e2e: ## 起临时 Gitea（docker compose）并运行端到端测试

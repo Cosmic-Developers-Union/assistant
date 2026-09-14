@@ -101,3 +101,21 @@ func TestEncodeClientVersionAndSplitText(t *testing.T) {
 		t.Errorf("Short SplitText = %q", chunks)
 	}
 }
+
+// 终端二维码渲染：非空内容输出半块字符，空内容报错（CLI 回退打印链接）。
+func TestRenderQR(t *testing.T) {
+	var output strings.Builder
+	if err := RenderQR(&output, "https://example.com/qr?x=1"); err != nil {
+		t.Fatalf("RenderQR: %v", err)
+	}
+	rendered := output.String()
+	if len(rendered) < 200 {
+		t.Errorf("渲染结果太短：%d 字节", len(rendered))
+	}
+	if !strings.ContainsAny(rendered, "▄▀█") {
+		t.Errorf("缺少二维码块字符：%q", rendered[:min(len(rendered), 80)])
+	}
+	if err := RenderQR(&output, "   "); err == nil {
+		t.Error("空内容应报错")
+	}
+}

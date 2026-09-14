@@ -1,0 +1,61 @@
+# 正式部署：assistant daemon（调度 + 只读状态 API + 微信对话桥）常驻容器。
+#
+# - 宿主机用户目录原样挂载到容器内同一路径：claude 登录态（~/.claude）、
+#   assistant 配置（~/.config/Cosmic-Developers-Union/assistant，含 config.json
+#   与 daemon.json）与受管克隆/状态目录（~/.local/share/Cosmic-Developers-Union/
+#   assistant）都随宿主走，容器内外路径一致；
+# - /tmp 用 tmpfs：评审 worktree 与会话临时目录全在 /tmp，落内存、退出即清；
+# - 状态 API 只发布在宿主 127.0.0.1:8770（`assistant mcp daemon` 走 daemon.json
+#   自举发现，本机工具直接可用）；
+# - 需要 `--docker-image` 把评审会话再放进容器时，打开 docker.sock 挂载
+#   （docker-out-of-docker；默认注释）。
+#
+# 用法：
+#   make daemon-image                 # 构建镜像（REVIEW_IMAGE=... 可换基座）
+#   docker compose up -d
+#   docker compose logs -f
+#   docker compose exec assistant assistant weixin login   # 首次扫码（终端渲染二维码）
+#
+# 以宿主用户身份运行：写回挂载目录的文件属主不变；UID/GID 与 HOME 由 compose
+# 插值，缺省 1000:1000，请在 .env 或 shell 环境里按需覆盖（export ASSISTANT_UID=...）。
+name: assistant
+
+services:
+  assistant:
+    build:
+      context: .
+      dockerfile: images/daemon/Dockerfile
+      args:
+        VERSION: ${ASSISTANT_VERSION:-dev}
+    image: ${DAEMON_IMAGE:-ghcr.io/cosmic-developers-union/assistant-daemon:latest}
+    restart: unless-stopped
+    user: "${ASSISTANT_UID:-1000}:${ASSISTANT_GID:-1000}"
+    environment:
+      HOME: ${HOME}
+      TZ: ${TZ:-Asia/Shanghai}
+      # 工具链缓存改到挂载的 HOME 下（镜像内默认在 /root，非 root 不可写）
+      GOCACHE: ${HOME}/.cache/go-build
+      GOMODCACHE: ${HOME}/go/pkg/mod
+      GOPATH: ${HOME}/go
+      BUN_INSTALL_CACHE_DIR: ${HOME}/.cache/bun
+      npm_config_cache: ${HOME}/.cache/npm
+      PIP_CACHE_DIR: ${HOME}/.cache/pip
+      UV_CACHE_DIR: ${HOME}/.cache/uv
+      CARGO_HOME: ${HOME}/.cargo
+      RUSTUP_HOME: ${HOME}/.rustup
+      PATH: /usr/local/go/bin:${HOME}/go/bin:${HOME}/.bun/bin:/usr/local/bin:/usr/bin:/bin
+      # claude 认证按需透传；OAuth 登录态在挂载的 ~/.claude 里，通常无需设置
+      # ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+    volumes:
+      - ${HOME}:${HOME}
+      # docker-out-of-docker：评审会话用 --docker-image 时需要（宿主 docker.sock）
+      # - /var/run/docker.sock:/var/run/docker.sock
+      # 宿主上的 Gitea（localhost）可加：
+      # extra_hosts:
+      #   - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:8770:8770"
+    tmpfs:
+      - /tmp:exec,mode=1777,size=2g
+    command: ["run", "--api-listen", "0.0.0.0:8770"]

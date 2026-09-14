@@ -12,8 +12,10 @@ import (
 
 // QRCode 是扫码登录的二维码信息。
 type QRCode struct {
-	Value        string
-	ImageContent string
+	// Value 是轮询用的二维码值（qrcode）
+	Value string
+	// Content 是扫码内容（qrcode_img_content，官方客户端用它渲染二维码）
+	Content string
 }
 
 // Credentials 是扫码登录换到的凭据。
@@ -64,6 +66,7 @@ func Login(
 		promptVerify = func(int) (string, error) { return "", fmt.Errorf("需要输入验证码但当前环境不可交互") }
 	}
 	verifyAttempt := 0
+	refreshCount := 0
 	for {
 		code, err := fetchQRCode(ctx, client)
 		if err != nil {
@@ -90,6 +93,10 @@ func Login(
 				}
 				return credentials, nil
 			case QRExpired:
+				refreshCount++
+				if refreshCount > maxQRRefresh {
+					return Credentials{}, fmt.Errorf("二维码已连续失效 %d 次，登录中止", maxQRRefresh)
+				}
 				break refresh
 			case QRVerifyBlocked:
 				return Credentials{}, fmt.Errorf("验证码错误次数过多，请重新登录")
@@ -145,8 +152,8 @@ func firstNonEmpty(values ...string) string {
 func fetchQRCode(ctx context.Context, client *Client) (QRCode, error) {
 	body := map[string]any{"local_token_list": []string{}}
 	var response struct {
-		QRCode       string `json:"qrcode"`
-		ImageContent string `json:"qrcode_img_content"`
+		QRCode  string `json:"qrcode"`
+		Content string `json:"qrcode_img_content"`
 	}
 	if err := client.do(ctx, http.MethodPost, "/ilink/bot/get_bot_qrcode?bot_type=3", body, false, &response); err != nil {
 		return QRCode{}, err
@@ -154,16 +161,19 @@ func fetchQRCode(ctx context.Context, client *Client) (QRCode, error) {
 	if strings.TrimSpace(response.QRCode) == "" {
 		return QRCode{}, fmt.Errorf("get_bot_qrcode 响应缺少 qrcode")
 	}
-	return QRCode{Value: response.QRCode, ImageContent: response.ImageContent}, nil
+	return QRCode{Value: response.QRCode, Content: response.Content}, nil
 }
 
-// pollQRCode 查询一次二维码状态（GET + 应用头，无鉴权）。
+// pollQRCode 查询一次二维码状态（GET + 应用头，无鉴权；长轮询 35s 超时，
+// 超时按 wait 处理继续轮询，与官方客户端一致）。
 func pollQRCode(ctx context.Context, client *Client, qrcode, verifyCode string) (QRStatus, error) {
 	path := "/ilink/bot/get_qrcode_status?qrcode=" + url.QueryEscape(qrcode)
 	if verifyCode != "" {
 		path += "&verify_code=" + url.QueryEscape(verifyCode)
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, client.BaseURL()+path, nil)
+	pollCtx, cancel := context.WithTimeout(ctx, qrPollTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(pollCtx, http.MethodGet, client.BaseURL()+path, nil)
 	if err != nil {
 		return QRStatus{}, err
 	}
@@ -202,5 +212,12 @@ func pollQRCode(ctx context.Context, client *Client, qrcode, verifyCode string) 
 	return status, nil
 }
 
-// PollInterval 是二维码状态轮询间隔（测试可调小）。
-var PollInterval = 2 * time.Second
+// PollInterval 是二维码状态轮询间隔（测试可调小；与服务端长轮询配合，
+// 正常响应由服务端在状态变化或超时后返回）。
+var PollInterval = time.Second
+
+// qrPollTimeout 是单次状态查询（长轮询）的客户端超时；超时按 wait 继续。
+const qrPollTimeout = 35 * time.Second
+
+// maxQRRefresh 是二维码过期后的自动刷新上限。
+const maxQRRefresh = 3

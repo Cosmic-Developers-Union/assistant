@@ -123,11 +123,11 @@ func runWeixinLogin(command *cobra.Command, configPath string, options *weixinLo
 		file = &instances.File{}
 	}
 	onQR := func(code weixin.QRCode) {
-		fmt.Fprintln(stdout, "请用微信扫描下方二维码完成登录（扫码后手机上会提示确认）：")
-		if code.ImageContent != "" {
-			fmt.Fprintln(stdout, code.ImageContent)
+		fmt.Fprintln(stdout, "请用手机微信扫描下方二维码完成登录（扫码后手机上会提示确认）：")
+		if err := weixin.RenderQR(stdout, code.Content); err != nil {
+			fmt.Fprintf(stdout, "（终端二维码渲染失败：%v，请使用下方链接）\n", err)
 		}
-		fmt.Fprintf(stdout, "二维码值：%s\n", code.Value)
+		fmt.Fprintf(stdout, "若二维码无法显示或无法扫描，可访问：%s\n", code.Content)
 	}
 	promptVerify := func(attempt int) (string, error) {
 		if !term.IsTerminal(int(os.Stdin.Fd())) {

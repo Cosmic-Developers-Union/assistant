@@ -46,7 +46,7 @@ func TestLoginFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
-	if qr.Value != "qr-1" || qr.ImageContent == "" {
+	if qr.Value != "qr-1" || qr.Content == "" {
 		t.Errorf("QRCode = %+v", qr)
 	}
 	if credentials.BotToken != "tok" || credentials.BotID != "bot-1" ||

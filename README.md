@@ -327,7 +327,7 @@ assistant run --weixin                           # 启动微信对话桥（或 c
 
 - **状态 API（只读）**：`GET /healthz`（无鉴权）与 `/api/v1/{status,sessions,queue,results}`（`Authorization: Bearer <token>`）。启动时端点凭据写入 `<配置目录>/daemon.json`（0600），daemon 退出即删除。
 - **自举 MCP**：`assistant mcp daemon` 从 `daemon.json` 自动发现运行中的 daemon（`ASSISTANT_DAEMON_ENDPOINT` / `ASSISTANT_DAEMON_ADDR` 可覆盖），提供 `daemon_status`、`list_sessions`、`list_queue`、`recent_results` 四个只读工具——「当前有多少个 PR 在 review、状态如何」直接问即可。
-- **微信对话桥**：按 [openclaw-weixin ilink 协议](https://github.com/Tencent/openclaw-weixin/blob/main/docs/protocol_zh_CN.md) 长轮询收消息、typesetting 与分块回复。每条会话（微信 session）对应一个**稳定的 claude 会话**：首轮 `claude -p --session-id <uuid>`，之后 `--resume <uuid>`，会话映射持久化在 `<配置目录>/chat/sessions.json`；会话只挂一个**自举的 daemon MCP**（工具面严格限定，见 `internal/daemon/chat.go`），不读写用户级 claude 配置。
+- **微信对话桥**：按 [openclaw-weixin ilink 协议](https://github.com/Tencent/openclaw-weixin/blob/main/docs/protocol_zh_CN.md) 长轮询收消息、typing 状态与分块回复。`assistant weixin login` 会把服务端返回的扫码内容直接在终端渲染成**可扫的二维码**（半块字符），并同时给出链接兜底；二维码过期自动刷新（上限 3 次）。每条会话（微信 session）对应一个**稳定的 claude 会话**：首轮 `claude -p --session-id <uuid>`，之后 `--resume <uuid>`，会话映射持久化在 `<配置目录>/chat/sessions.json`；会话只挂一个**自举的 daemon MCP**（工具面严格限定，见 `internal/daemon/chat.go`），不读写用户级 claude 配置。
 - **谁能对话**：`weixin.admin_users` 白名单；留空时只允许扫码登录的用户（`login_user_id`），两者都为空则忽略所有消息（fail-closed）。
 - 每条消息处理串行（同一会话的消息排队），不同会话最多 4 路并发；单轮对话超时默认 3 分钟（`weixin.session_timeout_ms`）。
 
@@ -391,6 +391,21 @@ export DISPATCH_SYNC_MIRROR=1     # 每轮把宿主检出强制对齐 origin/mai
 # 多实例（config.json，由 assistant setup 生成；仓库 dir 需为本地检出）
 ./assistant run --config /etc/assistant/config.json
 ```
+
+#### 容器化部署（docker compose）
+
+daemon 整体跑在容器里：宿主机**用户目录原样挂载**（claude 登录态、config.json、受管克隆都在里面，容器内外路径一致），`/tmp` 用 **tmpfs**（评审 worktree 全在 `/tmp`，落内存、退出即清），状态 API 只发布到宿主 `127.0.0.1:8770`：
+
+```bash
+make daemon-image       # 评审镜像 + assistant 二进制（REVIEW_IMAGE 可换基座）
+docker compose up -d
+docker compose logs -f
+docker compose exec assistant assistant weixin login   # 首次扫码（终端直接渲染二维码）
+```
+
+- UID/GID/HOME 由 compose 插值（缺省 `1000:1000` + 宿主 `$HOME`）；以宿主用户运行，写回挂载目录的文件属主不变。请在 `.env` 或环境里按需 `export ASSISTANT_UID=$(id -u) ASSISTANT_GID=$(id -g)`。
+- `docker-compose.yaml` 里默认挂载 `${HOME}:${HOME}`，`/tmp` 为 `tmpfs`（`exec,mode=1777,size=2g`，跑大仓库构建可调大）。
+- 需要 `--docker-image` 把评审会话再放进容器时，打开 `docker.sock` 挂载（docker-out-of-docker）；宿主上的 Gitea 可通过 `extra_hosts: host.docker.internal:host-gateway` 访问（文件内已注释示例）。
 
 systemd 示例（`WorkingDirectory` 建议仓库检出根；systemd 的最小 PATH 通常不含 claude 安装目录，`--claude-bin` 用绝对路径）：
 
