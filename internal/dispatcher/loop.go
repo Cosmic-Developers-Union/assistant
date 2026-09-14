@@ -328,14 +328,24 @@ func planSteps(deps Deps, item WorkItem) []string {
 		return fmt.Sprintf("curl -s -H 'Authorization: token ***' %s/api/v1/repos/%s%s",
 			config.Host, config.Repository.FullName(), path)
 	}
+	settingsNote := "<临时独立配置：env 时长/输出上限 + 只读权限放行"
+	if config.ProviderName != "" {
+		settingsNote += " + provider " + config.ProviderName
+	}
+	settingsNote += ">"
+	mcpNote := filepath.Join(deps.RepoDir, ".mcp.json")
+	if _, _, mcpServers := config.Provider.Counts(); mcpServers > 0 {
+		mcpNote = fmt.Sprintf("<临时合并配置：.mcp.json + provider %s 的 %d 个 server>",
+			config.ProviderName, mcpServers)
+	}
 	claudeArgs := []string{
 		"--permission-mode auto",
 		"--autocompact auto",
 		"--output-format stream-json",
 		"--verbose",
 		"--strict-mcp-config",
-		"--mcp-config " + filepath.Join(deps.RepoDir, ".mcp.json"),
-		"--settings <临时独立配置：env 时长/输出上限 + 只读权限放行>",
+		"--mcp-config " + mcpNote,
+		"--settings " + settingsNote,
 		"--setting-sources " + claudecfg.SettingSources,
 		"--no-session-persistence",
 		fmt.Sprintf("--max-turns %d", MaxTurns),

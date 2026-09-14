@@ -55,7 +55,7 @@ func TestResolveInstanceTargetUsesManagedDefaults(t *testing.T) {
 		Merger:   instances.Account{Name: "merge"},
 	}
 	command := &cobra.Command{}
-	target, err := resolveInstanceTarget(command, instance, instances.Repo{Name: "acme/repo"}, &dispatcherOptions{})
+	target, err := resolveInstanceTarget(command, &instances.File{}, instance, instances.Repo{Name: "acme/repo"}, &dispatcherOptions{})
 	if err != nil {
 		t.Fatalf("resolveInstanceTarget: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestResolveInstanceTargetExplicitDir(t *testing.T) {
 		Merger:   instances.Account{Name: "merge"},
 	}
 	command := &cobra.Command{}
-	target, err := resolveInstanceTarget(command, instance, instances.Repo{Name: "acme/repo", Dir: dir}, &dispatcherOptions{})
+	target, err := resolveInstanceTarget(command, &instances.File{}, instance, instances.Repo{Name: "acme/repo", Dir: dir}, &dispatcherOptions{})
 	if err != nil {
 		t.Fatalf("resolveInstanceTarget: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestRepoDirOverride(t *testing.T) {
 	}
 	command := &cobra.Command{}
 	target, err := resolveInstanceTarget(
-		command, instance, instances.Repo{Name: "acme/repo"}, &dispatcherOptions{RepoDir: dir})
+		command, &instances.File{}, instance, instances.Repo{Name: "acme/repo"}, &dispatcherOptions{RepoDir: dir})
 	if err != nil {
 		t.Fatalf("resolveInstanceTarget: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestPrepareManagedTargetsSkipsUnprovisioned(t *testing.T) {
 			Reviewer: instances.Account{Name: "ai", Token: "reviewer-token"},
 			Merger:   instances.Account{Name: "merge"},
 		}
-		target, err := resolveInstanceTarget(command, instance, instances.Repo{Name: name}, &dispatcherOptions{})
+		target, err := resolveInstanceTarget(command, &instances.File{}, instance, instances.Repo{Name: name}, &dispatcherOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -193,5 +193,61 @@ func TestPrepareManagedTargetsSkipsUnprovisioned(t *testing.T) {
 	}
 	if summary := skipSummary(targets); !strings.Contains(summary, "acme/missing") {
 		t.Errorf("skipSummary = %q", summary)
+	}
+}
+
+// provider 逐级回退写进运行配置（仅运行时覆盖）：repo > instance > 全局默认。
+func TestResolveInstanceTargetProviderCascade(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	command := &cobra.Command{}
+	file := &instances.File{
+		DefaultProvider: "global",
+		Providers: map[string]instances.Provider{
+			"global":   {Env: map[string]string{"SCOPE": "global"}},
+			"instance": {Env: map[string]string{"SCOPE": "instance"}},
+			"repo":     {Env: map[string]string{"SCOPE": "repo"}},
+		},
+	}
+	instance := instances.Instance{
+		Host:     "https://gitea.example.com",
+		Provider: "instance",
+		Reviewer: instances.Account{Name: "ai", Token: "reviewer-token"},
+		Merger:   instances.Account{Name: "merge"},
+	}
+
+	repo := instances.Repo{Name: "acme/repo", Provider: "repo"}
+	target, err := resolveInstanceTarget(command, file, instance, repo, &dispatcherOptions{})
+	if err != nil {
+		t.Fatalf("resolveInstanceTarget: %v", err)
+	}
+	if target.config.ProviderName != "repo" || target.config.Provider.Env["SCOPE"] != "repo" {
+		t.Errorf("repo 级 provider 未生效：%q %+v", target.config.ProviderName, target.config.Provider.Env)
+	}
+
+	repo.Provider = ""
+	target, err = resolveInstanceTarget(command, file, instance, repo, &dispatcherOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.config.ProviderName != "instance" || target.config.Provider.Env["SCOPE"] != "instance" {
+		t.Errorf("instance 级 provider 未生效：%q %+v", target.config.ProviderName, target.config.Provider.Env)
+	}
+
+	instance.Provider = ""
+	target, err = resolveInstanceTarget(command, file, instance, repo, &dispatcherOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.config.ProviderName != "global" || target.config.Provider.Env["SCOPE"] != "global" {
+		t.Errorf("全局 provider 未生效：%q %+v", target.config.ProviderName, target.config.Provider.Env)
+	}
+
+	// 引用了未定义的 provider 在配置校验期就会被拒绝
+	file.DefaultProvider = "missing"
+	file.Instances = []instances.Instance{instance}
+	file.Weixin = &instances.Weixin{BotToken: "t"}
+	file.Normalize()
+	if err := file.Validate(); err == nil {
+		t.Error("未定义的 provider 引用应报错")
 	}
 }

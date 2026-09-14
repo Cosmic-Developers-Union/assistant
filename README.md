@@ -82,8 +82,41 @@ assistant completion fish > ~/.config/fish/completions/assistant.fish
 - `reviewer`（`ai`）：内容评审者，其令牌**全实例唯一**——同一站点同时只有一个评审主机（dispatcher 的单飞锁是进程内的，令牌唯一从凭据层面兜底）；`setup` 每次运行都会把该账号其余令牌收敛删除。
 - `merger`（`merge`）：状态评审者（会签/合并）。**令牌按仓库独立**，存放在每个 repo 条目的 `merger_token`：仓库级 Actions workflow 各自使用自己项目的令牌，互不影响、可独立轮换。令牌名由仓库全名哈希派生（`assistant-<sha256 前 8 位>`），稳定且便于识别；`setup` 只清理同名旧令牌与历史共享名，不动其他仓库的令牌。
 - `repos`：仓库清单。字符串是 `owner/name` 简写（有 `dir`/`merger_token` 时写对象）；调度引擎的 `review`/`triage` 会话需要本地检出，多仓库时给出 `dir`（单仓库可省略，退回启动目录的检出）。
+- `provider`（可选）：生效的供应商名，逐级回退 `repo.provider` > `instance.provider` > `default_provider`；定义与用法见下文「多 provider（供应商）」。
 - 路径默认值按仓库隔离：日志 `<检出>/logs`、锁 `<检出>/dispatcher.lock`、worktree `<临时目录>/agent-dispatcher/<owner>-<repo>/worktrees`。
 - 文件含令牌，`setup` 以 0600 写入；请勿提交到版本库（`.gitignore` 已忽略常见位置，建议自行确认）。
+
+### 多 provider（供应商）
+
+`providers` 是手写维护的供应商配置：不同供应商（Anthropic 官方、Anthropic 兼容网关、Bedrock/Vertex 等）的 env/settings/mcp 格式各异，框架只做原样透传合并，不解释供应商语义：
+
+- `env`：注入会话环境变量（可含密钥）；provider 自定义的 `mcp` server 会缺省继承它（server 自身 `env` 优先）；
+- `settings`：Claude Code 原生 settings 片段（如 `model`、`apiKeyHelper`、`awsAuthRefresh`），合并进会话 `--settings`（`env`/`permissions` 逐键合并，其余顶层键覆盖托管默认）；
+- `mcp`：原生 MCP server 定义（`.mcp.json` 形态），合并进会话 `--mcp-config`，同名 server 由 provider 覆盖（仓库既有的 `gitea` 等不受影响）。
+
+未识别的键原样保留，随你手写扩展。示例：
+
+```json
+{
+  "providers": {
+    "gateway": {
+      "env": {
+        "ANTHROPIC_BASE_URL": "https://gateway.example.com/api/anthropic",
+        "ANTHROPIC_AUTH_TOKEN": "gateway-auth-token"
+      },
+      "settings": { "model": "glm-4.6" },
+      "mcp": {
+        "search": { "command": "npx", "args": ["-y", "@example/search-mcp"] }
+      }
+    }
+  },
+  "default_provider": "gateway"
+}
+```
+
+选择粒度逐级回退：`repo.provider` > `instance.provider` > `default_provider`；微信对话桥用 `weixin.provider`（缺省回退 `default_provider`）。引用了未定义的名字直接报错，不会静默用错供应商。
+
+**只作用于运行时会话**：provider 覆盖进评审/分诊/对话会话的临时 `--settings` 与 `--mcp-config`，绝不写入仓库 `.claude/settings.json`/`.mcp.json`——密钥不进 git，仓库保持供应商无关。`run --dry-run` 会打印每个目标生效的 provider 与覆盖项数（值不落日志）。
 
 ### 平台管理：assistant login
 

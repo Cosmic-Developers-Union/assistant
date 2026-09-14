@@ -1,7 +1,34 @@
 {
+  "providers": {
+    "anthropic": {
+      "env": {
+        "ANTHROPIC_API_KEY": "sk-ant-api-key"
+      },
+      "settings": {
+        "model": "claude-sonnet-4-5"
+      }
+    },
+    "gateway": {
+      "env": {
+        "ANTHROPIC_BASE_URL": "https://gateway.example.com/api/anthropic",
+        "ANTHROPIC_AUTH_TOKEN": "gateway-auth-token"
+      },
+      "settings": {
+        "model": "glm-4.6"
+      },
+      "mcp": {
+        "gateway-search": {
+          "command": "npx",
+          "args": ["-y", "@example/search-mcp"]
+        }
+      }
+    }
+  },
+  "default_provider": "anthropic",
   "instances": [
     {
       "host": "https://gitea.example.com",
+      "provider": "gateway",
       "admin_token": "admin-personal-access-token",
       "reviewer": {
         "name": "ai",
@@ -18,6 +45,7 @@
         {
           "name": "owner/another",
           "dir": "/srv/another",
+          "provider": "anthropic",
           "merger_token": "created-by-assistant-setup"
         }
       ]
@@ -28,6 +56,7 @@
     "base_url": "https://ilinkai.weixin.qq.com",
     "bot_token": "created-by-assistant-weixin-login",
     "login_user_id": "wx-user-id",
+    "provider": "gateway",
     "admin_users": [
       "wx-user-id"
     ]

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -329,7 +330,7 @@ func resolveDispatchTargets(
 			continue
 		}
 		for _, repo := range repos {
-			target, err := resolveInstanceTarget(command, instance, repo, options)
+			target, err := resolveInstanceTarget(command, file, instance, repo, options)
 			if err != nil {
 				return nil, err
 			}
@@ -353,8 +354,10 @@ func resolveDispatchTargets(
 // resolveInstanceTarget 解析 (instance, repo) 的运行上下文：repo.dir 缺省时用
 // 受管克隆落点（<数据目录>/…/repos/<host>/<owner>/<name>），与当前目录解耦；
 // 日志/锁同样落在检出之外的状态目录，避免被基线对齐的 clean -fd 波及。
+// provider 按 repo > instance > 全局默认解析，写进运行配置（仅运行时注入）。
 func resolveInstanceTarget(
 	command *cobra.Command,
+	file *instances.File,
 	instance instances.Instance,
 	repo instances.Repo,
 	options *dispatcherOptions,
@@ -420,6 +423,9 @@ func resolveInstanceTarget(
 	if err != nil {
 		return dispatchTarget{}, err
 	}
+	providerName := file.ProviderName(&instance, &repo)
+	config.Provider = file.LookupProvider(providerName).Overrides()
+	config.ProviderName = providerName
 	client, err := newDispatchClient(config)
 	if err != nil {
 		return dispatchTarget{}, err
@@ -493,6 +499,30 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// previewProviders 在 dry-run 中说明每个目标生效的 provider（值掩码，环境
+// 变量只列键名）：provider 覆盖只作用于运行时会话配置，零副作用。
+func previewProviders(command *cobra.Command, targets []dispatchTarget) {
+	for _, target := range targets {
+		if target.config.ProviderName == "" {
+			continue
+		}
+		env, settings, mcp := target.config.Provider.Counts()
+		fmt.Fprintf(command.ErrOrStderr(),
+			"dry-run：%s 使用 provider %s（env %d 项：%s；settings %d 项；mcp %d 个）——注入会话 --settings/--mcp-config，不写仓库文件\n",
+			target.repo.Name, target.config.ProviderName, env, strings.Join(maskedEnvKeys(target.config.Provider.Env), "、"), settings, mcp)
+	}
+}
+
+// maskedEnvKeys 返回排序后的 env 键名（值不落日志）。
+func maskedEnvKeys(env map[string]string) []string {
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // previewManagedTargets 是 ensureManagedTargets 的 dry-run 版本：只说明将克隆/
@@ -659,6 +689,7 @@ func runDispatchLoop(command *cobra.Command, repoFlag, configPath string, option
 	// dry-run 零副作用：受管克隆只提示将发生的动作，不 clone/不 fetch
 	if options.DryRun {
 		previewManagedTargets(command, targets)
+		previewProviders(command, targets)
 	} else {
 		targets = prepareManagedTargets(command, targets)
 	}
@@ -675,6 +706,14 @@ func runDispatchLoop(command *cobra.Command, repoFlag, configPath string, option
 					ready[0].config.ClaudeBin))
 			}
 		}
+		for _, target := range ready {
+			if target.config.ProviderName == "" {
+				continue
+			}
+			env, settings, mcp := target.config.Provider.Counts()
+			log(fmt.Sprintf("%s 使用 provider %s（env %d 项，settings %d 项，mcp %d 个）",
+				target.repo.Name, target.config.ProviderName, env, settings, mcp))
+		}
 	}
 
 	// daemon 运行态：调度循环写入，状态 API 与对话会话的 MCP 读取；未就绪仓库也
@@ -689,6 +728,7 @@ func runDispatchLoop(command *cobra.Command, repoFlag, configPath string, option
 			Managed:    target.managed,
 			Ready:      target.skipReason == "",
 			SkipReason: target.skipReason,
+			Provider:   target.config.ProviderName,
 		})
 	}
 	if !options.DryRun {

@@ -374,13 +374,25 @@ func RunSession(options SessionOptions) SessionOutcome {
 
 	// 独立会话配置写临时目录：环境变量与权限放行随二进制版本走，不依赖仓库
 	// 状态与操作者用户配置
-	settingsPath, cleanup, err := writeClaudeSessionSettings()
+	configDir, cleanup, err := createSessionConfigDir()
 	if err != nil {
 		outcome.Errors = append(outcome.Errors, err.Error())
 		return outcome
 	}
 	defer cleanup()
+	settingsPath, err := writeClaudeSessionSettings(configDir, config.Provider)
+	if err != nil {
+		outcome.Errors = append(outcome.Errors, err.Error())
+		return outcome
+	}
 	options.SettingsPath = settingsPath
+	// provider 定义原生 MCP server 时：与仓库 .mcp.json 合并后注入会话
+	mergedMCPPath, err := writeSessionMCPConfig(configDir, options.MCPConfigPath, config.Provider)
+	if err != nil {
+		outcome.Errors = append(outcome.Errors, err.Error())
+		return outcome
+	}
+	options.MCPConfigPath = mergedMCPPath
 
 	bin, args, container := sessionCommand(options)
 	command := exec.Command(bin, args...)

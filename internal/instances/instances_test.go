@@ -168,3 +168,123 @@ func TestDefaultManagedPaths(t *testing.T) {
 		t.Error("非法仓库名应报错")
 	}
 }
+
+// provider 定义松弛解析：env 接受标量、settings/mcp 原样保留、未知键不丢。
+func TestProviderConfigTolerantParseAndRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	content := `{
+  "default_provider": "gateway",
+  "providers": {
+    "gateway": {
+      "env": {"ANTHROPIC_BASE_URL": "https://gw.example.com", "API_TIMEOUT_MS": 600000, "DEBUG": false},
+      "settings": {"model": "glm-4.6", "apiKeyHelper": "/bin/echo key"},
+      "mcp": {"search": {"command": "npx", "args": ["-y", "@example/search-mcp"]}},
+      "note": "手写扩展键原样保留"
+    }
+  },
+  "instances": [
+    {"host": "https://gitea.example.com", "provider": "gateway", "repos": [
+      {"name": "owner/repo", "provider": "gateway"},
+      "owner/other"
+    ]}
+  ]
+}`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	file, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	provider := file.Providers["gateway"]
+	if provider.Env["ANTHROPIC_BASE_URL"] != "https://gw.example.com" ||
+		provider.Env["API_TIMEOUT_MS"] != "600000" || provider.Env["DEBUG"] != "false" {
+		t.Errorf("Env = %+v", provider.Env)
+	}
+	if provider.Settings["model"] != "glm-4.6" || provider.Settings["apiKeyHelper"] != "/bin/echo key" {
+		t.Errorf("Settings = %+v", provider.Settings)
+	}
+	server, _ := provider.MCP["search"].(map[string]any)
+	if server["command"] != "npx" {
+		t.Errorf("MCP = %+v", provider.MCP)
+	}
+	// 选择粒度：repo > instance > 全局默认
+	if got := file.ProviderName(&file.Instances[0], &file.Instances[0].Repos[0]); got != "gateway" {
+		t.Errorf("repo provider = %q, want gateway", got)
+	}
+	if got := file.ProviderName(&file.Instances[0], nil); got != "gateway" {
+		t.Errorf("instance provider = %q, want gateway", got)
+	}
+	if got := file.ProviderName(&Instance{}, nil); got != "gateway" {
+		t.Errorf("default provider = %q, want gateway", got)
+	}
+	// 未识别键写回不丢
+	if err := Save(path, file); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "手写扩展键原样保留") {
+		t.Errorf("未知键应原样保留：\n%s", raw)
+	}
+	reloaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.Providers["gateway"].Settings["model"] != "glm-4.6" {
+		t.Errorf("settings round-trip failed: %+v", reloaded.Providers["gateway"].Settings)
+	}
+}
+
+// provider 引用必须存在；非法 env 值（嵌套对象）报错。
+func TestProviderValidation(t *testing.T) {
+	tests := map[string]string{
+		"unknown default": `{"default_provider": "nope", "providers": {"gw": {"env": {"A": "b"}}},
+			"instances": [{"host": "https://a.example.com", "repos": []}]}`,
+		"unknown instance provider": `{"providers": {"gw": {}},
+			"instances": [{"host": "https://a.example.com", "provider": "nope", "repos": []}]}`,
+		"unknown repo provider": `{"providers": {"gw": {}},
+			"instances": [{"host": "https://a.example.com", "repos": [{"name": "o/r", "provider": "nope"}]}]}`,
+		"unknown weixin provider": `{"providers": {"gw": {}},
+			"weixin": {"provider": "nope", "bot_token": "t"},
+			"instances": [{"host": "https://a.example.com", "repos": []}]}`,
+		"nested env value": `{"providers": {"gw": {"env": {"A": {"nested": true}}}},
+			"instances": [{"host": "https://a.example.com", "repos": []}]}`,
+	}
+	for name, content := range tests {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(path); err == nil {
+				t.Errorf("Load(%s) error = nil, want error", content)
+			}
+		})
+	}
+	// weixin.provider 生效：优先于全局默认
+	file := &File{
+		DefaultProvider: "gw",
+		Weixin:          &Weixin{Provider: "weixin-gw"},
+		Providers:       map[string]Provider{"gw": {}, "weixin-gw": {}},
+	}
+	if got := file.WeixinProviderName(); got != "weixin-gw" {
+		t.Errorf("WeixinProviderName() = %q, want weixin-gw", got)
+	}
+	file.Weixin.Provider = ""
+	if got := file.WeixinProviderName(); got != "gw" {
+		t.Errorf("WeixinProviderName() fallback = %q, want gw", got)
+	}
+	if overrides := file.LookupProvider("gw").Overrides(); !overrides.Empty() {
+		t.Errorf("空 provider 应为空覆盖：%+v", overrides)
+	}
+}
+
+// 仓库自带的示例配置必须始终可加载（providers 等字段的回归护栏）。
+func TestConfigExampleLoads(t *testing.T) {
+	if _, err := Load(filepath.Join("..", "..", "config.example.json")); err != nil {
+		t.Fatalf("config.example.json 无法加载：%v", err)
+	}
+}

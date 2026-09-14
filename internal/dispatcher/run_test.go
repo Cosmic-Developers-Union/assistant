@@ -294,11 +294,18 @@ func TestSessionCommandBare(t *testing.T) {
 // 独立会话配置：env 与权限放行走 claudecfg，未显式预置时由 RunSession 写临时
 // 文件；Docker 形态按相同路径挂载 settings 所在目录。
 func TestWriteClaudeSessionSettings(t *testing.T) {
-	path, cleanup, err := writeClaudeSessionSettings()
+	dir, cleanup, err := createSessionConfigDir()
+	if err != nil {
+		t.Fatalf("createSessionConfigDir: %v", err)
+	}
+	defer cleanup()
+	path, err := writeClaudeSessionSettings(dir, claudecfg.Overrides{
+		Env:      map[string]string{"ANTHROPIC_BASE_URL": "https://gateway.example.com"},
+		Settings: map[string]any{"model": "gateway-model"},
+	})
 	if err != nil {
 		t.Fatalf("writeClaudeSessionSettings: %v", err)
 	}
-	defer cleanup()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -311,6 +318,12 @@ func TestWriteClaudeSessionSettings(t *testing.T) {
 	if env["BASH_DEFAULT_TIMEOUT_MS"] != claudecfg.Env["BASH_DEFAULT_TIMEOUT_MS"] ||
 		env["MAX_MCP_OUTPUT_TOKENS"] != claudecfg.Env["MAX_MCP_OUTPUT_TOKENS"] {
 		t.Errorf("env = %+v", env)
+	}
+	if env["ANTHROPIC_BASE_URL"] != "https://gateway.example.com" {
+		t.Errorf("provider env 未注入：%+v", env)
+	}
+	if document["model"] != "gateway-model" {
+		t.Errorf("provider settings 未合并：%v", document["model"])
 	}
 	if document["enableAllProjectMcpServers"] != false {
 		t.Errorf("enableAllProjectMcpServers = %v, want false", document["enableAllProjectMcpServers"])

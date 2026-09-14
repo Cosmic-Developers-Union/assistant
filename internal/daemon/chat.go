@@ -30,6 +30,11 @@ type ChatConfig struct {
 	ClaudeBin string
 	// Model 可选模型覆盖
 	Model string
+	// Provider 是生效的供应商运行时覆盖（env/settings/mcp 原样透传；零值表示
+	// 内置缺省）。只作用于对话会话临时配置，不写入仓库文件。
+	Provider claudecfg.Overrides
+	// ProviderName 是生效的 provider 名（空串表示内置缺省；仅日志展示）
+	ProviderName string
 	// Timeout 是单轮对话超时（缺省 3 分钟）
 	Timeout time.Duration
 	// StateDir 是会话状态目录（缺省 <配置目录>/chat）
@@ -167,16 +172,10 @@ func (c *Chat) sessionArgs(sessionID string, fresh bool, text string) ([]string,
 	return args, nil
 }
 
-// writeSettings 写入对话会话的独立设置（env + 权限放行，含 daemon MCP）。
+// writeSettings 写入对话会话的独立设置（env + 权限放行 + provider 覆盖，含
+// daemon MCP 的放行）。
 func (c *Chat) writeSettings() (string, error) {
-	allow := append([]string{}, claudecfg.Allow...)
-	allow = append(allow, "mcp__daemon", "mcp__daemon__*")
-	settings := map[string]any{
-		"env": claudecfg.Env,
-		"permissions": map[string]any{
-			"allow": allow,
-		},
-	}
+	settings := claudecfg.SessionSettingsMap(c.config.Provider, "mcp__daemon", "mcp__daemon__*")
 	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return "", err
@@ -192,13 +191,15 @@ func (c *Chat) writeSettings() (string, error) {
 }
 
 // writeMCPConfig 写入自举的 daemon MCP 配置（assistant mcp daemon 自己发现
-// 运行中的 daemon，无需地址/令牌参数）。
+// 运行中的 daemon，无需地址/令牌参数）；provider 定义的原生 MCP server 一并
+// 合并（同名由 provider 覆盖）。
 func (c *Chat) writeMCPConfig() (string, error) {
 	config := map[string]any{
 		"mcpServers": map[string]any{
 			"daemon": map[string]any{"command": "assistant", "args": []any{"mcp", "daemon"}},
 		},
 	}
+	claudecfg.MergeMCPServers(config, c.config.Provider)
 	data, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
 		return "", err

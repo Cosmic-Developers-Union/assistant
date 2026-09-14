@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"assistant/internal/claudecfg"
 	"assistant/internal/status"
 )
 
@@ -51,6 +52,11 @@ type Config struct {
 	Reviewer string
 	// ClaudeBin 是 claude 可执行文件（PATH 名或绝对路径）
 	ClaudeBin string
+	// Provider 是生效的供应商运行时覆盖（env/settings/mcp 原样透传；零值表示
+	// 内置缺省）。只作用于会话临时配置，不写入仓库文件。
+	Provider claudecfg.Overrides
+	// ProviderName 是生效的 provider 名（空串表示内置缺省；仅日志/状态展示）
+	ProviderName string
 	// DockerImage 非空时评审会话跑在 Docker 容器里（worktree 与 MCP 配置按
 	// 相同绝对路径挂载；认证环境变量按白名单透传）
 	DockerImage string

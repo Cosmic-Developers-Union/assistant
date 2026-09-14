@@ -27,6 +27,8 @@ type Target struct {
 	// SkipReason 说明原因；daemon 不会为它开会话
 	Ready      bool   `json:"ready"`
 	SkipReason string `json:"skip_reason,omitempty"`
+	// Provider 是本仓库生效的供应商名（空串表示内置缺省）
+	Provider string `json:"provider,omitempty"`
 }
 
 // Item 是一个待办。

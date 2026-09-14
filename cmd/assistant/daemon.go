@@ -205,12 +205,21 @@ func startDaemonServices(
 	if strings.TrimSpace(weixinConfig.BotToken) == "" {
 		return fmt.Errorf("weixin.bot_token 未配置：先 assistant weixin login")
 	}
+	// 对话会话与评审会话共用同一 provider 体系：weixin.provider > 全局默认
+	providerName := file.WeixinProviderName()
+	provider := file.LookupProvider(providerName)
+	if providerName != "" {
+		env, settings, mcp := provider.Overrides().Counts()
+		logf("微信桥使用 provider %s（env %d 项，settings %d 项，mcp %d 个）", providerName, env, settings, mcp)
+	}
 	timeout := time.Duration(weixinConfig.SessionTimeoutMS) * time.Millisecond
 	chat, err := daemon.NewChat(daemon.ChatConfig{
-		ClaudeBin: firstNonEmpty(weixinConfig.ClaudeBin, options.ClaudeBin),
-		Model:     firstNonEmpty(weixinConfig.Model, options.Model),
-		Timeout:   timeout,
-		Log:       logf,
+		ClaudeBin:    firstNonEmpty(weixinConfig.ClaudeBin, options.ClaudeBin),
+		Model:        firstNonEmpty(weixinConfig.Model, options.Model),
+		Provider:     provider.Overrides(),
+		ProviderName: providerName,
+		Timeout:      timeout,
+		Log:          logf,
 	})
 	if err != nil {
 		return err
