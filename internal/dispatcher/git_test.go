@@ -67,7 +67,7 @@ func TestPrepareWorktreeChecksOutPullHeadAndPinsBaseline(t *testing.T) {
 	evilSHA := strings.TrimSpace(gitRun(t, seed, "rev-parse", "evil"))
 	worktreeDir := filepath.Join(base, "wt-pr-1")
 
-	headSHA, err := PrepareWorktree(seed, 1, worktreeDir)
+	headSHA, err := PrepareWorktree(seed, 1, worktreeDir, "")
 	if err != nil {
 		t.Fatalf("PrepareWorktree() error = %v", err)
 	}
@@ -92,7 +92,7 @@ func TestPrepareWorktreeFailsClosedWithoutHostStandard(t *testing.T) {
 	if err := os.RemoveAll(filepath.Join(seed, ".claude")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := PrepareWorktree(seed, 1, filepath.Join(base, "wt-pr-1")); err == nil ||
+	if _, err := PrepareWorktree(seed, 1, filepath.Join(base, "wt-pr-1"), ""); err == nil ||
 		!strings.Contains(err.Error(), "评审标准") {
 		t.Errorf("error = %v, want 评审标准", err)
 	}
@@ -109,7 +109,7 @@ func TestSyncMirrorDiscardsLocalDivergence(t *testing.T) {
 	gitRun(t, seed, "checkout", "-q", "-b", "stray")
 	writeFile(t, filepath.Join(seed, "junk.txt"), "junk\n")
 
-	sha, err := SyncMirror(seed, "main")
+	sha, err := SyncMirror(seed, "main", "")
 	if err != nil {
 		t.Fatalf("SyncMirror() error = %v", err)
 	}
@@ -124,5 +124,66 @@ func TestSyncMirrorDiscardsLocalDivergence(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(seed, leftover)); err == nil {
 			t.Errorf("%s should be cleaned", leftover)
 		}
+	}
+}
+
+// 受管克隆：EnsureRepo 从远端克隆（origin 无凭据 URL），PrepareBaselineWorktree
+// 以 origin/<base> 建 detach worktree，并钉定基线评审标准。
+func TestEnsureRepoAndBaselineWorktree(t *testing.T) {
+	base := makeFixture(t)
+	if err := os.MkdirAll(filepath.Join(base, "acme"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, base, "clone", "--bare", "-q", filepath.Join(base, "origin.git"), filepath.Join(base, "acme", "repo.git"))
+
+	dir := filepath.Join(base, "clone", "repo")
+	cloned, err := EnsureRepo(dir, "file://"+base, "acme/repo", "")
+	if err != nil {
+		t.Fatalf("EnsureRepo() error = %v", err)
+	}
+	if !cloned {
+		t.Error("首次 EnsureRepo 应克隆")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".claude", "skills", "review", "SKILL.md")); err != nil {
+		t.Errorf("克隆缺少基线内容: %v", err)
+	}
+	remote := strings.TrimSpace(gitRun(t, dir, "remote", "get-url", "origin"))
+	if strings.Contains(remote, "token") || strings.Contains(remote, "@") {
+		t.Errorf("origin URL 不应内嵌凭据: %q", remote)
+	}
+	if cloned, err = EnsureRepo(dir, "file://"+base, "acme/repo", ""); err != nil || cloned {
+		t.Errorf("已存在时 EnsureRepo = %v, %v；want false, nil", cloned, err)
+	}
+
+	worktreeDir := filepath.Join(base, "wt-issue-1")
+	sha, err := PrepareBaselineWorktree(dir, "main", worktreeDir, "")
+	if err != nil {
+		t.Fatalf("PrepareBaselineWorktree() error = %v", err)
+	}
+	if sha != strings.TrimSpace(gitRun(t, dir, "rev-parse", "origin/main")) {
+		t.Errorf("sha = %q, 应为 origin/main", sha)
+	}
+	skill, err := os.ReadFile(filepath.Join(worktreeDir, ".claude", "skills", "review", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(skill) != skillBaseline {
+		t.Errorf("worktree SKILL.md = %q, want baseline", skill)
+	}
+	if _, err := os.Stat(filepath.Join(worktreeDir, "pr-change.txt")); err == nil {
+		t.Error("基线 worktree 不应包含 PR 变更")
+	}
+}
+
+// 落点被非 git 内容占用时拒绝克隆（避免误删用户文件）。
+func TestEnsureRepoRejectsOccupiedDir(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "keep.txt"), "keep\n")
+	if _, err := EnsureRepo(dir, "https://gitea.example.com", "acme/repo", ""); err == nil ||
+		!strings.Contains(err.Error(), "已被占用") {
+		t.Fatalf("error = %v, want 已被占用", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "keep.txt")); err != nil {
+		t.Errorf("不应触碰既有文件: %v", err)
 	}
 }

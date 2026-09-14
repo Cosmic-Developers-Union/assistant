@@ -38,8 +38,11 @@ type Deps struct {
 	// SyncMirror 每轮检测前把宿主检出对齐 origin 基线；未开启时为 nil
 	SyncMirror      func() (string, error)
 	PrepareWorktree func(pullNumber int64) (string, error)
-	RemoveWorktree  func(dir string) error
-	RunSession      func(prompt, cwd string, onProgress func(string)) SessionOutcome
+	// PrepareIssue 为 Issue 会话建基线 detach worktree（/tmp 隔离工作区，与 PR
+	// 会话同口径）；未传时 Issue 会话退回在宿主检出内运行
+	PrepareIssue   func(worktreeDir string) (string, error)
+	RemoveWorktree func(dir string) error
+	RunSession     func(prompt, cwd string, onProgress func(string)) SessionOutcome
 }
 
 // RunAll 监督多个仓库的常驻循环：各自独立加锁（锁在各自检出内），任一循环
@@ -327,6 +330,9 @@ func planSteps(deps Deps, item WorkItem) []string {
 		"--no-session-persistence",
 		fmt.Sprintf("--max-turns %d", MaxTurns),
 	}
+	if _, err := os.Stat(filepath.Join(deps.RepoDir, ".assistant", "review.md")); err == nil {
+		claudeArgs = append(claudeArgs, "--append-system-prompt <项目约定 .assistant/review.md>")
+	}
 	if config.Model != "" {
 		claudeArgs = append(claudeArgs, "--model "+config.Model)
 	}
@@ -512,7 +518,8 @@ func ProcessItem(ctx context.Context, deps Deps, item WorkItem) ProcessResult {
 		}
 	}()
 
-	if item.Kind == KindPull {
+	switch {
+	case item.Kind == KindPull:
 		worktreeDir = filepath.Join(config.WorktreeRoot, fmt.Sprintf("pr-%d", item.Number))
 		sha, err := deps.PrepareWorktree(item.Number)
 		if err != nil {
@@ -523,6 +530,17 @@ func ProcessItem(ctx context.Context, deps Deps, item WorkItem) ProcessResult {
 		headSHA = sha
 		cwd = worktreeDir
 		deps.Log(fmt.Sprintf("%s worktree=%s head=%s", tag, worktreeDir, headSHA))
+	case deps.PrepareIssue != nil:
+		// Issue 会话同样在 /tmp 的 detach worktree 里跑：宿主检出只做 fetch
+		worktreeDir = filepath.Join(config.WorktreeRoot, fmt.Sprintf("issue-%d", item.Number))
+		sha, err := deps.PrepareIssue(worktreeDir)
+		if err != nil {
+			deps.Log(fmt.Sprintf("%s 处理异常：%v", tag, err))
+			appendLog(fmt.Sprintf("[error] %v\n", err))
+			return ProcessResult{}
+		}
+		cwd = worktreeDir
+		deps.Log(fmt.Sprintf("%s worktree=%s head=%s", tag, worktreeDir, sha))
 	}
 	prompt := deps.BuildPrompt(item.Kind, item.Number, PromptContext{Title: item.Title, HeadSHA: headSHA})
 	appendLog("[prompt] " + strings.ReplaceAll(prompt, "\n", " ⏎ ") + "\n")

@@ -391,3 +391,61 @@ func TestSessionCommandDocker(t *testing.T) {
 		t.Errorf("docker args leaked unrelated env: %v", args)
 	}
 }
+
+// 项目评审约定：ProjectDir 下的 .assistant/review.md 作为附加 system 提示词注入。
+func TestRunSessionInjectsReviewConventions(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".assistant"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(dir, ".assistant", "review.md"),
+		[]byte("# 项目约定\n必须检查目录边界\n"), 0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	argsFile := filepath.Join(dir, "args.txt")
+	bin := fakeClaude(t, dir, fmt.Sprintf(
+		`printf '%%s\n' "$@" > '%s'
+printf '%%s\n' '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"session_id":"s-1","result":"ok"}'`,
+		argsFile,
+	))
+	outcome := RunSession(SessionOptions{
+		Config:        testConfig(func(config *Config) { config.ClaudeBin = bin }),
+		Prompt:        "review pr #9",
+		Cwd:           dir,
+		ProjectDir:    dir,
+		MCPConfigPath: filepath.Join(dir, ".mcp.json"),
+	})
+	if outcome.IsError {
+		t.Fatalf("outcome = %+v, want success", outcome)
+	}
+	raw, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 约定内容含换行，按整段原文匹配（printf 每参数一行会把它拆开）
+	if !strings.Contains(string(raw), "--append-system-prompt") ||
+		!strings.Contains(string(raw), "必须检查目录边界") {
+		t.Errorf("args = %q, 缺少附加 system 提示词", raw)
+	}
+}
+
+// 约定文件缺失时不传 --append-system-prompt；超长内容截断。
+func TestReadReviewConventions(t *testing.T) {
+	dir := t.TempDir()
+	if got := ReadReviewConventions(dir); got != "" {
+		t.Errorf("缺文件应返回空串，got %q", got)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, ".assistant"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	long := strings.Repeat("约", ReviewConventionsLimit+100)
+	if err := os.WriteFile(filepath.Join(dir, ".assistant", "review.md"), []byte(long), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := ReadReviewConventions(dir)
+	if !strings.Contains(got, "已截断") {
+		t.Errorf("超长约定应截断，len=%d", len(got))
+	}
+}

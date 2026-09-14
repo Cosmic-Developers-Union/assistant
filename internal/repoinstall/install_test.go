@@ -68,7 +68,9 @@ func TestInstallCreatesArtifactsAndIsIdempotent(t *testing.T) {
 	if err := Install(context.Background(), options); err != nil {
 		t.Fatalf("Install() error = %v", err)
 	}
-	for _, relative := range append([]string{ManagedSkillPath(), ManagedAgentPath(), ManagedClaudePath()}, ManagedWorkflowPaths()...) {
+	for _, relative := range append(
+		[]string{ManagedSkillPath(), ManagedAgentPath(), ManagedClaudePath(), ManagedReviewPath()},
+		ManagedWorkflowPaths()...) {
 		path := filepath.Join(options.Dir, relative)
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("missing %s: %v", relative, err)
@@ -140,6 +142,13 @@ func TestInstallCreatesArtifactsAndIsIdempotent(t *testing.T) {
 	if strings.Contains(content.AgentsSection, Marker) {
 		t.Errorf("content/agents.md 不应包含 marker（install 自动包裹）")
 	}
+	// 项目评审约定：托管段落绑定身份，段落外用户内容保留
+	review := readFile(t, filepath.Join(options.Dir, ManagedReviewPath()))
+	for _, want := range []string{Marker, ConventionReviewer, ConventionMerger} {
+		if !strings.Contains(review, want) {
+			t.Errorf("review.md missing %s:\n%s", want, review)
+		}
+	}
 
 	// 幂等：第二次运行不改变任何文件
 	before := map[string]string{}
@@ -149,6 +158,7 @@ func TestInstallCreatesArtifactsAndIsIdempotent(t *testing.T) {
 		filepath.Join(options.Dir, ManagedClaudePath()),
 		filepath.Join(options.Dir, ".mcp.json"),
 		filepath.Join(options.Dir, ".claude", "settings.json"),
+		filepath.Join(options.Dir, ManagedReviewPath()),
 		filepath.Join(options.Dir, "opencode.json"),
 		options.CodexConfigPath,
 	} {
@@ -208,6 +218,34 @@ func TestUninstallKeepsUserContent(t *testing.T) {
 	if _, err := os.Stat(options.CodexConfigPath); !os.IsNotExist(err) {
 		// codex 配置若只剩空内容会被删除
 		t.Log("codex config remains (contains user content?)")
+	}
+}
+
+// 评审约定文件是段落级托管：install 追加托管段落，卸载只摘该段落，用户自有
+// 约定（段落外）原样保留。
+func TestReviewConventionsPreserveUserContent(t *testing.T) {
+	options := testOptions(t)
+	options.Tools = []string{"claude"}
+	reviewPath := filepath.Join(options.Dir, ManagedReviewPath())
+	if err := os.MkdirAll(filepath.Dir(reviewPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(reviewPath, []byte("# 项目自有约定\n禁止修改对外 API\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Install(context.Background(), options); err != nil {
+		t.Fatalf("Install() error = %v", err)
+	}
+	content := readFile(t, reviewPath)
+	if !strings.Contains(content, "禁止修改对外 API") || !strings.Contains(content, Marker) {
+		t.Errorf("install 后 review.md = %s", content)
+	}
+	if err := Uninstall(context.Background(), options); err != nil {
+		t.Fatalf("Uninstall() error = %v", err)
+	}
+	content = readFile(t, reviewPath)
+	if !strings.Contains(content, "禁止修改对外 API") || strings.Contains(content, Marker) {
+		t.Errorf("uninstall 后 review.md = %s", content)
 	}
 }
 
@@ -479,7 +517,9 @@ func TestInstallRendersBoundTemplates(t *testing.T) {
 	if !strings.Contains(agents, "<!-- "+Marker+" -->") || !strings.Contains(agents, "<!-- /"+Marker+" -->") {
 		t.Errorf("AGENTS.md 缺少 marker 包裹：\n%s", agents)
 	}
-	for _, relative := range append([]string{ManagedSkillPath(), ManagedAgentPath(), ManagedClaudePath()}, ManagedWorkflowPaths()...) {
+	for _, relative := range append(
+		[]string{ManagedSkillPath(), ManagedAgentPath(), ManagedClaudePath(), ManagedReviewPath()},
+		ManagedWorkflowPaths()...) {
 		content := readFile(t, filepath.Join(options.Dir, relative))
 		if strings.Contains(content, "<<") || strings.Contains(content, ">>") {
 			t.Errorf("%s still contains template actions", relative)

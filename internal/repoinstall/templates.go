@@ -25,7 +25,10 @@ const DefaultSkillsSource = "Cosmic-Developers-Union/assistant"
 
 // 模板文件名（与 templates/ 目录内文件对应）。AGENTS.md 段落来自仓库根的
 // content/agents.md（维护者编写），不走这里。
-const workflowTemplateName = "workflow.yml.tmpl"
+const (
+	workflowTemplateName = "workflow.yml.tmpl"
+	reviewTemplateName   = "review.md.tmpl"
+)
 
 // ManagedSkillPath 返回 claude-code 的技能安装路径（skills CLI 的 agent 目录
 // 约定；opencode/codex 见 skillPathForTool）。
@@ -47,6 +50,11 @@ func ManagedAgentPath() string { return "AGENTS.md" }
 
 // ManagedClaudePath 是 Claude Code 的项目说明文件：内容稳定为 @AGENTS.md 导入。
 func ManagedClaudePath() string { return "CLAUDE.md" }
+
+// ManagedReviewPath 是项目内评审约定文件：评审会话把它作为附加 system 提示词
+// 注入（dispatcher 的 ReadReviewConventions），install 在文件内维护托管段落，
+// 用户自有的约定内容不受影响。
+func ManagedReviewPath() string { return ".assistant/review.md" }
 
 // ClaudeTemplate 是 CLAUDE.md 的规范内容（Claude Code 的 @ 导入语法）。
 const ClaudeTemplate = "@AGENTS.md\n"

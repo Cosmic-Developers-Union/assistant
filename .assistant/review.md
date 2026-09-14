@@ -1,0 +1,6 @@
+<!-- managed-by: assistant -->
+# 项目评审约定
+
+评审遵循 `.claude/skills/review/SKILL.md` 的协议，并遵守本文件的项目约定；内容/状态评审分别由 `ai` / `merge` 执行。
+项目自有约定（目录边界、必须通过的检查、兼容性要求等）写在托管段落之外，install 会保留。
+<!-- /managed-by: assistant -->

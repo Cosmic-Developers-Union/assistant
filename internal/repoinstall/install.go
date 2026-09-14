@@ -159,6 +159,13 @@ func Install(ctx context.Context, options Options) error {
 	if err := installClaudeMD(&options); err != nil {
 		return err
 	}
+	review, err := renderTemplate(reviewTemplateName, data)
+	if err != nil {
+		return err
+	}
+	if err := installSection(&options, filepath.Join(options.Dir, ManagedReviewPath()), wrapManagedSection(review)); err != nil {
+		return err
+	}
 	workflow, err := renderTemplate(workflowTemplateName, data)
 	if err != nil {
 		return err
@@ -205,6 +212,9 @@ func Uninstall(ctx context.Context, options Options) error {
 		return err
 	}
 	if err := uninstallClaudeMD(&options); err != nil {
+		return err
+	}
+	if err := uninstallSection(&options, filepath.Join(options.Dir, ManagedReviewPath())); err != nil {
 		return err
 	}
 	for _, relative := range ManagedWorkflowPaths() {

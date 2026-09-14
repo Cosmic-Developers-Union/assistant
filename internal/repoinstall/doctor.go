@@ -56,6 +56,7 @@ func Doctor(options Options) ([]Finding, error) {
 	findings := []Finding{
 		checkSection(&options, ManagedAgentPath(), wrapManagedSection(agents)),
 		checkClaudeMD(&options),
+		checkReviewFile(&options),
 	}
 	for _, relative := range ManagedWorkflowPaths() {
 		findings = append(findings, checkFile(&options, relative, workflow))
@@ -110,6 +111,35 @@ func checkSection(options *Options, relative, expected string) Finding {
 		return Finding{Path: relative, Status: StatusOK}
 	}
 	return Finding{Path: relative, Status: StatusOutdated, Detail: "assistant 段落与当前模板不一致"}
+}
+
+// checkReviewFile 检查 .assistant/review.md：缺托管段落、内容过期或用户自有。
+// 托管段落是 install 注入评审会话的默认约定；用户自有内容（段落外）不受影响。
+func checkReviewFile(options *Options) Finding {
+	path := filepath.Join(options.Dir, ManagedReviewPath())
+	existing, err := os.ReadFile(path)
+	switch {
+	case os.IsNotExist(err):
+		return Finding{Path: ManagedReviewPath(), Status: StatusMissing, Detail: "未安装"}
+	case err != nil:
+		return Finding{Path: ManagedReviewPath(), Status: StatusMissing, Detail: err.Error()}
+	}
+	text := string(existing)
+	if !strings.Contains(text, Marker) {
+		return Finding{Path: ManagedReviewPath(), Status: StatusUnmanaged, Detail: "已存在用户自有 review.md（未改动）"}
+	}
+	review, err := renderTemplate(reviewTemplateName, TemplateData{
+		Reviewer: options.Reviewer,
+		Merger:   options.Merger,
+		Image:    options.Image,
+	})
+	if err != nil {
+		return Finding{Path: ManagedReviewPath(), Status: StatusOutdated, Detail: err.Error()}
+	}
+	if !strings.Contains(text, strings.TrimSpace(review)) {
+		return Finding{Path: ManagedReviewPath(), Status: StatusOutdated, Detail: "托管段落与当前模板不一致"}
+	}
+	return Finding{Path: ManagedReviewPath(), Status: StatusOK}
 }
 
 // checkClaudeMD 检查 CLAUDE.md：缺导入行、被改写或用户自有。

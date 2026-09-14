@@ -263,6 +263,7 @@ assistant uninstall            # 移除 assistant 生成的内容
   落盘 `.claude/skills/review/`、`.agents/skills/review/`；
 - `AGENTS.md`：assistant 段落（内容源在 `content/agents.md`，追加，不覆盖用户已有内容）；
 - `CLAUDE.md`：Claude Code 的项目说明，内容稳定为 `@AGENTS.md` 导入（用户自有文件不覆盖）；
+- `.assistant/review.md`：项目评审约定（install 维护托管段落，段落外用户内容保留）；评审会话把它作为附加 system 提示词注入；
 - `.gitea/workflows/assistant.yml`：单文件两个 job——sync（内置令牌）与 automerge（merge 令牌）；旧版 `automerge.yml` 带 marker 时自动清理；
 - MCP：Claude（`.mcp.json` + `.claude/settings.json`：放行 `mcp__gitea*`、托管会话环境变量与只读命令白名单）、opencode（`opencode.json`，`gitea_*` 放行）、Codex（全局 `~/.codex/config.toml`，`approval_policy = "never"` 自动放行；若你已配置该键则保留）。zcode 暂不支持。
 
@@ -297,11 +298,13 @@ status/review PR ─────────────▶  review pr #N（起�
 status/triage     Issue ───────▶  triage issue #N                  ▶  status/triage 标签已移除
 ```
 
-- **PR 评审**在 `refs/pull/<N>/head` 的独立 worktree 里进行（默认 `<系统临时目录>/agent-dispatcher/worktrees/pr-<N>`，`--worktree-root` 可改），会话结束后移除；Issue 分诊会话的 cwd 是仓库主检出。
+- **会话工作区与当前目录解耦**：PR 评审在 `refs/pull/<N>/head` 的独立 worktree 里进行；Issue 分诊同样在基线 head 的 detach worktree 里跑。worktree 默认在 `<系统临时目录>/agent-dispatcher/<host>-<owner>-<repo>/worktrees/{pr,issue}-<N>`（`--worktree-root` 可改），会话结束立即移除——宿主检出只被 fetch/worktree 命令触碰，所有实验都在临时目录。
 - **评审标准锚定基线，PR 不可自改**：worktree 建成后立即以宿主检出的 `.claude/` 整体覆盖（skills、settings）——worktree 按 PR head 检出，随带的 `.claude` 是 PR 自己的版本，照单全收等于允许 PR 改弱自己被审的规则。宿主检出缺 `.claude/` 时拒绝起会话（fail-closed）。
-- **镜像同步（`--sync-mirror` / `DISPATCH_SYNC_MIRROR=1`，部署形态开启）**：每轮检测前把宿主检出强制对齐 `origin/<基线分支>`（`--base-branch` / `DISPATCH_BASE_BRANCH`，缺省 `main`）——`git fetch --prune origin` → `git checkout -f -B <基线> origin/<基线>` → `git clean -fd`，本地任何分叉一律丢弃；`.gitignore` 豁免的本地产物不受影响。同步失败跳过本轮等待重试。共享开发检出勿开启。
+- **受管克隆（config.json 模式）**：`instances[].repos` 未配置 `dir` 的仓库用受管克隆——落点 `<数据目录>/Cosmic-Developers-Union/assistant/repos/<host>/<owner>/<name>`（`XDG_DATA_HOME`，缺省 `~/.local/share`）。`run` 启动时缺失自动 `git clone`（用 reviewer/admin 令牌认证，origin 保持无凭据 URL），之后每轮检测前强制对齐 `origin/<基线分支>`（`--base-branch` / `DISPATCH_BASE_BRANCH`，缺省 `main`）——`git fetch --prune origin` → `git checkout -f -B <基线> origin/<基线>` → `git clean -fd`，任何本地分叉一律丢弃。日志与单飞锁在检出外的状态目录 `<数据目录>/.../state/<host>/<owner>/<name>/`，不会被 clean 波及。受管克隆要求仓库已提交 `assistant install` 产物（`.mcp.json`、`.claude/settings.json`），缺失时启动报错并提示先 install。
+- **镜像同步（显式 `dir` 的共享检出）**：`--sync-mirror` / `DISPATCH_SYNC_MIRROR=1` 开启后同样每轮强制对齐基线；受管克隆恒为开。共享开发检出勿开启。
 - **会话驱动**：`claude -p` 子进程，命令面与手工运维一致（`--permission-mode auto`、`--autocompact auto`、stream-json 输出）。无人值守必需项：`--strict-mcp-config --mcp-config` 从宿主仓库 `.mcp.json` 显式注入 gitea MCP，外加 `--max-turns` / abort 超时兜底 runaway 会话。
 - **独立会话配置**：每次会话在临时目录生成 `--settings`（同一份 env/权限放行，见上文 install 的托管键），并加 `--setting-sources project`（只加载项目级设置）、`--no-session-persistence`（不落会话历史）；**不读取也不写入任何用户级配置**（`~/.claude`）。需要 Claude Code 2.1+（`claude --help` 能看到这些参数；评审镜像安装的是 latest）。
+- **项目评审约定**：宿主基线检出的 `.assistant/review.md`（及其中的 install 托管段落）作为 `--append-system-prompt` 注入会话，PR 自带的版本不生效——与 `.claude/` 同口径，防止 PR 改弱自己被审的规则；内容上限 32000 字符，超出截断。
 - **进度两路落点**：控制台实时显示会话 init 与编号的工具调用；完整明细实时写待办日志——stdout 按 stream-json 逐行解析，assistant 文本原样、工具调用记 `🔧 名称`。
 - **一请求一会话，head 漂移即作废**：同一 instance+仓库+PR/Issue 同时至多一个会话；每个请求只拉起一个会话，完成（reviewer 已提交 review / triage 标签已移除）后在标签被 sync 收敛前不再重复拉起——连续 `@ai`、`/review` 不会造成重复会话。验证未过则本轮放行，等待下一轮检测；head 已被作者推进则本轮评审作废，下一轮以新 head 重开。
 - **有界并发（`--concurrency` / `DISPATCH_CONCURRENCY`，缺省 1）**：一轮待办至多同时跑 N 个会话；轮与轮之间是天然 barrier——同一 PR/Issue 同一时刻至多一个会话。
@@ -342,7 +345,7 @@ assistant triage <n>      立即分诊单个 Issue
 
 - **host 与仓库缺省从 remote 探测推导**（环境变量单实例模式）：按顺序检查各 remote（origin 优先），用 `/api/v1/version` 探测 Gitea 站点，GitHub/GitLab 等会被跳过；http(s) remote（如 `http://gitea.example.com:3000/owner/repo.git`）可完整推出 API 根地址与 owner/repo，ssh/scp remote 只可靠推出仓库（host 以 `http://<主机名>` 尽力猜测），探测不命中时用 `--host` / `GITEA_HOST` 显式指定。
 - 时长参数（`--interval` / `--timeout` 及对应 `DISPATCH_*_MS` 环境变量）接受 `30s` / `10m` / `1h` / `2d` 或毫秒裸数字。
-- 路径默认值锚定宿主检出根（`git rev-parse --show-toplevel`），与启动 cwd 无关：日志 `<检出根>/logs`、锁 `<检出根>/dispatcher.lock`；worktree 在系统临时目录（多仓库时按 `<owner>-<repo>` 隔离）。
+- 路径默认值：config.json 模式锚定受管路径（受管克隆 + 状态目录，见上文）；环境变量单实例模式与显式 `dir` 的共享检出锚定检出根（`git rev-parse --show-toplevel`，与启动 cwd 无关）：日志 `<检出根>/logs`、锁 `<检出根>/dispatcher.lock`；worktree 一律在系统临时目录（按 `<host>-<owner>-<repo>` 隔离）。
 - 其余环境变量：`DISPATCH_LOG_DIR`、`DISPATCH_WORKTREE_ROOT`、`DISPATCH_LOCK_FILE`、`DISPATCH_MODEL`、`DISPATCH_REVIEWER`、`DISPATCH_CLAUDE_BIN`。
 
 ### 访问令牌的作用

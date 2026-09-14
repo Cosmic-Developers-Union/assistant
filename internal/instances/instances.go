@@ -252,3 +252,73 @@ func DefaultConfigPath() (string, error) {
 	}
 	return filepath.Join(directory, "config.json"), nil
 }
+
+// DefaultRepoDir 返回受管克隆（基线检出）的默认落点：
+// <数据目录>/Cosmic-Developers-Union/assistant/repos/<host>/<owner>/<name>；
+// 未配置 repo.dir 的仓库在这里自动 clone 并保持与 origin/<base> 一致，run 与
+// 当前目录彻底解耦。数据目录取 XDG_DATA_HOME，缺省 ~/.local/share。
+func DefaultRepoDir(host, fullName string) (string, error) {
+	root, slug, owner, name, err := managedPathParts(host, fullName)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, "repos", slug, owner, name), nil
+}
+
+// DefaultRepoStateDir 返回受管仓库的状态目录（日志、单飞锁）：
+// <数据目录>/Cosmic-Developers-Union/assistant/state/<host>/<owner>/<name>；
+// 放在检出之外，避免被 SyncMirror 的 clean -fd 波及。
+func DefaultRepoStateDir(host, fullName string) (string, error) {
+	root, slug, owner, name, err := managedPathParts(host, fullName)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, "state", slug, owner, name), nil
+}
+
+func managedPathParts(host, fullName string) (root, slug, owner, name string, err error) {
+	home := strings.TrimSpace(os.Getenv("XDG_DATA_HOME"))
+	if home == "" {
+		userHome, homeErr := os.UserHomeDir()
+		if homeErr != nil {
+			return "", "", "", "", fmt.Errorf("定位用户目录: %w", homeErr)
+		}
+		home = filepath.Join(userHome, ".local", "share")
+	}
+	owner, name, err = ParseRepoName(fullName)
+	if err != nil {
+		return "", "", "", "", err
+	}
+	slug, err = HostSlug(host)
+	if err != nil {
+		return "", "", "", "", err
+	}
+	root = filepath.Join(home, configNamespace, configApp)
+	return root, slug, owner, name, nil
+}
+
+// HostSlug 把站点地址折成目录/路径名：去 scheme，保留 host[:port]，其余字符
+// 替换为 -（受管目录与 worktree 根共用）。
+func HostSlug(host string) (string, error) {
+	trimmed := strings.TrimSpace(host)
+	if !strings.Contains(trimmed, "://") {
+		trimmed = "https://" + trimmed
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Host == "" {
+		return "", fmt.Errorf("无法解析平台地址：%q", host)
+	}
+	var builder strings.Builder
+	for _, character := range parsed.Host {
+		switch {
+		case character >= 'a' && character <= 'z',
+			character >= 'A' && character <= 'Z',
+			character >= '0' && character <= '9',
+			character == '.', character == '-':
+			builder.WriteRune(character)
+		default:
+			builder.WriteRune('-')
+		}
+	}
+	return builder.String(), nil
+}

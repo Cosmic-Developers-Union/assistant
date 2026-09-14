@@ -64,8 +64,11 @@ reviewer（reviewer 已回应过时用 `@ai` / `@reviewer` 提及评论或行首
 - **reviewer 人员账号名称为 `ai`, 别名 `reviewer`；状态评审者（机械核验与会签）账号为 `merge`**
 - 所有 PR 提交变更前或更新前, 要求检查并 rebase origin/main
 - PR 中允许包含目标代码和相关的脚手架 (包括 AGENTS.md CLAUDE.md skills 等相关变动), review 不应阻止或要求单独 PR
-- 本地脚手架由 `assistant install` 统一管理（CLAUDE.md 的 `@AGENTS.md`、AGENTS.md 段落、skills、workflow、MCP 配置），
+- 本地脚手架由 `assistant install` 统一管理（CLAUDE.md 的 `@AGENTS.md`、AGENTS.md 段落、skills、workflow、MCP 配置、
+  `.claude/settings.json` 的 env/权限托管项、`.assistant/review.md` 的评审约定段落），
   生成内容不要手改；内容更新走 assistant 仓库的 `content/`、`skills/` 源文件
+- 项目评审约定写在 `.assistant/review.md`（托管段落之外）：评审会话会把它作为附加 system 提示词注入，
+  适合放目录边界、必须通过的检查、兼容性要求等项目特有规则
 
 ## Commit 检查清单
 

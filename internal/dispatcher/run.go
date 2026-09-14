@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -97,12 +98,16 @@ func BuildPrompt(kind string, number int64, ctx PromptContext) string {
 			headNote = fmt.Sprintf("（%s）", ctx.HeadSHA)
 		}
 		return fmt.Sprintf("review pr #%d\n\n对象：%s\n%s"+
-			"评审协议见 .claude/skills/review/SKILL.md，按其 PR 审查协议执行。仅处理该 PR，不要处理其他待办。\n"+
+			"评审协议见 .claude/skills/review/SKILL.md，按其 PR 审查协议执行；"+
+			"项目评审约定（.assistant/review.md，如存在）已作为附加 system 提示词给出，一并遵守。\n"+
+			"仅处理该 PR，不要处理其他待办。"+
 			"最终以 Gitea 原生 Pull Request Review 提交结论（APPROVED / REQUEST_CHANGES / COMMENT），"+
 			"结论正文注明所评审的 head%s。", number, subject, headLine, headNote)
 	}
 	return fmt.Sprintf("triage issue #%d\n\n对象：%s\n"+
-		"分诊规则见 .claude/skills/review/SKILL.md，按其 Issue 分诊规则执行。仅处理该 Issue，不要处理其他待办。\n"+
+		"分诊规则见 .claude/skills/review/SKILL.md，按其 Issue 分诊规则执行；"+
+		"项目评审约定（.assistant/review.md，如存在）已作为附加 system 提示词给出，一并遵守。\n"+
+		"仅处理该 Issue，不要处理其他待办。\n"+
 		"结论按 AGENTS.md 的标签规则落标签并评论。", number, subject)
 }
 
@@ -231,7 +236,38 @@ type SessionOptions struct {
 	// SettingsPath 是独立会话配置（--settings）的路径：由 RunSession 生成，调用
 	// 方无需填写（测试可预置固定路径）
 	SettingsPath string
-	OnProgress   func(string)
+	// ProjectDir 是宿主基线检出根：存在 <ProjectDir>/.assistant/review.md 时，
+	// 其内容作为附加 system 提示词（--append-system-prompt）注入会话
+	ProjectDir string
+	// AppendSystemPrompt 是显式附加 system 提示词（测试用；缺省由 ProjectDir
+	// 的 .assistant/review.md 提供）
+	AppendSystemPrompt string
+	OnProgress         func(string)
+}
+
+// ReviewConventionsLimit 是 .assistant/review.md 注入会话的上限（字符数），
+// 超出部分截断，避免超长文件挤占上下文。
+const ReviewConventionsLimit = 32_000
+
+// ReadReviewConventions 读取项目评审约定（<project-root>/.assistant/review.md），
+// 作为附加 system 提示词注入会话；文件缺失或为空返回空串。只读基线检出，
+// PR 自带的版本不生效（与 .claude/ 的钉定口径一致）。
+func ReadReviewConventions(projectDir string) string {
+	if projectDir == "" {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(projectDir, ".assistant", "review.md"))
+	if err != nil {
+		return ""
+	}
+	text := strings.TrimSpace(string(data))
+	if text == "" {
+		return ""
+	}
+	if runes := []rune(text); len(runes) > ReviewConventionsLimit {
+		text = string(runes[:ReviewConventionsLimit]) + "\n\n（.assistant/review.md 过长，已截断）"
+	}
+	return text
 }
 
 // sessionCommand 组装会话命令：缺省直接跑 claude；Config.DockerImage 非空时
@@ -262,6 +298,9 @@ func sessionCommand(options SessionOptions) (bin string, args []string, containe
 	}
 	if options.SettingsPath != "" {
 		claudeArgs = append(claudeArgs, "--settings", options.SettingsPath)
+	}
+	if options.AppendSystemPrompt != "" {
+		claudeArgs = append(claudeArgs, "--append-system-prompt", options.AppendSystemPrompt)
 	}
 	if config.Model != "" {
 		claudeArgs = append(claudeArgs, "--model", config.Model)
@@ -327,6 +366,11 @@ func RunSession(options SessionOptions) SessionOutcome {
 	config := options.Config
 	startedAt := time.Now()
 	outcome := NewSessionOutcome()
+
+	// 项目内约定：.assistant/review.md 作为附加 system 提示词（基线版本）
+	if options.AppendSystemPrompt == "" {
+		options.AppendSystemPrompt = ReadReviewConventions(options.ProjectDir)
+	}
 
 	// 独立会话配置写临时目录：环境变量与权限放行随二进制版本走，不依赖仓库
 	// 状态与操作者用户配置

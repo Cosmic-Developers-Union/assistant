@@ -14,7 +14,14 @@ import (
 )
 
 func runGit(repoDir string, args ...string) (string, error) {
+	return runGitEnv(repoDir, nil, args...)
+}
+
+// runGitEnv 是带额外环境变量的 git 调用：受管克隆用 gitTokenEnv 注入站点令牌
+// （http.extraHeader），凭据不写入 .git/config。
+func runGitEnv(repoDir string, env []string, args ...string) (string, error) {
 	command := exec.Command("git", append([]string{"-C", repoDir}, args...)...)
+	command.Env = append(os.Environ(), env...)
 	var stdout, stderr strings.Builder
 	command.Stdout = &stdout
 	command.Stderr = &stderr
@@ -28,19 +35,63 @@ func runGit(repoDir string, args ...string) (string, error) {
 	return stdout.String(), nil
 }
 
+// gitTokenEnv 让 git 子进程以站点令牌认证（Authorization header），只作用于
+// 本次命令：令牌不落 .git/config，也不出现在 URL/进程参数里。
+func gitTokenEnv(token string) []string {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil
+	}
+	return []string{
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=http.extraHeader",
+		"GIT_CONFIG_VALUE_0=Authorization: token " + token,
+		"GIT_TERMINAL_PROMPT=0",
+	}
+}
+
+// EnsureRepo 确保受管克隆存在：目录里没有 .git 时按 host/owner/name 克隆
+// （origin 保持无凭据 URL，fetch 时按需注入令牌），返回是否新建。已存在时不
+// 做任何同步（由 run 循环的 SyncMirror 负责，保持与 origin/<base> 一致）。
+func EnsureRepo(dir, host, fullName, token string) (bool, error) {
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+		return false, nil
+	}
+	if entries, err := os.ReadDir(dir); err == nil && len(entries) > 0 {
+		return false, fmt.Errorf("受管克隆落点已被占用（非 git 检出）：%s", dir)
+	}
+	url := strings.TrimRight(strings.TrimSpace(host), "/") + "/" + fullName + ".git"
+	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+		return false, fmt.Errorf("创建克隆目录: %w", err)
+	}
+	command := exec.Command("git", "clone", "--quiet", url, dir)
+	command.Env = append(os.Environ(), gitTokenEnv(token)...)
+	var stderr strings.Builder
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil {
+		message := strings.TrimSpace(stderr.String())
+		if message == "" {
+			message = err.Error()
+		}
+		return false, fmt.Errorf("克隆 %s: %s", url, message)
+	}
+	return true, nil
+}
+
 // SyncMirror 把宿主检出强制对齐 origin 基线分支：fetch --prune → checkout -f -B
 // → clean -fd。检出是评审标准（.claude/）与 Issue 分诊会话的数据源，必须精确
 // 镜像基线——本地任何分叉（提交、切分支、未跟踪杂物）一律丢弃；clean 不带 -x，
 // .gitignore 豁免的本地产物（node_modules/logs/lock）不受影响。checkout 用 -f
 // 是为了让脏树也能完成切换，不用先人工收拾。返回对齐后的基线短 sha。
-func SyncMirror(repoDir, baseBranch string) (string, error) {
-	if _, err := runGit(repoDir, "fetch", "--prune", "origin"); err != nil {
+func SyncMirror(repoDir, baseBranch, token string) (string, error) {
+	env := gitTokenEnv(token)
+	if _, err := runGitEnv(repoDir, env, "fetch", "--prune", "origin"); err != nil {
 		return "", err
 	}
-	if _, err := runGit(repoDir, "checkout", "-f", "-B", baseBranch, "origin/"+baseBranch); err != nil {
+	if _, err := runGitEnv(repoDir, env, "checkout", "-f", "-B", baseBranch, "origin/"+baseBranch); err != nil {
 		return "", err
 	}
-	if _, err := runGit(repoDir, "clean", "-fd"); err != nil {
+	if _, err := runGitEnv(repoDir, env, "clean", "-fd"); err != nil {
 		return "", err
 	}
 	stdout, err := runGit(repoDir, "rev-parse", "--short", "HEAD")
@@ -69,9 +120,33 @@ func PinStandard(repoDir, worktreeDir string) error {
 // Gitea 为每个 PR 暴露 refs/pull/<n>/head（跨 fork 一律存在），fetch 后以
 // FETCH_HEAD 建检出；目录已存在（上次崩溃残留）时先强制移除再重建。
 // 检出后立即以宿主检出的 .claude/ 覆盖（评审标准锚定基线，见 PinStandard）。
-func PrepareWorktree(repoDir string, pullNumber int64, worktreeDir string) (string, error) {
+func PrepareWorktree(repoDir string, pullNumber int64, worktreeDir, token string) (string, error) {
 	ref := fmt.Sprintf("refs/pull/%d/head", pullNumber)
-	if _, err := runGit(repoDir, "fetch", "--quiet", "origin", ref); err != nil {
+	if _, err := runGitEnv(repoDir, gitTokenEnv(token), "fetch", "--quiet", "origin", ref); err != nil {
+		return "", err
+	}
+	stdout, err := runGit(repoDir, "rev-parse", "FETCH_HEAD")
+	if err != nil {
+		return "", err
+	}
+	headSHA := strings.TrimSpace(stdout)
+	if err := RemoveWorktree(repoDir, worktreeDir); err != nil {
+		return "", err
+	}
+	if _, err := runGit(repoDir, "worktree", "add", "--quiet", "--detach", worktreeDir, headSHA); err != nil {
+		return "", err
+	}
+	if err := PinStandard(repoDir, worktreeDir); err != nil {
+		return "", err
+	}
+	return headSHA, nil
+}
+
+// PrepareBaselineWorktree 以基线分支的远端 head 建 detach worktree（Issue
+// 分诊会话的隔离工作区，与 PR 会话同口径：workspace 在 /tmp，基线检出
+// 只被 fetch/worktree 命令触碰）。评审标准同样锚定宿主基线（PinStandard）。
+func PrepareBaselineWorktree(repoDir, baseBranch, worktreeDir, token string) (string, error) {
+	if _, err := runGitEnv(repoDir, gitTokenEnv(token), "fetch", "--quiet", "origin", baseBranch); err != nil {
 		return "", err
 	}
 	stdout, err := runGit(repoDir, "rev-parse", "FETCH_HEAD")

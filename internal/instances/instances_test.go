@@ -142,3 +142,29 @@ func TestRepoJSONShapes(t *testing.T) {
 		t.Errorf("encoded = %s", encoded)
 	}
 }
+
+// 受管克隆/状态目录与 run 的当前目录解耦：落在数据目录下，按站点与仓库分层。
+func TestDefaultManagedPaths(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	data := os.Getenv("XDG_DATA_HOME")
+
+	repoDir, err := DefaultRepoDir("https://gitea.example.com", "acme/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(data, "Cosmic-Developers-Union", "assistant", "repos", "gitea.example.com", "acme", "repo")
+	if repoDir != want {
+		t.Errorf("DefaultRepoDir() = %q, want %q", repoDir, want)
+	}
+	stateDir, err := DefaultRepoStateDir("https://gitea.example.com:3000", "acme/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = filepath.Join(data, "Cosmic-Developers-Union", "assistant", "state", "gitea.example.com-3000", "acme", "repo")
+	if stateDir != want {
+		t.Errorf("DefaultRepoStateDir() = %q, want %q", stateDir, want)
+	}
+	if _, err := DefaultRepoDir("https://gitea.example.com", "bad-name"); err == nil {
+		t.Error("非法仓库名应报错")
+	}
+}

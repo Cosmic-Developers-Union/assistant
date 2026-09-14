@@ -27,7 +27,7 @@ func TestDoctorDetectsConfigurationDrift(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Doctor() error = %v", err)
 	}
-	for _, path := range []string{ManagedSkillPath(), ManagedAgentPath(), ManagedClaudePath(), ManagedWorkflowPaths()[0], ".mcp.json", "opencode.json", options.CodexConfigPath} {
+	for _, path := range []string{ManagedSkillPath(), ManagedAgentPath(), ManagedClaudePath(), ManagedReviewPath(), ManagedWorkflowPaths()[0], ".mcp.json", "opencode.json", options.CodexConfigPath} {
 		if status := statusOf(t, findings, path); status != StatusMissing {
 			t.Errorf("未安装时 %s 状态 = %s, want missing", path, status)
 		}
@@ -64,6 +64,10 @@ func TestDoctorDetectsConfigurationDrift(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(options.Dir, ManagedClaudePath()), []byte("# user claude\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// review.md 被替换为用户自有（无 marker）→ unmanaged
+	if err := os.WriteFile(filepath.Join(options.Dir, ManagedReviewPath()), []byte("# user review\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	// 旧版 automerge.yml（带 marker）→ legacy
 	legacyPath := filepath.Join(options.Dir, LegacyWorkflowPaths()[0])
 	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
@@ -98,6 +102,7 @@ func TestDoctorDetectsConfigurationDrift(t *testing.T) {
 		ManagedWorkflowPaths()[0]: StatusMissing,
 		ManagedAgentPath():        StatusUnmanaged,
 		ManagedClaudePath():       StatusUnmanaged,
+		ManagedReviewPath():       StatusUnmanaged,
 		LegacyWorkflowPaths()[0]:  StatusLegacy,
 		"opencode.json":           StatusOutdated,
 		".claude/settings.json":   StatusOutdated,

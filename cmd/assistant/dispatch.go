@@ -44,6 +44,14 @@ type dispatchTarget struct {
 	config   dispatcher.Config
 	client   *status.Client
 	repoDir  string
+	// managed 表示 repoDir 是默认受管克隆：缺失时自动 clone，运行期间每轮强制
+	// 对齐 origin 基线（config.SyncMirror 对受管克隆恒为开）
+	managed bool
+}
+
+// targetToken 返回操作该仓库的令牌：评审者令牌优先，退回实例管理员令牌。
+func targetToken(instance instances.Instance) string {
+	return firstNonEmpty(instance.Reviewer.Token, instance.AdminToken)
 }
 
 // newDispatcherCommands 构造调度引擎子命令：run（常驻）/ list（只读列出）/
@@ -253,10 +261,6 @@ func resolveDispatchTargets(
 		return []dispatchTarget{{config: config, client: client, repoDir: repoDir}}, nil
 	}
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		return nil, fmt.Errorf("获取当前目录: %w", err)
-	}
 	var targets []dispatchTarget
 	var skipped []string
 	matchedFilter := repoFlag == ""
@@ -281,7 +285,7 @@ func resolveDispatchTargets(
 			continue
 		}
 		for _, repo := range repos {
-			target, err := resolveInstanceTarget(command, instance, repo, cwd, options)
+			target, err := resolveInstanceTarget(command, instance, repo, options)
 			if err != nil {
 				return nil, err
 			}
@@ -302,32 +306,56 @@ func resolveDispatchTargets(
 	return targets, nil
 }
 
+// resolveInstanceTarget 解析 (instance, repo) 的运行上下文：repo.dir 缺省时用
+// 受管克隆落点（<数据目录>/…/repos/<host>/<owner>/<name>），与当前目录解耦；
+// 日志/锁同样落在检出之外的状态目录，避免被基线对齐的 clean -fd 波及。
 func resolveInstanceTarget(
 	command *cobra.Command,
 	instance instances.Instance,
 	repo instances.Repo,
-	cwd string,
 	options *dispatcherOptions,
 ) (dispatchTarget, error) {
-	repoDir := repo.Dir
-	if repoDir == "" {
-		// 单仓库且未配置 dir：沿用启动目录的检出（历史行为）；多仓库必须显式配置
-		repoDir = cwd
-		if root, ok := dispatcher.RepoRoot(cwd); ok {
-			repoDir = root
+	repoDir := strings.TrimSpace(repo.Dir)
+	managed := repoDir == ""
+	if managed {
+		defaultDir, err := instances.DefaultRepoDir(instance.Host, repo.Name)
+		if err != nil {
+			return dispatchTarget{}, fmt.Errorf("定位 %s 的默认仓库目录: %w", repo.Name, err)
 		}
+		repoDir = defaultDir
 	}
 	flags := dispatcherFlags(command, repo.Name, options)
 	flags.Host = instance.Host
 	flags.Repository = repo.Name
-	flags.AccessToken = firstNonEmpty(instance.Reviewer.Token, instance.AdminToken)
+	flags.AccessToken = targetToken(instance)
 	if flags.Reviewer == "" {
 		flags.Reviewer = instance.Reviewer.Name
 	}
+	if managed {
+		// 受管克隆必须随时与 origin/<基线> 一致：恒开镜像同步（配置预览也如实
+		// 反映）；显式 dir 的共享检出仍由 --sync-mirror 控制
+		value := true
+		flags.SyncMirror = &value
+		stateDir, err := instances.DefaultRepoStateDir(instance.Host, repo.Name)
+		if err != nil {
+			return dispatchTarget{}, fmt.Errorf("定位 %s 的状态目录: %w", repo.Name, err)
+		}
+		if flags.LogDir == "" {
+			flags.LogDir = filepath.Join(stateDir, "logs")
+		}
+		if flags.LockFile == "" {
+			flags.LockFile = filepath.Join(stateDir, "dispatcher.lock")
+		}
+	}
 	if flags.WorktreeRoot == "" && strings.TrimSpace(os.Getenv("DISPATCH_WORKTREE_ROOT")) == "" {
-		// 多仓库共用同一 worktree 根会撞 `pr-<N>` 目录名，按仓库隔离
+		// 多仓库共用同一 worktree 根会撞 `pr-<N>` 目录名：按仓库（含站点）隔离
+		slug, err := instances.HostSlug(instance.Host)
+		if err != nil {
+			return dispatchTarget{}, err
+		}
 		flags.WorktreeRoot = filepath.Join(
-			os.TempDir(), "agent-dispatcher", strings.ReplaceAll(repo.Name, "/", "-"), "worktrees",
+			os.TempDir(), "agent-dispatcher",
+			slug+"-"+strings.ReplaceAll(repo.Name, "/", "-"), "worktrees",
 		)
 	}
 	config, err := dispatcher.ResolveConfig(flags, repoDir, os.Getenv, func() (dispatcher.GitRemote, bool) {
@@ -340,7 +368,14 @@ func resolveInstanceTarget(
 	if err != nil {
 		return dispatchTarget{}, err
 	}
-	return dispatchTarget{instance: instance, repo: repo, config: config, client: client, repoDir: repoDir}, nil
+	return dispatchTarget{
+		instance: instance,
+		repo:     repo,
+		config:   config,
+		client:   client,
+		repoDir:  repoDir,
+		managed:  managed,
+	}, nil
 }
 
 // checkTargetsHealth 在 run 启动前逐 instance 检查服务可用性（版本端点 + 各
@@ -404,20 +439,45 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-// requireRepoDirs 多仓库时每个仓库都必须有本地检出：共用启动目录会让多个循环
-// 抢同一把锁、同一批 worktree。
-func requireRepoDirs(targets []dispatchTarget) error {
-	if len(targets) <= 1 {
-		return nil
-	}
-	var missing []string
+// previewManagedTargets 是 ensureManagedTargets 的 dry-run 版本：只说明将克隆/
+// 对齐基线的动作，不触碰文件系统与网络。
+func previewManagedTargets(command *cobra.Command, targets []dispatchTarget) {
 	for _, target := range targets {
-		if target.repo.Dir == "" {
-			missing = append(missing, target.repo.Name)
+		if !target.managed {
+			continue
 		}
+		if _, err := os.Stat(filepath.Join(target.repoDir, ".git")); err != nil {
+			fmt.Fprintf(command.ErrOrStderr(), "dry-run：将克隆 %s → %s\n", target.repo.Name, target.repoDir)
+			continue
+		}
+		fmt.Fprintf(command.ErrOrStderr(), "dry-run：检测轮前将把 %s 对齐 origin/%s\n",
+			target.repo.Name, target.config.BaseBranch)
 	}
-	if len(missing) > 0 {
-		return fmt.Errorf("多仓库运行需在 config.json 为每个仓库配置本地检出 dir：%s", strings.Join(missing, ", "))
+}
+
+// ensureManagedTargets 确保受管克隆存在（缺失时按平台/仓库 clone），并检查
+// 仓库内已具备运行所需约定（assistant install 产物）；非受管检出（显式 dir）
+// 不做任何触碰。
+func ensureManagedTargets(command *cobra.Command, targets []dispatchTarget) error {
+	for _, target := range targets {
+		if !target.managed {
+			continue
+		}
+		cloned, err := dispatcher.EnsureRepo(
+			target.repoDir, target.instance.Host, target.repo.Name, targetToken(target.instance))
+		if err != nil {
+			return err
+		}
+		if cloned {
+			fmt.Fprintf(command.ErrOrStderr(), "已克隆 %s → %s\n", target.repo.Name, target.repoDir)
+		}
+		for _, relative := range []string{".mcp.json", filepath.Join(".claude", "settings.json")} {
+			if _, err := os.Stat(filepath.Join(target.repoDir, relative)); err != nil {
+				return fmt.Errorf(
+					"%s 缺少 %s：先在仓库检出运行 `assistant install` 并提交该文件",
+					target.repo.Name, relative)
+			}
+		}
 	}
 	return nil
 }
@@ -431,6 +491,7 @@ func dispatchLogger(w io.Writer) func(string) {
 func newDispatchDeps(target dispatchTarget, w io.Writer) dispatcher.Deps {
 	config := target.config
 	repoDir := target.repoDir
+	token := targetToken(target.instance)
 	deps := dispatcher.Deps{
 		Config:  config,
 		API:     target.client,
@@ -445,7 +506,10 @@ func newDispatchDeps(target dispatchTarget, w io.Writer) dispatcher.Deps {
 		},
 		PrepareWorktree: func(pullNumber int64) (string, error) {
 			worktreeDir := filepath.Join(config.WorktreeRoot, fmt.Sprintf("pr-%d", pullNumber))
-			return dispatcher.PrepareWorktree(repoDir, pullNumber, worktreeDir)
+			return dispatcher.PrepareWorktree(repoDir, pullNumber, worktreeDir, token)
+		},
+		PrepareIssue: func(worktreeDir string) (string, error) {
+			return dispatcher.PrepareBaselineWorktree(repoDir, config.BaseBranch, worktreeDir, token)
 		},
 		RemoveWorktree: func(dir string) error {
 			return dispatcher.RemoveWorktree(repoDir, dir)
@@ -456,13 +520,16 @@ func newDispatchDeps(target dispatchTarget, w io.Writer) dispatcher.Deps {
 				Prompt:        prompt,
 				Cwd:           cwd,
 				MCPConfigPath: filepath.Join(repoDir, ".mcp.json"),
+				ProjectDir:    repoDir,
 				OnProgress:    onProgress,
 			})
 		},
 	}
-	if config.SyncMirror {
+	// 受管克隆每个检测轮前强制对齐 origin/<base>；显式 dir 的共享检出只在
+	// --sync-mirror 显式开启时对齐
+	if config.SyncMirror || target.managed {
 		deps.SyncMirror = func() (string, error) {
-			return dispatcher.SyncMirror(repoDir, config.BaseBranch)
+			return dispatcher.SyncMirror(repoDir, config.BaseBranch, token)
 		}
 	}
 	return deps
@@ -473,7 +540,10 @@ func runDispatchLoop(command *cobra.Command, repoFlag, configPath string, option
 	if err != nil {
 		return err
 	}
-	if err := requireRepoDirs(targets); err != nil {
+	// dry-run 零副作用：受管克隆只提示将发生的动作，不 clone/不 fetch
+	if options.DryRun {
+		previewManagedTargets(command, targets)
+	} else if err := ensureManagedTargets(command, targets); err != nil {
 		return err
 	}
 	log := dispatchLogger(command.OutOrStdout())
@@ -540,14 +610,17 @@ func runDispatchOneShot(
 		return fmt.Errorf("匹配到 %d 个仓库，请用 --repo owner/name 指定要处理的仓库", len(targets))
 	}
 	target := targets[0]
+	if err := ensureManagedTargets(command, targets); err != nil {
+		return err
+	}
 	config := target.config
 	log := dispatchLogger(command.OutOrStdout())
 	// 一次性命令同样亮明身份：review 以该账号落库
 	if login, err := target.client.AuthenticatedUser(command.Context()); err == nil {
 		log(fmt.Sprintf("当前账户：@%s（reviewer=%s）", login, config.Reviewer))
 	}
-	if config.SyncMirror {
-		if _, err := dispatcher.SyncMirror(target.repoDir, config.BaseBranch); err != nil {
+	if config.SyncMirror || target.managed {
+		if _, err := dispatcher.SyncMirror(target.repoDir, config.BaseBranch, targetToken(target.instance)); err != nil {
 			return err
 		}
 	}
