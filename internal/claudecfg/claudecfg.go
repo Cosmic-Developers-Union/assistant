@@ -66,6 +66,45 @@ func (o Overrides) Counts() (env, settings, mcp int) {
 	return len(o.Env), len(o.Settings), len(o.MCP)
 }
 
+// ComposeOverrides 叠加两层覆盖（high 优先，例如 provider 覆盖全局优化点）：
+// env 逐键合并、settings 走同一套浅合并规则、mcp 同名由 high 覆盖。
+func ComposeOverrides(low, high Overrides) Overrides {
+	if low.Empty() {
+		return high
+	}
+	if high.Empty() {
+		return low
+	}
+	composed := Overrides{}
+	if len(low.Env) > 0 || len(high.Env) > 0 {
+		env := make(map[string]string, len(low.Env)+len(high.Env))
+		for key, value := range low.Env {
+			env[key] = value
+		}
+		for key, value := range high.Env {
+			env[key] = value
+		}
+		composed.Env = env
+	}
+	if len(low.Settings) > 0 || len(high.Settings) > 0 {
+		settings := map[string]any{}
+		mergeSettings(settings, low.Settings)
+		mergeSettings(settings, high.Settings)
+		composed.Settings = settings
+	}
+	if len(low.MCP) > 0 || len(high.MCP) > 0 {
+		servers := make(map[string]any, len(low.MCP)+len(high.MCP))
+		for name, server := range low.MCP {
+			servers[name] = server
+		}
+		for name, server := range high.MCP {
+			servers[name] = server
+		}
+		composed.MCP = servers
+	}
+	return composed
+}
+
 // SessionSettingsMap 生成 headless 会话的完整设置视图：托管 env/权限默认，
 // 叠加 provider 覆盖，extraAllow 追加到权限放行（调用方自有工具面）。
 func SessionSettingsMap(overrides Overrides, extraAllow ...string) map[string]any {

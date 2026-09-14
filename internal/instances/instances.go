@@ -39,6 +39,10 @@ type File struct {
 	// DefaultProvider 是未在 repo/instance/weixin 指定时的兜底 provider 名；
 	// 留空表示内置缺省（无覆盖）。
 	DefaultProvider string `json:"default_provider,omitempty"`
+	// Optimizations 是全局优化点（env/settings/mcp 同 provider 形态）：对所有
+	// 会话生效，选中 provider 的同名覆盖其上；适合放跨供应商通用的调优
+	// （时长、上下文窗口、遥测开关等）。
+	Optimizations Provider `json:"optimizations,omitempty"`
 }
 
 // Weixin 是微信对话桥（Tencent/openclaw-weixin 兼容 ilink 协议）的配置。
@@ -324,6 +328,7 @@ func Save(path string, file *File) error {
 // Normalize 填充默认值并清理空白，幂等。
 func (f *File) Normalize() {
 	f.DefaultProvider = strings.TrimSpace(f.DefaultProvider)
+	f.Optimizations = f.Optimizations.normalized()
 	if len(f.Providers) > 0 {
 		normalized := make(map[string]Provider, len(f.Providers))
 		for name, provider := range f.Providers {
@@ -359,7 +364,7 @@ func (p Provider) normalized() Provider {
 // Validate 校验 provider 定义（必须在 Normalize 之后调用）。
 func (p Provider) Validate(name string) error {
 	for key := range p.Env {
-		if strings.ContainsAny(key, "=\x00") {
+		if strings.ContainsAny(key, "=\x00 \t\n\r") {
 			return fmt.Errorf("providers[%s].env 含非法键名：%q", name, key)
 		}
 	}
@@ -437,6 +442,9 @@ func (f *File) Validate() error {
 // validateProviders 校验 providers 定义与所有 provider 引用（含 default_provider、
 // instance、repo、weixin）：引用不存在的名字视为配置错误，避免静默用错供应商。
 func (f *File) validateProviders() error {
+	if err := f.Optimizations.Validate("optimizations"); err != nil {
+		return err
+	}
 	for name, provider := range f.Providers {
 		if name == "" {
 			return fmt.Errorf("providers 含空名字")
@@ -515,6 +523,12 @@ func (f *File) LookupProvider(name string) Provider {
 		return Provider{}
 	}
 	return f.Providers[name]
+}
+
+// EffectiveOverrides 返回实体生效的运行时覆盖：全局 optimizations 打底，选中
+// provider（repo > instance > 全局默认）覆盖其上。
+func (f *File) EffectiveOverrides(providerName string) claudecfg.Overrides {
+	return claudecfg.ComposeOverrides(f.Optimizations.Overrides(), f.LookupProvider(providerName).Overrides())
 }
 
 // Validate 校验单个 instance。必须在 Normalize 之后调用。

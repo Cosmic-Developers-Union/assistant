@@ -205,18 +205,28 @@ func startDaemonServices(
 	if strings.TrimSpace(weixinConfig.BotToken) == "" {
 		return fmt.Errorf("weixin.bot_token 未配置：先 assistant weixin login")
 	}
-	// 对话会话与评审会话共用同一 provider 体系：weixin.provider > 全局默认
+	// 对话会话与评审会话共用同一 provider 体系：weixin.provider > 全局默认；
+	// 全局 optimizations 打底，provider 覆盖其上
 	providerName := file.WeixinProviderName()
-	provider := file.LookupProvider(providerName)
-	if providerName != "" {
-		env, settings, mcp := provider.Overrides().Counts()
-		logf("微信桥使用 provider %s（env %d 项，settings %d 项，mcp %d 个）", providerName, env, settings, mcp)
+	provider := file.EffectiveOverrides(providerName)
+	if env, settings, mcp := provider.Counts(); env+settings+mcp > 0 {
+		name := providerName
+		if name == "" {
+			name = "内置缺省"
+		}
+		globalEnv, globalSettings, globalMCP := file.Optimizations.Overrides().Counts()
+		global := ""
+		if globalEnv+globalSettings+globalMCP > 0 {
+			global = fmt.Sprintf("（含全局优化 env %d 项，settings %d 项，mcp %d 个）",
+				globalEnv, globalSettings, globalMCP)
+		}
+		logf("微信桥使用 provider %s（env %d 项，settings %d 项，mcp %d 个）%s", name, env, settings, mcp, global)
 	}
 	timeout := time.Duration(weixinConfig.SessionTimeoutMS) * time.Millisecond
 	chat, err := daemon.NewChat(daemon.ChatConfig{
 		ClaudeBin:    firstNonEmpty(weixinConfig.ClaudeBin, options.ClaudeBin),
 		Model:        firstNonEmpty(weixinConfig.Model, options.Model),
-		Provider:     provider.Overrides(),
+		Provider:     provider,
 		ProviderName: providerName,
 		Timeout:      timeout,
 		Log:          logf,

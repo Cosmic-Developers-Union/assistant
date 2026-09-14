@@ -288,3 +288,49 @@ func TestConfigExampleLoads(t *testing.T) {
 		t.Fatalf("config.example.json 无法加载：%v", err)
 	}
 }
+
+// 全局优化点（optimizations）与 provider 的叠加：provider 覆盖全局同名取值，
+// 未重叠部分保留；两者都为空时返回零值。
+func TestEffectiveOverridesComposition(t *testing.T) {
+	file := &File{
+		DefaultProvider: "gateway",
+		Optimizations: Provider{
+			Env:      map[string]string{"CLAUDE_CODE_EFFORT_LEVEL": "high", "DISABLE_TELEMETRY": "1"},
+			Settings: map[string]any{"model": "global-model"},
+			MCP:      map[string]any{"search": map[string]any{"command": "global-search"}},
+		},
+		Providers: map[string]Provider{
+			"gateway": {
+				Env:      map[string]string{"ANTHROPIC_AUTH_TOKEN": "token", "CLAUDE_CODE_EFFORT_LEVEL": "max"},
+				Settings: map[string]any{"apiKeyHelper": "/bin/echo key"},
+			},
+		},
+		Instances: []Instance{{Host: "https://gitea.example.com", Repos: []Repo{{Name: "owner/repo"}}}},
+	}
+	file.Normalize()
+	if err := file.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	overrides := file.EffectiveOverrides("gateway")
+	if overrides.Env["DISABLE_TELEMETRY"] != "1" || overrides.Env["ANTHROPIC_AUTH_TOKEN"] != "token" {
+		t.Errorf("Env = %+v", overrides.Env)
+	}
+	if overrides.Env["CLAUDE_CODE_EFFORT_LEVEL"] != "max" {
+		t.Errorf("provider 应覆盖全局同名 env：%+v", overrides.Env)
+	}
+	if overrides.Settings["model"] != "global-model" || overrides.Settings["apiKeyHelper"] != "/bin/echo key" {
+		t.Errorf("Settings = %+v", overrides.Settings)
+	}
+	if _, ok := overrides.MCP["search"]; !ok {
+		t.Errorf("全局 mcp server 应保留：%+v", overrides.MCP)
+	}
+	if empty := (&File{}).EffectiveOverrides(""); !empty.Empty() {
+		t.Errorf("空配置应为空覆盖：%+v", empty)
+	}
+	// 全局优化点非法 env 值同样在校验期报错
+	bad := &File{Optimizations: Provider{Env: map[string]string{"A B": "x"}}, Instances: []Instance{{Host: "https://a.example.com"}}}
+	bad.Normalize()
+	if err := bad.Validate(); err == nil {
+		t.Error("非法 env 键名应报错")
+	}
+}

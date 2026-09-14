@@ -424,8 +424,9 @@ func resolveInstanceTarget(
 		return dispatchTarget{}, err
 	}
 	providerName := file.ProviderName(&instance, &repo)
-	config.Provider = file.LookupProvider(providerName).Overrides()
+	config.Provider = file.EffectiveOverrides(providerName)
 	config.ProviderName = providerName
+	config.Optimizations = file.Optimizations.Overrides()
 	client, err := newDispatchClient(config)
 	if err != nil {
 		return dispatchTarget{}, err
@@ -505,13 +506,22 @@ func firstNonEmpty(values ...string) string {
 // 变量只列键名）：provider 覆盖只作用于运行时会话配置，零副作用。
 func previewProviders(command *cobra.Command, targets []dispatchTarget) {
 	for _, target := range targets {
-		if target.config.ProviderName == "" {
+		global := ""
+		if env, settings, mcp := target.config.Optimizations.Counts(); env+settings+mcp > 0 {
+			global = fmt.Sprintf(" + 全局优化（env %d 项：%s；settings %d 项；mcp %d 个）",
+				env, strings.Join(maskedEnvKeys(target.config.Optimizations.Env), "、"), settings, mcp)
+		}
+		if target.config.ProviderName == "" && global == "" {
 			continue
+		}
+		name := target.config.ProviderName
+		if name == "" {
+			name = "内置缺省"
 		}
 		env, settings, mcp := target.config.Provider.Counts()
 		fmt.Fprintf(command.ErrOrStderr(),
-			"dry-run：%s 使用 provider %s（env %d 项：%s；settings %d 项；mcp %d 个）——注入会话 --settings/--mcp-config，不写仓库文件\n",
-			target.repo.Name, target.config.ProviderName, env, strings.Join(maskedEnvKeys(target.config.Provider.Env), "、"), settings, mcp)
+			"dry-run：%s 使用 provider %s（env %d 项：%s；settings %d 项；mcp %d 个）%s——注入会话 --settings/--mcp-config，不写仓库文件\n",
+			target.repo.Name, name, env, strings.Join(maskedEnvKeys(target.config.Provider.Env), "、"), settings, mcp, global)
 	}
 }
 
@@ -707,12 +717,22 @@ func runDispatchLoop(command *cobra.Command, repoFlag, configPath string, option
 			}
 		}
 		for _, target := range ready {
-			if target.config.ProviderName == "" {
+			env, settings, mcp := target.config.Provider.Counts()
+			globalEnv, globalSettings, globalMCP := target.config.Optimizations.Counts()
+			if target.config.ProviderName == "" && env+settings+mcp == 0 && globalEnv+globalSettings+globalMCP == 0 {
 				continue
 			}
-			env, settings, mcp := target.config.Provider.Counts()
-			log(fmt.Sprintf("%s 使用 provider %s（env %d 项，settings %d 项，mcp %d 个）",
-				target.repo.Name, target.config.ProviderName, env, settings, mcp))
+			name := target.config.ProviderName
+			if name == "" {
+				name = "内置缺省"
+			}
+			global := ""
+			if globalEnv+globalSettings+globalMCP > 0 {
+				global = fmt.Sprintf("（含全局优化 env %d 项，settings %d 项，mcp %d 个）",
+					globalEnv, globalSettings, globalMCP)
+			}
+			log(fmt.Sprintf("%s 使用 provider %s（env %d 项，settings %d 项，mcp %d 个）%s",
+				target.repo.Name, name, env, settings, mcp, global))
 		}
 	}
 

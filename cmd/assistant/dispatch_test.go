@@ -202,6 +202,7 @@ func TestResolveInstanceTargetProviderCascade(t *testing.T) {
 	command := &cobra.Command{}
 	file := &instances.File{
 		DefaultProvider: "global",
+		Optimizations:   instances.Provider{Env: map[string]string{"OPTIMIZED": "1", "SCOPE": "optimized"}},
 		Providers: map[string]instances.Provider{
 			"global":   {Env: map[string]string{"SCOPE": "global"}},
 			"instance": {Env: map[string]string{"SCOPE": "instance"}},
@@ -222,6 +223,12 @@ func TestResolveInstanceTargetProviderCascade(t *testing.T) {
 	}
 	if target.config.ProviderName != "repo" || target.config.Provider.Env["SCOPE"] != "repo" {
 		t.Errorf("repo 级 provider 未生效：%q %+v", target.config.ProviderName, target.config.Provider.Env)
+	}
+	if target.config.Provider.Env["OPTIMIZED"] != "1" {
+		t.Errorf("全局优化点应打底：%+v", target.config.Provider.Env)
+	}
+	if target.config.Optimizations.Env["SCOPE"] != "optimized" {
+		t.Errorf("全局优化点层未记录：%+v", target.config.Optimizations.Env)
 	}
 
 	repo.Provider = ""

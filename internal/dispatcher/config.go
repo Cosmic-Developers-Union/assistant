@@ -53,10 +53,13 @@ type Config struct {
 	// ClaudeBin 是 claude 可执行文件（PATH 名或绝对路径）
 	ClaudeBin string
 	// Provider 是生效的供应商运行时覆盖（env/settings/mcp 原样透传；零值表示
-	// 内置缺省）。只作用于会话临时配置，不写入仓库文件。
+	// 内置缺省）。只作用于会话临时配置，不写入仓库文件。已经叠加全局优化点。
 	Provider claudecfg.Overrides
 	// ProviderName 是生效的 provider 名（空串表示内置缺省；仅日志/状态展示）
 	ProviderName string
+	// Optimizations 是全局优化点层（Provider 之下的那一层；仅日志/状态展示，
+	// 实际生效值见 Provider）
+	Optimizations claudecfg.Overrides
 	// DockerImage 非空时评审会话跑在 Docker 容器里（worktree 与 MCP 配置按
 	// 相同绝对路径挂载；认证环境变量按白名单透传）
 	DockerImage string

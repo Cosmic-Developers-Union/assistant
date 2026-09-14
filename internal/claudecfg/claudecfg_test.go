@@ -137,3 +137,54 @@ func TestMergeMCPServers(t *testing.T) {
 		t.Errorf("nil base 应新建 mcpServers：%+v", created)
 	}
 }
+
+// 两层覆盖叠加（provider 覆盖全局优化点）：env 逐键、settings 浅合并、mcp 同名。
+func TestComposeOverrides(t *testing.T) {
+	low := Overrides{
+		Env:      map[string]string{"CLAUDE_CODE_EFFORT_LEVEL": "high", "BASH_MAX_TIMEOUT_MS": "600000"},
+		Settings: map[string]any{"model": "global-model", "permissions": map[string]any{"allow": []any{"Bash(global:*)"}}},
+		MCP:      map[string]any{"search": map[string]any{"command": "global-search"}},
+	}
+	high := Overrides{
+		Env:      map[string]string{"ANTHROPIC_BASE_URL": "https://gw.example.com", "CLAUDE_CODE_EFFORT_LEVEL": "max"},
+		Settings: map[string]any{"apiKeyHelper": "/bin/echo key"},
+		MCP:      map[string]any{"search": map[string]any{"command": "provider-search"}},
+	}
+	composed := ComposeOverrides(low, high)
+	if composed.Env["BASH_MAX_TIMEOUT_MS"] != "600000" || composed.Env["ANTHROPIC_BASE_URL"] != "https://gw.example.com" {
+		t.Errorf("Env = %+v", composed.Env)
+	}
+	if composed.Env["CLAUDE_CODE_EFFORT_LEVEL"] != "max" {
+		t.Errorf("provider 应覆盖全局同名 env：%+v", composed.Env)
+	}
+	if composed.Settings["model"] != "global-model" || composed.Settings["apiKeyHelper"] != "/bin/echo key" {
+		t.Errorf("Settings = %+v", composed.Settings)
+	}
+	permissions, _ := composed.Settings["permissions"].(map[string]any)
+	if allow, _ := permissions["allow"].([]string); !reflect.DeepEqual(allow, []string{"Bash(global:*)"}) {
+		t.Errorf("全局 permissions 应保留：%+v", permissions["allow"])
+	}
+	search, _ := composed.MCP["search"].(map[string]any)
+	if search["command"] != "provider-search" {
+		t.Errorf("provider 应覆盖同名 mcp server：%+v", search)
+	}
+	// 空层直接返回另一层（含指针相等，避免无谓复制）
+	if got := ComposeOverrides(Overrides{}, high); !reflect.DeepEqual(got, high) {
+		t.Errorf("空 low 应返回 high：%+v", got)
+	}
+	if got := ComposeOverrides(low, Overrides{}); !reflect.DeepEqual(got, low) {
+		t.Errorf("空 high 应返回 low：%+v", got)
+	}
+	// 合并后的 MCP 去注入：provider env 注入 server，但原始定义不被污染
+	merged := MergeMCPServers(nil, composed)
+	servers, _ := merged["mcpServers"].(map[string]any)
+	searchServer, _ := servers["search"].(map[string]any)
+	searchEnv, _ := searchServer["env"].(map[string]any)
+	if searchEnv["ANTHROPIC_BASE_URL"] != "https://gw.example.com" || searchEnv["CLAUDE_CODE_EFFORT_LEVEL"] != "max" {
+		t.Errorf("合并 env 应注入 server：%+v", searchEnv)
+	}
+	rawSearch, _ := high.MCP["search"].(map[string]any)
+	if _, ok := rawSearch["env"]; ok {
+		t.Errorf("原始定义被污染：%+v", rawSearch)
+	}
+}
