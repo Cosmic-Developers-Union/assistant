@@ -106,7 +106,8 @@ daemon-image: ## 构建 daemon 镜像（评审环境 + assistant 二进制；doc
 .PHONY: compose-up
 compose-up: ## 预建挂载点并启动 docker compose 部署（daemon；等价 compose up -d）
 	@echo "==> 预建挂载点..."
-	@mkdir -p "$(HOME)/.claude" "$(HOME)/.config/Cosmic-Developers-Union/assistant" \
+	@mkdir -p "$(HOME)/.claude" "$(HOME)/.cache" \
+		"$(HOME)/.config/Cosmic-Developers-Union/assistant" \
 		"$(HOME)/.local/share/Cosmic-Developers-Union/assistant"
 	@echo "==> 启动 docker compose..."
 	docker compose up -d

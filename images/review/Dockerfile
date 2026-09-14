@@ -47,6 +47,26 @@ RUN set -eu; \
     fi; \
     command -v claude &> /dev/null && claude --version || echo "Claude Code installation pending"
 
+# node/npx 与 uv/uvx：供应商 MCP 的常见分发方式（智谱视觉理解 MCP 用 npx，
+# MiniMax coding-plan MCP 用 uvx）；统一暴露到 /usr/local/bin，非 root 运行
+# daemon 时受限 PATH 也能解析
+RUN set -eu; \
+    for name in node npx; do \
+      bin="$(command -v "$name" || true)"; \
+      if [ -n "$bin" ] && [ "$bin" != "/usr/local/bin/$name" ]; then \
+        ln -sfn "$bin" "/usr/local/bin/$name"; \
+      fi; \
+    done; \
+    curl -LsSf https://astral.sh/uv/install.sh | sh \
+      || curl -LsSf https://astral.sh/uv/install.sh | sh || true; \
+    for name in uv uvx; do \
+      if [ -x "/root/.local/bin/$name" ]; then \
+        install -m 0755 "/root/.local/bin/$name" "/usr/local/bin/$name"; \
+      fi; \
+    done; \
+    command -v node npx &> /dev/null && node --version; \
+    command -v uvx &> /dev/null && uvx --version || echo "警告：uvx 未安装（MiniMax MCP 将不可用）"
+
 # Go 工具链（评审 Go 仓库时可直接 go build / go test）
 COPY --from=golang:1.27 /usr/local/go /usr/local/go
 

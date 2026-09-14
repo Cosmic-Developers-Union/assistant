@@ -109,7 +109,7 @@ assistant completion fish > ~/.config/fish/completions/assistant.fish
 }
 ```
 
-未识别的 provider 名没有预设，按纯手写透传处理（`env`/`settings`/`mcp` 原样合并）；`env` 里给空串可删除预设默认。内置预设、各家的覆盖要点与坑位见 [`providers.md`](providers.md)。
+预设还会带上供应商官方 MCP（智谱视觉理解、MiniMax coding-plan 等，随会话注入；daemon 镜像已内置 `npx`/`uvx`）。未识别的 provider 名没有预设，按纯手写透传处理（`env`/`settings`/`mcp` 原样合并）；`env` 里给空串可删除预设默认，`mcp` 里给 `null` 可关闭预设 MCP。内置预设、各家的覆盖要点与坑位见 [`providers.md`](providers.md)。
 
 选择粒度逐级回退：`repo.provider` > `instance.provider` > `default_provider`；微信对话桥用 `weixin.provider`（缺省回退 `default_provider`）。引用了未定义的名字直接报错，不会静默用错供应商。
 

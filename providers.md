@@ -25,14 +25,21 @@
 | provider 名（别名） | 端点 | 令牌写入 | 预设附带的默认 | 备注 |
 | --- | --- | --- | --- | --- |
 | `anthropic`（claude、official） | 官方 `api.anthropic.com` | `ANTHROPIC_API_KEY` | 无（Claude Code 默认最优） | 官方模型档位自动跟随 |
-| `zhipu`（glm、zai、z.ai） | `https://api.z.ai/api/anthropic` | `ANTHROPIC_AUTH_TOKEN` | `API_TIMEOUT_MS=3000000`、关非必要流量 | 模型档位由网关自动映射，官方建议不要硬编码 |
-| `bigmodel`（zhipu-cn） | `https://open.bigmodel.cn/api/anthropic` | 同上 | 同上 | 国内 bigmodel 端点 |
+| `zhipu`（glm、zai、z.ai） | `https://api.z.ai/api/anthropic` | `ANTHROPIC_AUTH_TOKEN` + `Z_AI_API_KEY` | 全档 `glm-5.3-flash[1m]`、1M 压缩窗口、`API_TIMEOUT_MS=3000000`、关非必要流量 + **视觉理解 MCP** | glm-5.3-flash 绝对优先；主档想用 glm-5.3[1m] 可覆盖 |
+| `bigmodel`（zhipu-cn） | `https://open.bigmodel.cn/api/anthropic` | 同上 | 同上（MCP `Z_AI_MODE=ZHIPU`） | 国内 bigmodel 端点 |
 | `kimi`（kimi-code、kimi-coding） | `https://api.kimi.com/coding/` | `ANTHROPIC_API_KEY` | 全档 `kimi-for-coding`、窗口/压缩 262144、子 agent 同档 | Kimi Code 订阅；升级套餐后按需覆盖为 `k3[1m]` |
 | `moonshot`（kimi-platform、moonshot-ai） | `https://api.moonshot.cn/anthropic` | `ANTHROPIC_AUTH_TOKEN` | 全档 `kimi-k3`、压缩窗口 262144 | 开放平台（key 与 Kimi Code 不通用；国际站改 `api.moonshot.ai`） |
-| `minimax` | `https://api.minimax.io/anthropic` | `ANTHROPIC_AUTH_TOKEN` | 全档 `MiniMax-M3[1m]`、压缩窗口 1000000 | 自动 cache；512K/M2.7 档自行覆盖 |
-| `minimax-cn`（minimaxi） | `https://api.minimaxi.com/anthropic` | 同上 | 同上 | 国内端点 |
+| `minimax` | `https://api.minimax.io/anthropic` | `ANTHROPIC_AUTH_TOKEN` + `MINIMAX_API_KEY` | 全档 `MiniMax-M3[1m]`、压缩窗口 1000000 + **coding-plan MCP** | 自动 cache；512K/M2.7 档自行覆盖 |
+| `minimax-cn`（minimaxi） | `https://api.minimaxi.com/anthropic` | 同上 | 同上（MCP host `api.minimax.cn`） | 国内端点 |
 | `opencode`（zen、opencode-zen、opencode-go） | `https://opencode.ai/zen` | `ANTHROPIC_AUTH_TOKEN` | Claude 档位（网关原生提供，无需映射） | 自动注入 `x-opencode-session` + `x-session-affinity` 会话头（见第 2 节） |
 | `openai`（gpt） | **无**，必须自配 `ANTHROPIC_BASE_URL` | `ANTHROPIC_AUTH_TOKEN` | 无 | OpenAI 无 Anthropic 端点，base_url 指向翻译代理（LiteLLM 等），否则配置校验直接报错 |
+
+预设还自带供应商官方 MCP（随会话 `--mcp-config` 注入，不需要额外安装步骤）：
+
+- 运行环境需要 `node`/`npx`（智谱视觉理解）与 `uv`/`uvx`（MiniMax coding-plan）：
+  daemon 镜像已内置（`images/review/Dockerfile`），宿主机运行请自行安装；
+- 首次会话会下载 MCP 包（npx/uvx 缓存挂在 `${HOME}/.cache`，重启不重复下载）；
+- 关闭某个预设 MCP：`"mcp": {"zai-mcp-server": null}`（同名 server 也按此覆盖）。
 
 覆盖与关闭：
 
@@ -92,9 +99,19 @@
 
 `zhipu` / `bigmodel`
 
-- 预设已按官方接入脚本（`API_TIMEOUT_MS=3000000`、关非必要流量）。
-- 1M 上下文：模型名加 `[1m]`（如 `glm-5.3[1m]`）+ `CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000`。
-- 官方建议**不要硬编码模型映射**（套餐模型升级自动跟随）；若套餐含 Flash，可把 Haiku 档指 Flash。
+- 预设按官方推荐：全档 `glm-5.3-flash[1m]`（glm-5.3-flash 绝对优先）、
+  `CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000`、`API_TIMEOUT_MS=3000000`、关非必要流量。
+- 主档想用 glm-5.3[1m]（官方示例配置）：
+  `{"env": {"ANTHROPIC_MODEL": "glm-5.3[1m]", "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.3[1m]", "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.3[1m]", "ANTHROPIC_DEFAULT_FABLE_MODEL": "glm-5.3[1m]"}}`；
+  Haiku 保持 `glm-5.3-flash[1m]`。
+- **视觉理解 MCP**（官方 vision-mcp-server）随预设注入：`npx -y @z_ai/mcp-server@latest`
+  （`@latest` 避免 npx 缓存旧版本），`Z_AI_API_KEY` 由 `api_key` 自动写入，
+  `Z_AI_MODE` 按平台（z.ai=`ZAI`，bigmodel=`ZHIPU`）。
+  工具：`ui_to_artifact`、`extract_text_from_screenshot`、`diagnose_error_screenshot`、
+  `understand_technical_diagram`、`analyze_data_visualization`、`ui_diff_check`、
+  `image_analysis`、`video_analysis`（本地视频 ≤8M）。
+  注意：Claude Code 走 GLM Coding Plan 时服务端已内置 `image_analysis`，装全量工具才有其余 7 个；
+  使用时把图片放本地目录再用路径提问（直接粘贴图片不会走 MCP）。
 - 老账号（2025-09-30 前订阅）可能只有 OpenAI 协议权限，Claude Code 走不通。
 
 `kimi` / `moonshot`
@@ -111,6 +128,11 @@
 - 预设为 M3 1M 档；512K 档：`ANTHROPIC_*_MODEL=MiniMax-M3` + `CLAUDE_CODE_AUTO_COMPACT_WINDOW=512000`。
 - 快档：`MiniMax-M2.7-highspeed`（204800）。思考默认开启（`/config` 可关）。
 - 自动 cache，无需配置。
+- **coding-plan MCP**（官方配置）随预设注入：`uvx minimax-coding-plan-mcp`，
+  `MINIMAX_API_KEY` 由 `api_key` 自动写入，`MINIMAX_API_HOST` 按平台
+  （国际 `https://api.minimax.io`，国内 `https://api.minimax.cn`）；
+  官方 `mcpServers` 里 `"MINIMAX_API_KEY": "MINIMAX_API_KEY"` 的占位由框架替代，
+  不用手填。
 
 `opencode`（OpenCode Zen / Go 网关）
 

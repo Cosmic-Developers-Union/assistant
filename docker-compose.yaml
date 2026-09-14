@@ -57,6 +57,9 @@ services:
       - ${HOME}/.config/Cosmic-Developers-Union/assistant:${HOME}/.config/Cosmic-Developers-Union/assistant
       # 受管克隆与状态：repos/（基线检出）+ state/（日志、单飞锁）
       - ${HOME}/.local/share/Cosmic-Developers-Union/assistant:${HOME}/.local/share/Cosmic-Developers-Union/assistant
+      # 工具链与 MCP 缓存（go/npm/uv/pip/bun）：npx/uvx 首次拉取供应商 MCP
+      # 需要可写 HOME 缓存（非 root 且镜像里无 /home/<user>）
+      - ${HOME}/.cache:${HOME}/.cache
       # tea CLI 凭据（assistant mcp gitea / login 复用），只读
       - ${HOME}/.config/tea:${HOME}/.config/tea:ro
       # 旧版 token 位置（token 候选链），只读
