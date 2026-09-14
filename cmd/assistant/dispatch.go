@@ -86,7 +86,7 @@ func newDispatcherCommands(repoFlag, configFlag *string) []*cobra.Command {
 		&runOptions.Concurrency,
 		"concurrency",
 		"",
-		"每轮待办处理的会话并发数（缺省 1；轮间 barrier 保证同一待办同时至多一个会话）",
+		"每轮待办处理的会话并发数（缺省 8；轮间 barrier 保证同一待办同时至多一个会话）",
 	)
 	runCommand.Flags().BoolVar(
 		&runOptions.DryRun,

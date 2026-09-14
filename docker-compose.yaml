@@ -1,10 +1,11 @@
 # 正式部署：assistant daemon（调度 + 只读状态 API + 微信对话桥）常驻容器。
 #
-# - 宿主机用户目录原样挂载到容器内同一路径：claude 登录态（~/.claude）、
-#   assistant 配置（~/.config/Cosmic-Developers-Union/assistant，含 config.json
-#   与 daemon.json）与受管克隆/状态目录（~/.local/share/Cosmic-Developers-Union/
-#   assistant）都随宿主走，容器内外路径一致；
-# - /tmp 用 tmpfs：评审 worktree 与会话临时目录全在 /tmp，落内存、退出即清；
+# - 宿主机用户目录按需**细粒度挂载**（容器内外路径一致）：~/.claude（claude
+#   登录态）、~/.config/Cosmic-Developers-Union/assistant（config.json /
+#   daemon.json / chat 会话）、~/.local/share/Cosmic-Developers-Union/assistant
+#   （受管克隆 repos/ 与状态 state/）、~/.config/tea（凭据，只读）；
+# - /tmp 用 tmpfs（16G 上限）：评审 worktree 与会话临时目录全在 /tmp，
+#   落内存、退出即清；
 # - 状态 API 只发布在宿主 127.0.0.1:8770（`assistant mcp daemon` 走 daemon.json
 #   自举发现，本机工具直接可用）；
 # - 需要 `--docker-image` 把评审会话再放进容器时，打开 docker.sock 挂载
@@ -48,7 +49,19 @@ services:
       # ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       # CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
     volumes:
-      - ${HOME}:${HOME}
+      # claude 登录态与会话数据（评审/对话会话的认证与 --resume 数据）
+      - ${HOME}/.claude:${HOME}/.claude
+      # assistant 配置：config.json / daemon.json / chat 会话映射
+      - ${HOME}/.config/Cosmic-Developers-Union/assistant:${HOME}/.config/Cosmic-Developers-Union/assistant
+      # 受管克隆与状态：repos/（基线检出）+ state/（日志、单飞锁）
+      - ${HOME}/.local/share/Cosmic-Developers-Union/assistant:${HOME}/.local/share/Cosmic-Developers-Union/assistant
+      # tea CLI 凭据（assistant mcp gitea / login 复用），只读
+      - ${HOME}/.config/tea:${HOME}/.config/tea:ro
+      # 旧版 token 位置（token 候选链），只读
+      # - ${HOME}/.config/mmc:${HOME}/.config/mmc:ro
+      # 本地 git 提交身份：评审会话需要本地 commit 时才挂（文件需先存在，
+      # 否则 docker 会把它建成目录）
+      # - ${HOME}/.gitconfig:${HOME}/.gitconfig:ro
       # docker-out-of-docker：评审会话用 --docker-image 时需要（宿主 docker.sock）
       # - /var/run/docker.sock:/var/run/docker.sock
       # 宿主上的 Gitea（localhost）可加：
@@ -57,5 +70,6 @@ services:
     ports:
       - "127.0.0.1:8770:8770"
     tmpfs:
-      - /tmp:exec,mode=1777,size=2g
+      # 评审 worktree 全在 /tmp：内存盘，上限 16G（受宿主可用内存约束，可调）
+      - /tmp:exec,mode=1777,size=16g
     command: ["run", "--api-listen", "0.0.0.0:8770"]

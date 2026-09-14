@@ -309,7 +309,7 @@ status/triage     Issue ───────▶  triage issue #N               
 - **项目评审约定**：宿主基线检出的 `.assistant/review.md`（及其中的 install 托管段落）作为 `--append-system-prompt` 注入会话，PR 自带的版本不生效——与 `.claude/` 同口径，防止 PR 改弱自己被审的规则；内容上限 32000 字符，超出截断。
 - **进度两路落点**：控制台实时显示会话 init 与编号的工具调用；完整明细实时写待办日志——stdout 按 stream-json 逐行解析，assistant 文本原样、工具调用记 `🔧 名称`。
 - **一请求一会话，head 漂移即作废**：同一 instance+仓库+PR/Issue 同时至多一个会话；每个请求只拉起一个会话，完成（reviewer 已提交 review / triage 标签已移除）后在标签被 sync 收敛前不再重复拉起——连续 `@ai`、`/review` 不会造成重复会话。验证未过则本轮放行，等待下一轮检测；head 已被作者推进则本轮评审作废，下一轮以新 head 重开。
-- **有界并发（`--concurrency` / `DISPATCH_CONCURRENCY`，缺省 1）**：一轮待办至多同时跑 N 个会话；轮与轮之间是天然 barrier——同一 PR/Issue 同一时刻至多一个会话。
+- **有界并发（`--concurrency` / `DISPATCH_CONCURRENCY`，缺省 8）**：一轮待办至多同时跑 N 个会话；轮与轮之间是天然 barrier——同一 PR/Issue 同一时刻至多一个会话。
 - **单飞**：`dispatcher.lock` 记 PID（原子创建），同机第二实例拒绝启动，死 PID 残留自动接管（`review`/`triage` 一次性命令共用此锁）。
 - **多实例**：使用 `config.json` 时，`run` 为每个 instance × repo 启动一个独立循环（各自加锁、各自 worktree 根），任一循环失败即整体退出。启动前逐 instance 做健康检查：版本端点可达 + reviewer/merger/admin 令牌认证通过，任一不可用则拒绝启动（不带病运行）。
 - **优雅退出**：首个 SIGINT/SIGTERM 等当前待办处理完；二次信号强杀。
@@ -403,8 +403,10 @@ docker compose logs -f
 docker compose exec assistant assistant weixin login   # 首次扫码（终端直接渲染二维码）
 ```
 
+- 挂载是**细粒度**的（不用整目录 `$HOME`）：`~/.claude`（登录态）、`~/.config/Cosmic-Developers-Union/assistant`（config.json / daemon.json / chat 会话）、`~/.local/share/Cosmic-Developers-Union/assistant`（受管克隆与状态）读写，`~/.config/tea`（凭据）只读；git 身份与 `docker.sock` 按需（compose 内已注释示例）。
+- 挂载点需先在宿主存在（docker 对不存在的路径会建 root 属主目录）：`mkdir -p ~/.claude ~/.config/Cosmic-Developers-Union/assistant ~/.local/share/Cosmic-Developers-Union/assistant`（跑过一次 `assistant login`/`setup` 也会生成）。
 - UID/GID/HOME 由 compose 插值（缺省 `1000:1000` + 宿主 `$HOME`）；以宿主用户运行，写回挂载目录的文件属主不变。请在 `.env` 或环境里按需 `export ASSISTANT_UID=$(id -u) ASSISTANT_GID=$(id -g)`。
-- `docker-compose.yaml` 里默认挂载 `${HOME}:${HOME}`，`/tmp` 为 `tmpfs`（`exec,mode=1777,size=2g`，跑大仓库构建可调大）。
+- `/tmp` 为 `tmpfs`（`exec,mode=1777,size=16g`）：评审 worktree 全在内存盘、退出即清；16G 是上限，占用受宿主可用内存约束，可调。
 - 需要 `--docker-image` 把评审会话再放进容器时，打开 `docker.sock` 挂载（docker-out-of-docker）；宿主上的 Gitea 可通过 `extra_hosts: host.docker.internal:host-gateway` 访问（文件内已注释示例）。
 
 systemd 示例（`WorkingDirectory` 建议仓库检出根；systemd 的最小 PATH 通常不含 claude 安装目录，`--claude-bin` 用绝对路径）：

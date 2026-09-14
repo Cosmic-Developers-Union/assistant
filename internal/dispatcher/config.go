@@ -18,6 +18,10 @@ import (
 	"assistant/internal/status"
 )
 
+// DefaultConcurrency 是每轮待办处理的会话并发数缺省值（--concurrency /
+// DISPATCH_CONCURRENCY 可覆盖）。
+const DefaultConcurrency = 8
+
 // Config 是调度引擎的完整运行配置。
 type Config struct {
 	// Host 是 Gitea 站点根地址（如 http://gitea.example.com:3000），不带尾部斜杠
@@ -193,7 +197,7 @@ func ResolveConfig(
 	if err != nil {
 		return Config{}, err
 	}
-	concurrency, err := resolveCount("会话并发", firstNonEmpty(flags.Concurrency, env("DISPATCH_CONCURRENCY")), 1)
+	concurrency, err := resolveCount("会话并发", firstNonEmpty(flags.Concurrency, env("DISPATCH_CONCURRENCY")), DefaultConcurrency)
 	if err != nil {
 		return Config{}, err
 	}

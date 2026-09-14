@@ -163,7 +163,7 @@ func TestResolveConfigPathDefaultsAnchorToRepoDir(t *testing.T) {
 	if config.BaseBranch != "main" || config.SyncMirror {
 		t.Errorf("BaseBranch/SyncMirror = %q/%v, want main/false", config.BaseBranch, config.SyncMirror)
 	}
-	if config.Reviewer != "ai" || config.ClaudeBin != "claude" || config.Concurrency != 1 {
+	if config.Reviewer != "ai" || config.ClaudeBin != "claude" || config.Concurrency != DefaultConcurrency {
 		t.Errorf("defaults = %+v", config)
 	}
 }
@@ -211,8 +211,8 @@ func TestResolveConfigConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveConfig() error = %v", err)
 	}
-	if config.Concurrency != 1 {
-		t.Errorf("Concurrency = %d, want 1", config.Concurrency)
+	if config.Concurrency != DefaultConcurrency {
+		t.Errorf("Concurrency = %d, want %d", config.Concurrency, DefaultConcurrency)
 	}
 
 	config, err = ResolveConfig(Flags{Concurrency: "4"}, t.TempDir(), os.Getenv, noRemote)
