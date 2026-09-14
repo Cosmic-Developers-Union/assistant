@@ -43,6 +43,13 @@ type Deps struct {
 	PrepareIssue   func(worktreeDir string) (string, error)
 	RemoveWorktree func(dir string) error
 	RunSession     func(prompt, cwd string, onProgress func(string)) SessionOutcome
+	// 运行态上报（daemon API / MCP 状态查询用；均可为 nil）
+	// OnQueue 每轮检测后上报当前待办清单（含空清单：队列已清空）
+	OnQueue func(items []WorkItem)
+	// OnStart 会话开始前上报（进入活跃列表）
+	OnStart func(item WorkItem)
+	// OnFinish 会话结束后上报（移出活跃列表并归档结果）
+	OnFinish func(item WorkItem, outcome SessionOutcome)
 }
 
 // RunAll 监督多个仓库的常驻循环：各自独立加锁（锁在各自检出内），任一循环
@@ -241,6 +248,9 @@ func RunLoop(ctx context.Context, deps Deps) error {
 		// 形成一个未完成的请求。标签消失（sync 收敛）后自动解除守卫，之后
 		// 的新请求可以重新入队。
 		work = pruneSettled(work, settled)
+		if deps.OnQueue != nil {
+			deps.OnQueue(append([]WorkItem(nil), work...))
+		}
 		if len(work) == 0 {
 			sleep(config.Interval)
 			continue
@@ -557,7 +567,13 @@ func ProcessItem(ctx context.Context, deps Deps, item WorkItem) ProcessResult {
 		}
 	}
 	startedAt := time.Now()
+	if deps.OnStart != nil {
+		deps.OnStart(item)
+	}
 	outcome := deps.RunSession(prompt, cwd, onProgress)
+	if deps.OnFinish != nil {
+		deps.OnFinish(item, outcome)
+	}
 	record, err := json.Marshal(attemptRecord{
 		Attempt:           1,
 		StartedAt:         startedAt.UnixMilli(),

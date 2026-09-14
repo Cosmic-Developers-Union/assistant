@@ -251,7 +251,7 @@ func newLoginRemoveCommand(configFlag *string) *cobra.Command {
 				return fmt.Errorf("平台 %s 不在配置中", host)
 			}
 			file.Instances = kept
-			if len(file.Instances) == 0 {
+			if len(file.Instances) == 0 && file.Weixin == nil {
 				if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 					return err
 				}

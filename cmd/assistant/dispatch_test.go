@@ -103,3 +103,39 @@ func TestResolveInstanceTargetExplicitDir(t *testing.T) {
 		t.Error("显式 dir 的共享检出不应默认镜像同步")
 	}
 }
+
+// --repo-dir 是单目标显式覆盖：按共享检出处理，多目标时必须配合 --repo。
+func TestRepoDirOverride(t *testing.T) {
+	dir := t.TempDir()
+	instance := instances.Instance{
+		Host:     "https://gitea.example.com",
+		Reviewer: instances.Account{Name: "ai", Token: "reviewer-token"},
+		Merger:   instances.Account{Name: "merge"},
+	}
+	command := &cobra.Command{}
+	target, err := resolveInstanceTarget(
+		command, instance, instances.Repo{Name: "acme/repo"}, &dispatcherOptions{RepoDir: dir})
+	if err != nil {
+		t.Fatalf("resolveInstanceTarget: %v", err)
+	}
+	if target.managed || target.repoDir != dir {
+		t.Errorf("--repo-dir 覆盖应是非受管检出：managed=%v dir=%q", target.managed, target.repoDir)
+	}
+
+	// 配置里两个仓库 + --repo-dir 且未用 --repo 收敛 → 报错
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	file := &instances.File{Instances: []instances.Instance{{
+		Host:     instance.Host,
+		Reviewer: instance.Reviewer,
+		Merger:   instance.Merger,
+		Repos:    []instances.Repo{{Name: "acme/one"}, {Name: "acme/two"}},
+	}}}
+	file.Normalize()
+	if err := instances.Save(configPath, file); err != nil {
+		t.Fatal(err)
+	}
+	_, err = resolveDispatchTargets(command, "", configPath, &dispatcherOptions{RepoDir: dir})
+	if err == nil || !strings.Contains(err.Error(), "--repo") {
+		t.Fatalf("err = %v, want 提示用 --repo 限定", err)
+	}
+}

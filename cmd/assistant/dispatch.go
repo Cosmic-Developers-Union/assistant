@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"assistant/internal/daemon"
 	"assistant/internal/dispatcher"
 	"assistant/internal/instances"
 	"assistant/internal/status"
@@ -20,7 +21,10 @@ import (
 // dispatcherOptions 是调度命令共享的命令行参数（未给出的项回退环境变量/默认值）。
 type dispatcherOptions struct {
 	Host          string
+	RepoDir       string
 	Token         string
+	APIListen     string
+	Weixin        bool
 	Reviewer      string
 	Model         string
 	ClaudeBin     string
@@ -54,6 +58,15 @@ func targetToken(instance instances.Instance) string {
 	return firstNonEmpty(instance.Reviewer.Token, instance.AdminToken)
 }
 
+// countRepos 统计配置中的仓库总数（--repo-dir 单目标校验用）。
+func countRepos(file *instances.File) int {
+	total := 0
+	for _, instance := range file.Instances {
+		total += len(instance.Repos)
+	}
+	return total
+}
+
 // newDispatcherCommands 构造调度引擎子命令：run（常驻）/ list（只读列出）/
 // review（立即评审单个 PR）/ triage（立即分诊单个 Issue）。
 func newDispatcherCommands(repoFlag, configFlag *string) []*cobra.Command {
@@ -80,6 +93,18 @@ func newDispatcherCommands(repoFlag, configFlag *string) []*cobra.Command {
 		"dry-run",
 		false,
 		"只读演练：列出将执行的待办并逐步说明动作（日志/worktree/会话/完成判定/重试），零副作用",
+	)
+	runCommand.Flags().StringVar(
+		&runOptions.APIListen,
+		"api-listen",
+		"127.0.0.1:8770",
+		"daemon 状态 API 监听地址（Bearer 鉴权，端点写入配置目录 daemon.json；none 关闭）",
+	)
+	runCommand.Flags().BoolVar(
+		&runOptions.Weixin,
+		"weixin",
+		false,
+		"启动微信对话桥（也可在 config.json 设 weixin.enabled=true；凭证用 assistant weixin login 扫码获取）",
 	)
 
 	listOptions := &dispatcherOptions{}
@@ -135,6 +160,8 @@ func newDispatcherCommands(repoFlag, configFlag *string) []*cobra.Command {
 func addDispatcherConnectionFlags(command *cobra.Command, options *dispatcherOptions) {
 	flags := command.Flags()
 	flags.StringVar(&options.Host, "host", "", "Gitea API 根地址（缺省：GITEA_HOST 或 origin remote 推导）")
+	flags.StringVar(&options.RepoDir, "repo-dir", "",
+		"仓库检出目录（覆盖 repo.dir；config.json 多目标时需配合 --repo 指定唯一仓库）")
 	flags.StringVar(&options.Token, "token", "", "访问令牌（缺省：GITEA_ACCESS_TOKEN；评审以该账号身份提交）")
 	flags.StringVar(&options.Reviewer, "reviewer", "", "完成判定匹配的 reviewer 账号（缺省 ai）")
 	flags.StringVar(&options.Model, "model", "", "会话模型（缺省用账号默认）")
@@ -184,15 +211,22 @@ func resolveEnvDispatcher(
 	if err != nil {
 		return dispatcher.Config{}, "", fmt.Errorf("获取当前目录: %w", err)
 	}
-	repoDir := cwd
-	if root, ok := dispatcher.RepoRoot(cwd); ok {
-		repoDir = root
+	repoDir := strings.TrimSpace(options.RepoDir)
+	if repoDir != "" {
+		if repoDir, err = filepath.Abs(repoDir); err != nil {
+			return dispatcher.Config{}, "", fmt.Errorf("解析 --repo-dir: %w", err)
+		}
+	} else {
+		repoDir = cwd
+		if root, ok := dispatcher.RepoRoot(cwd); ok {
+			repoDir = root
+		}
 	}
 	config, err := dispatcher.ResolveConfig(
 		dispatcherFlags(command, repoFlag, options),
 		repoDir, os.Getenv,
 		func() (dispatcher.GitRemote, bool) {
-			remote, gitea := dispatcher.SelectGiteaRemote(cwd, func(host string) bool {
+			remote, gitea := dispatcher.SelectGiteaRemote(repoDir, func(host string) bool {
 				return status.ProbeGitea(context.Background(), host)
 			})
 			if remote.Host == "" {
@@ -261,6 +295,12 @@ func resolveDispatchTargets(
 		return []dispatchTarget{{config: config, client: client, repoDir: repoDir}}, nil
 	}
 
+	// --repo-dir 是单目标覆盖：配置里出现多个仓库时要求 --repo 收敛到唯一仓库，
+	// 避免把同一个检出强加到多个循环（锁/worktree 会互相踩）
+	if override := strings.TrimSpace(options.RepoDir); override != "" && repoFlag == "" && countRepos(file) > 1 {
+		return nil, fmt.Errorf("--repo-dir 只适用于单个仓库：请加 --repo owner/name 指定（当前配置 %d 个仓库）", countRepos(file))
+	}
+
 	var targets []dispatchTarget
 	var skipped []string
 	matchedFilter := repoFlag == ""
@@ -315,9 +355,21 @@ func resolveInstanceTarget(
 	repo instances.Repo,
 	options *dispatcherOptions,
 ) (dispatchTarget, error) {
-	repoDir := strings.TrimSpace(repo.Dir)
-	managed := repoDir == ""
-	if managed {
+	repoDir := strings.TrimSpace(options.RepoDir)
+	managed := false
+	switch {
+	case repoDir != "":
+		// --repo-dir 显式覆盖：按共享检出处理（不克隆、不强制镜像）
+		absolute, err := filepath.Abs(repoDir)
+		if err != nil {
+			return dispatchTarget{}, fmt.Errorf("解析 --repo-dir: %w", err)
+		}
+		repoDir = absolute
+	default:
+		repoDir = strings.TrimSpace(repo.Dir)
+	}
+	if repoDir == "" {
+		managed = true
 		defaultDir, err := instances.DefaultRepoDir(instance.Host, repo.Name)
 		if err != nil {
 			return dispatchTarget{}, fmt.Errorf("定位 %s 的默认仓库目录: %w", repo.Name, err)
@@ -488,7 +540,7 @@ func dispatchLogger(w io.Writer) func(string) {
 	}
 }
 
-func newDispatchDeps(target dispatchTarget, w io.Writer) dispatcher.Deps {
+func newDispatchDeps(target dispatchTarget, w io.Writer, store *daemon.Store) dispatcher.Deps {
 	config := target.config
 	repoDir := target.repoDir
 	token := targetToken(target.instance)
@@ -532,6 +584,34 @@ func newDispatchDeps(target dispatchTarget, w io.Writer) dispatcher.Deps {
 			return dispatcher.SyncMirror(repoDir, config.BaseBranch, token)
 		}
 	}
+	if store != nil {
+		host, repository := target.instance.Host, target.repo.Name
+		convert := func(item dispatcher.WorkItem) daemon.Item {
+			return daemon.Item{Kind: item.Kind, Number: item.Number, Title: item.Title}
+		}
+		deps.OnQueue = func(items []dispatcher.WorkItem) {
+			converted := make([]daemon.Item, 0, len(items))
+			for _, item := range items {
+				converted = append(converted, convert(item))
+			}
+			store.SetQueue(host, repository, time.Now(), converted)
+		}
+		deps.OnStart = func(item dispatcher.WorkItem) {
+			store.Start(host, repository, convert(item), time.Now())
+		}
+		deps.OnFinish = func(item dispatcher.WorkItem, outcome dispatcher.SessionOutcome) {
+			store.Finish(host, repository, convert(item), daemon.Result{
+				FinishedAt: time.Now(),
+				Subtype:    outcome.Subtype,
+				IsError:    outcome.IsError,
+				NumTurns:   outcome.NumTurns,
+				CostUSD:    outcome.CostUSD,
+				DurationMS: outcome.DurationMS,
+				SessionID:  outcome.SessionID,
+				Errors:     outcome.Errors,
+			})
+		}
+	}
 	return deps
 }
 
@@ -550,9 +630,27 @@ func runDispatchLoop(command *cobra.Command, repoFlag, configPath string, option
 	if err := checkTargetsHealth(command.Context(), targets, log); err != nil {
 		return err
 	}
+
+	// daemon 运行态：调度循环写入，状态 API 与对话会话的 MCP 读取
+	store := daemon.NewStore(version)
+	for _, target := range targets {
+		store.AddTarget(daemon.Target{
+			Host:       target.instance.Host,
+			Repository: target.repo.Name,
+			Dir:        target.repoDir,
+			BaseBranch: target.config.BaseBranch,
+			Managed:    target.managed,
+		})
+	}
+	if !options.DryRun {
+		if err := startDaemonServices(command, configPath, options, store); err != nil {
+			return err
+		}
+	}
+
 	depsList := make([]dispatcher.Deps, 0, len(targets))
 	for _, target := range targets {
-		depsList = append(depsList, newDispatchDeps(target, command.OutOrStdout()))
+		depsList = append(depsList, newDispatchDeps(target, command.OutOrStdout(), store))
 	}
 	if options.DryRun {
 		for _, deps := range depsList {
@@ -634,7 +732,7 @@ func runDispatchOneShot(
 		return err
 	}
 	defer dispatcher.ReleaseLock(config.LockFile)
-	deps := newDispatchDeps(target, command.OutOrStdout())
+	deps := newDispatchDeps(target, command.OutOrStdout(), nil)
 	dispatcher.ProcessItem(command.Context(), deps, dispatcher.WorkItem{Kind: kind, Number: number})
 	return nil
 }

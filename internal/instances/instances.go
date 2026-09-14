@@ -25,6 +25,35 @@ const (
 // File 是 config.json 的根。
 type File struct {
 	Instances []Instance `json:"instances"`
+	// Weixin 是微信（openclaw ilink）对话桥配置：可选；未配置时 daemon 不启动
+	// 对话能力。
+	Weixin *Weixin `json:"weixin,omitempty"`
+}
+
+// Weixin 是微信对话桥（Tencent/openclaw-weixin 兼容 ilink 协议）的配置。
+type Weixin struct {
+	// Enabled 为 true 时 assistant run 启动对话桥（--weixin 亦可强制开启）
+	Enabled bool `json:"enabled,omitempty"`
+	// BaseURL 是 ilink API 根地址（缺省官方地址）
+	BaseURL string `json:"base_url,omitempty"`
+	// BotToken 是扫码登录得到的 Bot token
+	BotToken string `json:"bot_token,omitempty"`
+	// LoginUserID / BotID 是扫码登录返回的身份信息（诊断用）
+	LoginUserID string `json:"login_user_id,omitempty"`
+	BotID       string `json:"ilink_bot_id,omitempty"`
+	// BotAgent 是观测标识（缺省 OpenClaw）
+	BotAgent string `json:"bot_agent,omitempty"`
+	// ChannelVersion 是声明的渠道版本（缺省取 assistant 自身版本）
+	ChannelVersion string `json:"channel_version,omitempty"`
+	// RouteTag 是可选的部署路由标签（SKRouteTag）
+	RouteTag string `json:"route_tag,omitempty"`
+	// AdminUsers 是允许对话的用户 ID 白名单；空表示只允许扫码登录的用户
+	AdminUsers []string `json:"admin_users,omitempty"`
+	// ClaudeBin / Model / SessionTimeout 是对话会话的执行参数（可选覆盖）
+	ClaudeBin string `json:"claude_bin,omitempty"`
+	Model     string `json:"model,omitempty"`
+	// SessionTimeoutMS 是单轮对话的 claude 超时（缺省 180000 = 3 分钟）
+	SessionTimeoutMS int64 `json:"session_timeout_ms,omitempty"`
 }
 
 // Instance 是一台 Gitea 站点及其仓库与凭据。
@@ -162,6 +191,33 @@ func (f *File) Normalize() {
 	for index := range f.Instances {
 		f.Instances[index].Normalize()
 	}
+	f.Weixin.Normalize()
+}
+
+// DefaultWeixinBaseURL 是 ilink 协议的默认 API 地址。
+const DefaultWeixinBaseURL = "https://ilinkai.weixin.qq.com"
+
+// Normalize 填充微信桥默认值并清理空白，幂等。
+func (w *Weixin) Normalize() {
+	if w == nil {
+		return
+	}
+	w.BaseURL = strings.TrimRight(strings.TrimSpace(w.BaseURL), "/")
+	if w.BaseURL == "" {
+		w.BaseURL = DefaultWeixinBaseURL
+	}
+	w.BotToken = strings.TrimSpace(w.BotToken)
+	w.BotAgent = strings.TrimSpace(w.BotAgent)
+	if w.BotAgent == "" {
+		w.BotAgent = "OpenClaw"
+	}
+	w.ChannelVersion = strings.TrimSpace(w.ChannelVersion)
+	w.RouteTag = strings.TrimSpace(w.RouteTag)
+	w.ClaudeBin = strings.TrimSpace(w.ClaudeBin)
+	w.Model = strings.TrimSpace(w.Model)
+	for index, user := range w.AdminUsers {
+		w.AdminUsers[index] = strings.TrimSpace(user)
+	}
 }
 
 // Normalize 填充 instance 内的默认值并清理空白，幂等。
@@ -181,10 +237,13 @@ func (i *Instance) Normalize() {
 
 // Validate 校验 host、账号与仓库。必须在 Normalize 之后调用。
 func (f *File) Validate() error {
-	if len(f.Instances) == 0 {
+	if len(f.Instances) == 0 && f.Weixin == nil {
 		return fmt.Errorf("instances 不能为空")
 	}
 	seen := make(map[string]int, len(f.Instances))
+	if err := f.Weixin.Validate(); err != nil {
+		return fmt.Errorf("weixin: %w", err)
+	}
 	for index := range f.Instances {
 		if err := f.Instances[index].Validate(); err != nil {
 			return fmt.Errorf("instances[%d]: %w", index, err)
@@ -215,6 +274,21 @@ func (i Instance) Validate() error {
 		if _, _, err := ParseRepoName(repo.Name); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// Validate 校验微信桥配置（必须在 Normalize 之后调用）。
+func (w *Weixin) Validate() error {
+	if w == nil {
+		return nil
+	}
+	parsed, err := url.Parse(w.BaseURL)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return fmt.Errorf("weixin.base_url 必须是绝对 HTTP(S) URL：%q", w.BaseURL)
+	}
+	if w.Enabled && w.BotToken == "" {
+		return fmt.Errorf("weixin.enabled 需要 bot_token：先 assistant weixin login")
 	}
 	return nil
 }
@@ -251,6 +325,17 @@ func DefaultConfigPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(directory, "config.json"), nil
+}
+
+// DaemonEndpointPath 返回 daemon 端点文件的落点：
+// <配置目录>/daemon.json（含 API 地址/令牌/PID，0600；assistant mcp daemon
+// 靠它自举发现运行中的 daemon）。
+func DaemonEndpointPath() (string, error) {
+	directory, err := DefaultConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(directory, "daemon.json"), nil
 }
 
 // DefaultRepoDir 返回受管克隆（基线检出）的默认落点：

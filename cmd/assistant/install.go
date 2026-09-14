@@ -127,7 +127,7 @@ func newMCPCommand() *cobra.Command {
 	flags.StringVar(&giteaOptions.Host, "host", "", "覆盖 Gitea 站点（缺省 origin remote 推导）")
 	flags.StringVar(&giteaOptions.Token, "token", "", "覆盖访问令牌（缺省多候选检测）")
 	flags.StringVar(&giteaOptions.Dir, "dir", ".", "项目目录（缺省 cwd）")
-	mcpCommand.AddCommand(giteaCommand)
+	mcpCommand.AddCommand(giteaCommand, newDaemonMCPCommand())
 	return mcpCommand
 }
 

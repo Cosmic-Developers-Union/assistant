@@ -22,5 +22,14 @@
         }
       ]
     }
-  ]
+  ],
+  "weixin": {
+    "enabled": true,
+    "base_url": "https://ilinkai.weixin.qq.com",
+    "bot_token": "created-by-assistant-weixin-login",
+    "login_user_id": "wx-user-id",
+    "admin_users": [
+      "wx-user-id"
+    ]
+  }
 }

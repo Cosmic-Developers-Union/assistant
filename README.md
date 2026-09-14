@@ -21,10 +21,12 @@
 | `assistant uninstall` | 开发者 | 移除 `install` 写入的内容（只触碰带 marker 的） |
 | `assistant doctor` | 开发者 | 两级体检：本地 install 产物 + 服务端（分支保护/标签/协作者/merge 令牌），只读 |
 | `assistant mcp gitea` | 开发者 | MCP 包装层：自动检测项目站点与开发者令牌后拉起 gitea-mcp |
+| `assistant mcp daemon` | 开发者 | 自举的 daemon 状态 MCP：自动发现运行中的 `assistant run`，只读查询队列/会话/结果 |
+| `assistant weixin` | 初始化 | 微信对话桥（openclaw ilink 协议）：`login` 扫码、`status` 查看 |
 | `assistant check` | 机器人 | 按标签检索待 triage 的 Issue 和待 review 的 PR（只读） |
 | `assistant sync` | 机器人 | 规范 Issue 标签并把 PR 原生评审状态同步为状态标签（单次执行） |
 | `assistant automerge` | 机器人 | 维护官方评审请求（merge 管理员身份）并合并门禁全绿的已批准 PR（一次至多一个，squash） |
-| `assistant run` | 调度引擎 | 长驻主循环：检测待办 → 每待办一个会话 → 验证 → 清理 |
+| `assistant run` | 调度引擎 | 长驻 daemon：调度主循环 + 只读状态 API + 可选微信对话桥 |
 | `assistant list` | 调度引擎 | 只读列出当前待办（验证 host/仓库/令牌/标签链路） |
 | `assistant review <n>` | 调度引擎 | 立即评审单个 PR（跳过检测，端到端调试用） |
 | `assistant triage <n>` | 调度引擎 | 立即分诊单个 Issue（跳过检测） |
@@ -312,6 +314,23 @@ status/triage     Issue ───────▶  triage issue #N               
 - **多实例**：使用 `config.json` 时，`run` 为每个 instance × repo 启动一个独立循环（各自加锁、各自 worktree 根），任一循环失败即整体退出。启动前逐 instance 做健康检查：版本端点可达 + reviewer/merger/admin 令牌认证通过，任一不可用则拒绝启动（不带病运行）。
 - **优雅退出**：首个 SIGINT/SIGTERM 等当前待办处理完；二次信号强杀。
 
+### daemon 模式：状态 API 与微信对话桥
+
+`assistant run` 是 daemon：除调度主循环外，还提供只读状态 API 与可选的微信对话桥。
+
+```bash
+assistant run                                    # 默认在 127.0.0.1:8770 提供状态 API
+assistant run --api-listen none                  # 关闭状态 API
+assistant weixin login                           # 扫码登录微信 Bot（凭据写入 config.json 的 weixin 节）
+assistant run --weixin                           # 启动微信对话桥（或 config.json 设 weixin.enabled=true）
+```
+
+- **状态 API（只读）**：`GET /healthz`（无鉴权）与 `/api/v1/{status,sessions,queue,results}`（`Authorization: Bearer <token>`）。启动时端点凭据写入 `<配置目录>/daemon.json`（0600），daemon 退出即删除。
+- **自举 MCP**：`assistant mcp daemon` 从 `daemon.json` 自动发现运行中的 daemon（`ASSISTANT_DAEMON_ENDPOINT` / `ASSISTANT_DAEMON_ADDR` 可覆盖），提供 `daemon_status`、`list_sessions`、`list_queue`、`recent_results` 四个只读工具——「当前有多少个 PR 在 review、状态如何」直接问即可。
+- **微信对话桥**：按 [openclaw-weixin ilink 协议](https://github.com/Tencent/openclaw-weixin/blob/main/docs/protocol_zh_CN.md) 长轮询收消息、typesetting 与分块回复。每条会话（微信 session）对应一个**稳定的 claude 会话**：首轮 `claude -p --session-id <uuid>`，之后 `--resume <uuid>`，会话映射持久化在 `<配置目录>/chat/sessions.json`；会话只挂一个**自举的 daemon MCP**（工具面严格限定，见 `internal/daemon/chat.go`），不读写用户级 claude 配置。
+- **谁能对话**：`weixin.admin_users` 白名单；留空时只允许扫码登录的用户（`login_user_id`），两者都为空则忽略所有消息（fail-closed）。
+- 每条消息处理串行（同一会话的消息排队），不同会话最多 4 路并发；单轮对话超时默认 3 分钟（`weixin.session_timeout_ms`）。
+
 ### Docker 评审环境（可选）
 
 会话可以跑进容器，宿主机只需 docker（免装 claude 与语言工具链）：
@@ -332,7 +351,7 @@ assistant review 42 --docker-image ...     # 一次性调试同样支持
 ### 命令行
 
 ```
-assistant run             长驻主循环（部署形态；--interval/--timeout 可调）
+assistant run             长驻 daemon（部署形态；--interval/--timeout/--api-listen/--weixin 可调）
 assistant run --dry-run   只读演练：先打印生效配置（host/repo/令牌掩码/会话/节奏/路径/基线），再列出将执行的待办并逐步说明
                           将发生的动作（日志、worktree、会话、超时、完成判定、
                           放行、清理），零副作用
@@ -343,6 +362,7 @@ assistant triage <n>      立即分诊单个 Issue
 
 配置优先级：**命令行参数 > 环境变量 > git remote 自动检测 / 默认值**。
 
+- `--repo-dir` 是单目标检出覆盖：环境变量单实例模式下替代启动目录推导（remote 也从该目录读）；config.json 模式下覆盖 `repo.dir`（按共享检出处理，不克隆/不强制镜像），配置里有多仓库时必须用 `--repo owner/name` 收敛到唯一仓库。
 - **host 与仓库缺省从 remote 探测推导**（环境变量单实例模式）：按顺序检查各 remote（origin 优先），用 `/api/v1/version` 探测 Gitea 站点，GitHub/GitLab 等会被跳过；http(s) remote（如 `http://gitea.example.com:3000/owner/repo.git`）可完整推出 API 根地址与 owner/repo，ssh/scp remote 只可靠推出仓库（host 以 `http://<主机名>` 尽力猜测），探测不命中时用 `--host` / `GITEA_HOST` 显式指定。
 - 时长参数（`--interval` / `--timeout` 及对应 `DISPATCH_*_MS` 环境变量）接受 `30s` / `10m` / `1h` / `2d` 或毫秒裸数字。
 - 路径默认值：config.json 模式锚定受管路径（受管克隆 + 状态目录，见上文）；环境变量单实例模式与显式 `dir` 的共享检出锚定检出根（`git rev-parse --show-toplevel`，与启动 cwd 无关）：日志 `<检出根>/logs`、锁 `<检出根>/dispatcher.lock`；worktree 一律在系统临时目录（按 `<host>-<owner>-<repo>` 隔离）。
