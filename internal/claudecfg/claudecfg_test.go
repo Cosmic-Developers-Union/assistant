@@ -2,7 +2,9 @@ package claudecfg
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -186,5 +188,55 @@ func TestComposeOverrides(t *testing.T) {
 	rawSearch, _ := high.MCP["search"].(map[string]any)
 	if _, ok := rawSearch["env"]; ok {
 		t.Errorf("原始定义被污染：%+v", rawSearch)
+	}
+}
+
+// 会话记录位置与项目目录名：官方字符集/长度约束、稳定派生。
+func TestSessionLayoutHelpers(t *testing.T) {
+	if got := ProjectDirName("assistant-https://gitea.example.com:3000/Ge/assistant"); got != "assistant-https---gitea-example-com-3000-Ge-assistant" {
+		t.Errorf("ProjectDirName() = %q", got)
+	}
+	if got := ProjectDirName("  "); got != "assistant" {
+		t.Errorf("空名应回退 assistant：%q", got)
+	}
+	long := strings.Repeat("a", 80)
+	got := ProjectDirName(long)
+	if len(got) != 64 || got[:55] != strings.Repeat("a", 55) || got[55] != '-' {
+		t.Errorf("超长名应为 55 字符 + - + 8 位哈希（共 64）：%q（len %d）", got, len(got))
+	}
+	if strings.ContainsAny(got, " /:.") {
+		t.Errorf("非法字符未折叠：%q", got)
+	}
+	// 同名稳定、异名不同
+	if ProjectDirName(long) != got {
+		t.Error("ProjectDirName 应稳定")
+	}
+
+	path := TranscriptPath("/home/ge/.claude", "assistant-ge-assistant", "11111111-2222-4333-8444-555555555555")
+	want := filepath.Join("/home/ge/.claude", "projects", "assistant-ge-assistant", "11111111-2222-4333-8444-555555555555.jsonl")
+	if path != want {
+		t.Errorf("TranscriptPath() = %q, want %q", path, want)
+	}
+	if TranscriptPath("", "p", "s") != "" || TranscriptPath("/c", "", "s") != "" {
+		t.Error("缺项应返回空路径")
+	}
+
+	env := SessionEnv("/home/ge/.claude", "assistant-ge-assistant")
+	if len(env) != 2 || env[0] != "CLAUDE_CONFIG_DIR=/home/ge/.claude" ||
+		env[1] != "CLAUDE_CODE_PROJECT_DIR_NAME=assistant-ge-assistant" {
+		t.Errorf("SessionEnv() = %v", env)
+	}
+	if len(SessionEnv("", "p")) != 0 {
+		t.Error("缺 CLAUDE_CONFIG_DIR 时不应设置（官方会忽略项目名）")
+	}
+
+	settings := SessionSettingsMap(Overrides{})
+	if settings["cleanupPeriodDays"] != CleanupPeriodDays {
+		t.Errorf("cleanupPeriodDays = %v, want %d", settings["cleanupPeriodDays"], CleanupPeriodDays)
+	}
+	// provider 覆盖可改保留期
+	custom := SessionSettingsMap(Overrides{Settings: map[string]any{"cleanupPeriodDays": 30}})
+	if custom["cleanupPeriodDays"] != 30 {
+		t.Errorf("provider 覆盖未生效：%v", custom["cleanupPeriodDays"])
 	}
 }

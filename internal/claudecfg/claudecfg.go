@@ -8,7 +8,14 @@
 // 会话配置，绝不写入仓库文件。
 package claudecfg
 
-import "encoding/json"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+)
 
 // Env 是托管环境变量：把评审/开发会话的时长与输出上限钉死，键名与取值对齐
 // Claude Code 官方环境变量文档。
@@ -41,6 +48,71 @@ var Allow = []string{
 // 评审基线），不读操作者的用户级与本地私有设置。MCP 工具面另由
 // --strict-mcp-config + --mcp-config 钉死。
 const SettingSources = "project"
+
+// CleanupPeriodDays 是会话文本记录的保留天数（Claude Code 默认 30 天即被清理
+// 扫描删除；评审/分诊记录要留作审计，钉到 ~10 年，provider 覆盖可改）。
+const CleanupPeriodDays = 3650
+
+// ConfigDir 返回 Claude Code 配置根：$CLAUDE_CONFIG_DIR 优先，否则 ~/.claude。
+// 会话文本记录落 <ConfigDir>/projects/<project>/<session-id>.jsonl。
+func ConfigDir() string {
+	if value := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); value != "" {
+		return value
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return ""
+	}
+	return filepath.Join(home, ".claude")
+}
+
+// ProjectDirName 把候选名折成 CLAUDE_CODE_PROJECT_DIR_NAME 的合法值（官方规则：
+// 1-64 位字母/数字/连字符/下划线，非法字符替换为 -），超长截断并附哈希；折叠
+// 后为空时返回 "assistant"。
+func ProjectDirName(name string) string {
+	var builder strings.Builder
+	for _, character := range strings.TrimSpace(name) {
+		switch {
+		case character >= 'a' && character <= 'z',
+			character >= 'A' && character <= 'Z',
+			character >= '0' && character <= '9',
+			character == '-', character == '_':
+			builder.WriteRune(character)
+		default:
+			builder.WriteRune('-')
+		}
+	}
+	sanitized := strings.Trim(builder.String(), "-")
+	if sanitized == "" {
+		return "assistant"
+	}
+	if len(sanitized) > 64 {
+		sum := sha256.Sum256([]byte(name))
+		sanitized = sanitized[:55] + "-" + hex.EncodeToString(sum[:4])
+	}
+	return sanitized
+}
+
+// TranscriptPath 返回会话文本记录路径（与 Claude Code 存储规则一致）。
+func TranscriptPath(configDir, projectDirName, sessionID string) string {
+	if configDir == "" || projectDirName == "" || sessionID == "" {
+		return ""
+	}
+	return filepath.Join(configDir, "projects", projectDirName, sessionID+".jsonl")
+}
+
+// SessionEnv 返回启动 claude 时必须写进**进程环境**的两项（settings.env 无法
+// 设置 CLAUDE_CODE_PROJECT_DIR_NAME，CLAUDE_CONFIG_DIR 同理）：让文本记录固定
+// 落在项目目录名下，而不是随 worktree 路径漂移或被删除。任一项缺失时返回空。
+func SessionEnv(configDir, projectDirName string) []string {
+	if strings.TrimSpace(configDir) == "" || strings.TrimSpace(projectDirName) == "" {
+		return nil
+	}
+	return []string{
+		"CLAUDE_CONFIG_DIR=" + configDir,
+		"CLAUDE_CODE_PROJECT_DIR_NAME=" + projectDirName,
+	}
+}
 
 // Overrides 是 provider 对会话配置的运行时覆盖，三段均原样透传（框架只做
 // 合并，不解释供应商语义），支持不同供应商的各异格式：
@@ -115,6 +187,8 @@ func SessionSettingsMap(overrides Overrides, extraAllow ...string) map[string]an
 		},
 		// 项目级 .mcp.json 不自动启用：会话只用 --mcp-config 注入的服务器
 		"enableAllProjectMcpServers": false,
+		// 文本记录保留期（默认 30 天太短，审计需要；默认值可被 provider 覆盖）
+		"cleanupPeriodDays": CleanupPeriodDays,
 	}
 	mergeSettings(settings, overrides.Settings)
 	if len(overrides.Env) > 0 {

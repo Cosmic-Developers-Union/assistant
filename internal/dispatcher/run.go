@@ -37,12 +37,17 @@ import (
 // SessionOutcome 是一次 claude 会话的归集结果。
 type SessionOutcome struct {
 	// Subtype 是 success 或 error_max_turns / error_during_execution 等
-	Subtype           string   `json:"subtype"`
-	IsError           bool     `json:"isError"`
-	NumTurns          int      `json:"numTurns"`
-	CostUSD           float64  `json:"costUsd"`
-	DurationMS        int64    `json:"durationMs"`
-	SessionID         string   `json:"sessionId"`
+	Subtype    string  `json:"subtype"`
+	IsError    bool    `json:"isError"`
+	NumTurns   int     `json:"numTurns"`
+	CostUSD    float64 `json:"costUsd"`
+	DurationMS int64   `json:"durationMs"`
+	// SessionID 是本会话的稳定 ID（--session-id/--resume 用的那个）
+	SessionID string `json:"sessionId"`
+	// TranscriptPath 是持久化的文本记录路径（未持久化时为空）
+	TranscriptPath string `json:"transcriptPath,omitempty"`
+	// Resumed 为真表示本次是续接已存在的会话记录
+	Resumed           bool     `json:"resumed,omitempty"`
 	Result            string   `json:"result"`
 	Errors            []string `json:"errors"`
 	PermissionDenials int      `json:"permissionDenials"`
@@ -243,7 +248,14 @@ type SessionOptions struct {
 	// AppendSystemPrompt 是显式附加 system 提示词（测试用；缺省由 ProjectDir
 	// 的 .assistant/review.md 提供）
 	AppendSystemPrompt string
-	OnProgress         func(string)
+	// SessionID 是会话 ID：空则随机生成；已存在该 ID 的文本记录时自动改为
+	// --resume 续接（重试同一待办保留上下文），否则 --session-id 新建
+	SessionID string
+	// Title 是会话显示名（--name），便于在会话选择器与 --resume <name> 中识别
+	Title string
+	// SessionResume 由 RunSession 依据文本记录是否存在决定，调用方无需填写
+	SessionResume bool
+	OnProgress    func(string)
 }
 
 // ReviewConventionsLimit 是 .assistant/review.md 注入会话的上限（字符数），
@@ -292,10 +304,19 @@ func sessionCommand(options SessionOptions) (bin string, args []string, containe
 		options.MCPConfigPath,
 		"--setting-sources",
 		claudecfg.SettingSources,
-		// 无人值守会话不落用户会话历史，也不做自动更新/遥测类副作用
-		"--no-session-persistence",
 		"--max-turns",
 		strconv.Itoa(MaxTurns),
+	}
+	// 会话记录持久化：稳定的 ID（同一待办重试续接）+ 自定义标题
+	if options.SessionID != "" {
+		if options.SessionResume {
+			claudeArgs = append(claudeArgs, "--resume", options.SessionID)
+		} else {
+			claudeArgs = append(claudeArgs, "--session-id", options.SessionID)
+		}
+	}
+	if options.Title != "" {
+		claudeArgs = append(claudeArgs, "--name", options.Title)
 	}
 	if options.SettingsPath != "" {
 		claudeArgs = append(claudeArgs, "--settings", options.SettingsPath)
@@ -316,9 +337,17 @@ func sessionCommand(options SessionOptions) (bin string, args []string, containe
 		"-v", options.Cwd + ":" + options.Cwd,
 		"-w", options.Cwd,
 	}
-	// 会话输入文件（MCP 配置、独立 settings）按相同绝对路径挂载
+	// 会话输入文件（MCP 配置、独立 settings）与文本记录目录按相同绝对路径挂载
 	for _, dir := range sessionMountDirs(options) {
 		args = append(args, "-v", dir+":"+dir)
+	}
+	// 文本记录固定目录名靠进程环境传递，容器内显式注入并挂载（挂载点见
+	// sessionMountDirs 的 projects 目录）
+	if config.SessionDir != "" {
+		args = append(args, "-e", "CLAUDE_CONFIG_DIR="+config.SessionDir)
+	}
+	if config.SessionProject != "" {
+		args = append(args, "-e", "CLAUDE_CODE_PROJECT_DIR_NAME="+config.SessionProject)
 	}
 	if config.DockerNetwork != "" {
 		args = append(args, "--network", config.DockerNetwork)
@@ -373,6 +402,22 @@ func RunSession(options SessionOptions) SessionOutcome {
 		options.AppendSystemPrompt = ReadReviewConventions(options.ProjectDir)
 	}
 
+	// 稳定的会话 ID 与文本记录位置：同一待办重试复用同一记录（--resume 续接），
+	// 记录固定落在 <SessionDir>/projects/<SessionProject>/ 下，与 /tmp worktree
+	// 的生命周期解耦
+	if options.SessionID == "" {
+		options.SessionID = provider.NewSessionID()
+	}
+	outcome.SessionID = options.SessionID
+	options.SessionResume = false
+	if transcript := claudecfg.TranscriptPath(config.SessionDir, config.SessionProject, options.SessionID); transcript != "" {
+		if _, err := os.Stat(transcript); err == nil {
+			options.SessionResume = true
+		}
+		outcome.TranscriptPath = transcript
+	}
+	outcome.Resumed = options.SessionResume
+
 	// 独立会话配置写临时目录：环境变量与权限放行随二进制版本走，不依赖仓库
 	// 状态与操作者用户配置
 	configDir, cleanup, err := createSessionConfigDir()
@@ -404,6 +449,10 @@ func RunSession(options SessionOptions) SessionOutcome {
 	bin, args, container := sessionCommand(options)
 	command := exec.Command(bin, args...)
 	command.Dir = options.Cwd
+	// 文本记录的固定项目目录名必须在进程环境里（settings.env 无效）
+	if pairs := claudecfg.SessionEnv(config.SessionDir, config.SessionProject); len(pairs) > 0 {
+		command.Env = append(os.Environ(), pairs...)
+	}
 	stream := &streamWriter{outcome: &outcome, onProgress: options.OnProgress}
 	stderr := &tailWriter{}
 	command.Stdout = stream

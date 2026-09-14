@@ -65,21 +65,33 @@ func writeSessionMCPConfig(dir, basePath string, overrides claudecfg.Overrides) 
 	return path, nil
 }
 
-// sessionMountDirs 返回容器形态下需要挂载的宿主目录（MCP 配置与独立会话配置
-// 所在目录，去重；容器内外路径一致）。
+// sessionMountDirs 返回容器形态下需要挂载的宿主目录（MCP 配置、独立会话配置
+// 与文本记录项目目录，去重；容器内外路径一致）。
 func sessionMountDirs(options SessionOptions) []string {
-	seen := make(map[string]bool, 2)
-	dirs := make([]string, 0, 2)
-	for _, path := range []string{options.MCPConfigPath, options.SettingsPath} {
-		if path == "" {
-			continue
-		}
-		dir := filepath.Dir(path)
-		if seen[dir] {
-			continue
+	seen := make(map[string]bool, 3)
+	dirs := make([]string, 0, 3)
+	add := func(dir string) {
+		if dir == "" || seen[dir] {
+			return
 		}
 		seen[dir] = true
 		dirs = append(dirs, dir)
 	}
+	if options.MCPConfigPath != "" {
+		add(filepath.Dir(options.MCPConfigPath))
+	}
+	if options.SettingsPath != "" {
+		add(filepath.Dir(options.SettingsPath))
+	}
+	add(sessionProjectsDir(options.Config))
 	return dirs
+}
+
+// sessionProjectsDir 返回文本记录的项目根目录（<SessionDir>/projects）：容器
+// 形态挂载它，评审会话结束后文本记录留在宿主。
+func sessionProjectsDir(config Config) string {
+	if config.SessionDir == "" {
+		return ""
+	}
+	return filepath.Join(config.SessionDir, "projects")
 }

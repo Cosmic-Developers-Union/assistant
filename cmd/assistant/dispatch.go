@@ -650,14 +650,25 @@ func newDispatchDeps(target dispatchTarget, w io.Writer, store *daemon.Store) di
 		RemoveWorktree: func(dir string) error {
 			return dispatcher.RemoveWorktree(repoDir, dir)
 		},
-		RunSession: func(prompt, cwd string, onProgress func(string)) dispatcher.SessionOutcome {
+		RunSession: func(request dispatcher.SessionRequest) dispatcher.SessionOutcome {
+			item := request.Item
+			// 稳定会话 ID：PR 以 head 为锚点（head 变化换新记录），Issue 以标题
+			// 为锚点；同一待办重试复用同一会话记录（RunSession 自动 --resume）
+			anchor := request.HeadSHA
+			if item.Kind != dispatcher.KindPull {
+				anchor = item.Title
+			}
 			return dispatcher.RunSession(dispatcher.SessionOptions{
 				Config:        config,
-				Prompt:        prompt,
-				Cwd:           cwd,
+				Prompt:        request.Prompt,
+				Cwd:           request.Cwd,
 				MCPConfigPath: filepath.Join(repoDir, ".mcp.json"),
 				ProjectDir:    repoDir,
-				OnProgress:    onProgress,
+				SessionID: dispatcher.SessionID(
+					config.Host, config.Repository.FullName(), item.Kind, item.Number, anchor),
+				Title: dispatcher.SessionTitle(
+					item.Kind, config.Repository.FullName(), item.Number, request.HeadSHA),
+				OnProgress: request.OnProgress,
 			})
 		},
 	}

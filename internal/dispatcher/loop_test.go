@@ -28,7 +28,7 @@ func planDeps(t *testing.T, api API, config Config, logs *[]string) Deps {
 			t.Fatal("dry-run 不得移除 worktree")
 			return nil
 		},
-		RunSession: func(string, string, func(string)) SessionOutcome {
+		RunSession: func(SessionRequest) SessionOutcome {
 			t.Fatal("dry-run 不得启动会话")
 			return SessionOutcome{}
 		},
@@ -154,7 +154,8 @@ func TestProcessItemRoutesProgressToConsoleAndLog(t *testing.T) {
 			t.Fatal("issue 待办不清理 worktree")
 			return nil
 		},
-		RunSession: func(_ string, _ string, onProgress func(string)) SessionOutcome {
+		RunSession: func(request SessionRequest) SessionOutcome {
+			onProgress := request.OnProgress
 			onProgress("session=s-1 model=test")
 			onProgress("开始审查")
 			onProgress("🔧 Read")
@@ -215,7 +216,7 @@ func TestProcessItemHeadDriftInvalidatesWithoutRetry(t *testing.T) {
 		BuildPrompt:     BuildPrompt,
 		PrepareWorktree: func(int64) (string, error) { return "sha-old", nil },
 		RemoveWorktree:  func(string) error { return nil },
-		RunSession: func(string, string, func(string)) SessionOutcome {
+		RunSession: func(SessionRequest) SessionOutcome {
 			sessions++
 			return SessionOutcome{
 				Subtype:    "success",

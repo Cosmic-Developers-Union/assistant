@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -90,7 +92,7 @@ func TestChatProviderSessionHeader(t *testing.T) {
 		t.Fatalf("NewChat: %v", err)
 	}
 	sessionID := "11111111-2222-4333-8444-555555555555"
-	args, err := chat.sessionArgs(sessionID, true, "你好")
+	args, err := chat.sessionArgs(sessionID, "chat-test", true, "你好")
 	if err != nil {
 		t.Fatalf("sessionArgs: %v", err)
 	}
@@ -120,4 +122,59 @@ func argumentAfter(args []string, flag string) string {
 		}
 	}
 	return ""
+}
+
+// 对话会话：稳定标题（--name）+ 固定文本记录项目目录名（跨轮 --resume 同一 ID）。
+func TestChatSessionTitleAndProjectEnv(t *testing.T) {
+	stateDir := t.TempDir()
+	var gotArgs, gotEnv []string
+	turns := 0
+	chat, err := NewChat(ChatConfig{
+		ClaudeBin:      "claude",
+		StateDir:       stateDir,
+		SessionDir:     filepath.Join(stateDir, "claude"),
+		SessionProject: "assistant-chat",
+		RunClaude: func(_ context.Context, _ string, args []string, _ string, env []string) ([]byte, error) {
+			gotArgs, gotEnv = args, env
+			turns++
+			return []byte(`{"subtype":"success","is_error":false,"result":"好的"}`), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewChat: %v", err)
+	}
+	conversation := "o9cq80yYcUkby1i0GsUNJ1u00RSM@im.wechat"
+	reply, err := chat.Handle(context.Background(), conversation, "在吗")
+	if err != nil || reply != "好的" {
+		t.Fatalf("Handle: reply=%q err=%v", reply, err)
+	}
+	title := chatSessionTitle(conversation)
+	if argumentAfter(gotArgs, "--name") != title {
+		t.Errorf("--name = %q, want %q", argumentAfter(gotArgs, "--name"), title)
+	}
+	if !strings.HasPrefix(title, "chat-") || len(title) != len("chat-")+8 {
+		t.Errorf("标题格式 = %q", title)
+	}
+	firstID := argumentAfter(gotArgs, "--session-id")
+	if firstID == "" {
+		t.Fatalf("首轮缺 --session-id：%v", gotArgs)
+	}
+	envJoined := strings.Join(gotEnv, "\n")
+	if !strings.Contains(envJoined, "CLAUDE_CODE_PROJECT_DIR_NAME=assistant-chat") ||
+		!strings.Contains(envJoined, "CLAUDE_CONFIG_DIR="+filepath.Join(stateDir, "claude")) {
+		t.Errorf("文本记录位置未注入环境：%v", gotEnv)
+	}
+	// 第二轮复用同一会话 ID（--resume），标题稳定
+	if _, err := chat.Handle(context.Background(), conversation, "再问一句"); err != nil {
+		t.Fatal(err)
+	}
+	if got := argumentAfter(gotArgs, "--resume"); got != firstID {
+		t.Errorf("--resume = %q, want %q", got, firstID)
+	}
+	if argumentAfter(gotArgs, "--name") != title {
+		t.Errorf("标题应跨轮稳定：%q", argumentAfter(gotArgs, "--name"))
+	}
+	if turns != 2 {
+		t.Errorf("turns = %d", turns)
+	}
 }

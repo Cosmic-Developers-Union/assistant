@@ -3,6 +3,8 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -38,8 +40,13 @@ type ChatConfig struct {
 	Timeout time.Duration
 	// StateDir 是会话状态目录（缺省 <配置目录>/chat）
 	StateDir string
-	// RunClaude 可覆盖 claude 调用（测试注入）；返回 stdout
-	RunClaude func(ctx context.Context, bin string, args []string, dir string) ([]byte, error)
+	// SessionDir 是 Claude Code 配置根（缺省 $CLAUDE_CONFIG_DIR 或 ~/.claude）
+	SessionDir string
+	// SessionProject 是对话会话稳定的项目目录名（缺省 assistant-chat），文本
+	// 记录固定落 <SessionDir>/projects/<SessionProject>/，与启动目录无关
+	SessionProject string
+	// RunClaude 可覆盖 claude 调用（测试注入）；env 是额外进程环境变量；返回 stdout
+	RunClaude func(ctx context.Context, bin string, args []string, dir string, env []string) ([]byte, error)
 	// Log 输出
 	Log func(string, ...any)
 }
@@ -72,6 +79,12 @@ func NewChat(config ChatConfig) (*Chat, error) {
 			return nil, err
 		}
 		config.StateDir = filepath.Join(directory, "chat")
+	}
+	if strings.TrimSpace(config.SessionDir) == "" {
+		config.SessionDir = claudecfg.ConfigDir()
+	}
+	if strings.TrimSpace(config.SessionProject) == "" {
+		config.SessionProject = claudecfg.ProjectDirName("assistant-chat")
 	}
 	if config.RunClaude == nil {
 		config.RunClaude = runClaude
@@ -107,13 +120,15 @@ func (c *Chat) Handle(ctx context.Context, conversationID, text string) (string,
 		}
 		sessionID, fresh = generated, true
 	}
-	args, err := c.sessionArgs(sessionID, fresh, text)
+	args, err := c.sessionArgs(sessionID, chatSessionTitle(conversationID), fresh, text)
 	if err != nil {
 		return "", err
 	}
 	runCtx, cancel := context.WithTimeout(ctx, c.config.Timeout)
 	defer cancel()
-	output, err := c.config.RunClaude(runCtx, c.config.ClaudeBin, args, c.config.StateDir)
+	output, err := c.config.RunClaude(
+		runCtx, c.config.ClaudeBin, args, c.config.StateDir,
+		claudecfg.SessionEnv(c.config.SessionDir, c.config.SessionProject))
 	if err != nil {
 		return "", fmt.Errorf("对话会话失败: %w", err)
 	}
@@ -139,10 +154,10 @@ func (c *Chat) Handle(ctx context.Context, conversationID, text string) (string,
 	return strings.TrimSpace(result.Result), nil
 }
 
-// sessionArgs 组装 claude 调用参数：稳定会话 + 独立设置 + 自举 daemon MCP。
-// 供应商代码级特化（如 opencode 的会话请求头）在每轮对话启动前应用，复用该
-// 会话的稳定 UUID（同一会话多轮命中网关缓存）。
-func (c *Chat) sessionArgs(sessionID string, fresh bool, text string) ([]string, error) {
+// sessionArgs 组装 claude 调用参数：稳定会话 + 自定义标题 + 独立设置 + 自举
+// daemon MCP。供应商代码级特化（如 opencode 的会话请求头）在每轮对话启动前
+// 应用，复用该会话的稳定 UUID（同一会话多轮命中网关缓存）。
+func (c *Chat) sessionArgs(sessionID, title string, fresh bool, text string) ([]string, error) {
 	overrides, err := provider.Apply(c.config.ProviderName, "chat", sessionID, c.config.Provider)
 	if err != nil {
 		return nil, err
@@ -170,6 +185,9 @@ func (c *Chat) sessionArgs(sessionID string, fresh bool, text string) ([]string,
 		args = append(args, "--session-id", sessionID)
 	} else {
 		args = append(args, "--resume", sessionID)
+	}
+	if title != "" {
+		args = append(args, "--name", title)
 	}
 	if c.config.Model != "" {
 		args = append(args, "--model", c.config.Model)
@@ -273,6 +291,13 @@ func (c *Chat) remember(conversationID, sessionID string) error {
 	return os.WriteFile(c.sessionsPath(), append(data, '\n'), 0o600)
 }
 
+// chatSessionTitle 生成对话会话显示名（--name）：按会话 ID 哈希取短标识，
+// 便于在会话选择器中区分不同微信用户，且跨轮稳定。
+func chatSessionTitle(conversationID string) string {
+	sum := sha256.Sum256([]byte(conversationID))
+	return "chat-" + hex.EncodeToString(sum[:4])
+}
+
 // claudeResult 是 claude -p --output-format json 的结果子集。
 type claudeResult struct {
 	Subtype string   `json:"subtype"`
@@ -297,9 +322,12 @@ func truncate(text string, limit int) string {
 	return string(runes[:limit]) + "…"
 }
 
-func runClaude(ctx context.Context, bin string, args []string, dir string) ([]byte, error) {
+func runClaude(ctx context.Context, bin string, args []string, dir string, env []string) ([]byte, error) {
 	command := exec.CommandContext(ctx, bin, args...)
 	command.Dir = dir
+	if len(env) > 0 {
+		command.Env = append(os.Environ(), env...)
+	}
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr

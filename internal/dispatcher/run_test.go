@@ -273,6 +273,8 @@ func TestSessionCommandBare(t *testing.T) {
 		Prompt:        "review pr #1",
 		Cwd:           "/work",
 		MCPConfigPath: "/repo/.mcp.json",
+		SessionID:     "11111111-2222-4333-8444-555555555555",
+		Title:         "review acme/repo#1",
 	}
 	bin, args, container := sessionCommand(options)
 	if bin != "claude" || container != "" {
@@ -280,14 +282,27 @@ func TestSessionCommandBare(t *testing.T) {
 	}
 	for _, want := range []string{
 		"-p", "review pr #1", "--model", "sonnet", "--mcp-config", "/repo/.mcp.json",
-		"--setting-sources", "project", "--no-session-persistence",
+		"--setting-sources", "project",
+		"--session-id", "11111111-2222-4333-8444-555555555555",
+		"--name", "review acme/repo#1",
 	} {
 		if !containsString(args, want) {
 			t.Errorf("args missing %q: %v", want, args)
 		}
 	}
+	if containsString(args, "--no-session-persistence") {
+		t.Errorf("会话记录应持久化（不再禁用）：%v", args)
+	}
 	if containsString(args, "--settings") {
 		t.Errorf("未生成会话配置时不应传 --settings: %v", args)
+	}
+
+	// 已存在文本记录时改为 --resume 续接
+	resumed := options
+	resumed.SessionResume = true
+	_, args, _ = sessionCommand(resumed)
+	if !containsString(args, "--resume") || containsString(args, "--session-id") {
+		t.Errorf("resume 形态参数错误：%v", args)
 	}
 }
 

@@ -359,6 +359,18 @@ status/triage     Issue ───────▶  triage issue #N               
 - **多实例**：使用 `config.json` 时，`run` 为每个 instance × repo 启动一个独立循环（各自加锁、各自 worktree 根），任一循环失败即整体退出。启动前逐 instance 做健康检查：版本端点可达 + reviewer/merger/admin 令牌认证通过，任一不可用则拒绝启动（不带病运行）。
 - **优雅退出**：首个 SIGINT/SIGTERM 等当前待办处理完；二次信号强杀。
 
+### 会话记录（持久化，可续接）
+
+每个待办的评审/分诊会话都有**稳定的会话记录位置与 ID**，不再随 `/tmp` worktree 消失：
+
+- **稳定 ID**：由站点 + 仓库 + 待办 + 锚点（PR 的 head / Issue 的标题）确定性派生 UUID。同一待办重试复用同一记录并自动 `claude -p --resume <id>` 续接（保留上一轮上下文）；head 推进即派生新 ID 开新记录。
+- **稳定位置**：会话进程环境注入 `CLAUDE_CONFIG_DIR` + `CLAUDE_CODE_PROJECT_DIR_NAME`（官方「自己命名项目目录」机制），记录固定落
+  `~/.claude/projects/<assistant-站点-仓库>/<session-id>.jsonl`，与启动目录/ worktree 路径解耦；Docker 评审形态会把该 `projects` 目录挂进容器，记录仍留在宿主。
+- **自定义标题**：`--name` 设为 `review <owner>/<repo>#12@<head7>`、`triage <owner>/<repo>#7`；微信对话会话为 `chat-<8 位哈希>`（同一微信用户跨轮稳定）。用 `claude --resume "<id 或标题>"` 随时人工查看；每轮日志会记录文本记录路径。
+- **保留期**：托管会话设置里 `cleanupPeriodDays=3650`（官方默认 30 天会被清理扫描删掉；provider `settings` 可覆盖）。
+- 不再传 `--no-session-persistence`：会话记录是审计与排障的一等数据。
+- 容器部署下 `CLAUDE_CONFIG_DIR=$HOME/.claude`（随挂载持久化，凭据 `.credentials.json` 在同一目录）；首次运行会自动创建 `$HOME/.claude/.claude.json` 配置，如需沿用宿主已有的 onboarding/信任状态，可把它复制到该位置。
+
 ### daemon 模式：状态 API 与微信对话桥
 
 `assistant run` 是 daemon：除调度主循环外，还提供只读状态 API 与可选的微信对话桥。

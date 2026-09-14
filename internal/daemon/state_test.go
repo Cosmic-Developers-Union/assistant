@@ -140,7 +140,7 @@ func TestChatStableSession(t *testing.T) {
 	var calls [][]string
 	chat, err := NewChat(ChatConfig{
 		StateDir: dir,
-		RunClaude: func(_ context.Context, _ string, args []string, _ string) ([]byte, error) {
+		RunClaude: func(_ context.Context, _ string, args []string, _ string, _ []string) ([]byte, error) {
 			calls = append(calls, args)
 			return []byte(`{"subtype":"success","is_error":false,"result":"有 2 个 PR 在评审"}`), nil
 		},

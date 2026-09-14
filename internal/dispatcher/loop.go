@@ -42,7 +42,7 @@ type Deps struct {
 	// 会话同口径）；未传时 Issue 会话退回在宿主检出内运行
 	PrepareIssue   func(worktreeDir string) (string, error)
 	RemoveWorktree func(dir string) error
-	RunSession     func(prompt, cwd string, onProgress func(string)) SessionOutcome
+	RunSession     func(request SessionRequest) SessionOutcome
 	// 运行态上报（daemon API / MCP 状态查询用；均可为 nil）
 	// OnQueue 每轮检测后上报当前待办清单（含空清单：队列已清空）
 	OnQueue func(items []WorkItem)
@@ -50,6 +50,17 @@ type Deps struct {
 	OnStart func(item WorkItem)
 	// OnFinish 会话结束后上报（移出活跃列表并归档结果）
 	OnFinish func(item WorkItem, outcome SessionOutcome)
+}
+
+// SessionRequest 是一次会话的输入：待办上下文（稳定会话 ID/标题用）+ 起始
+// 提示词 + 工作目录；由 loop 组装、宿主注入执行细节。
+type SessionRequest struct {
+	Item    WorkItem
+	HeadSHA string
+	Prompt  string
+	Cwd     string
+	// OnProgress 折叠 stream-json 的实时进度（assistant 文本与工具调用）
+	OnProgress func(string)
 }
 
 // RunAll 监督多个仓库的常驻循环：各自独立加锁（锁在各自检出内），任一循环
@@ -338,6 +349,15 @@ func planSteps(deps Deps, item WorkItem) []string {
 		mcpNote = fmt.Sprintf("<临时合并配置：.mcp.json + provider %s 的 %d 个 server>",
 			config.ProviderName, mcpServers)
 	}
+	// 演练时 head 尚未取到（真实运行时以 head 为锚点派生 ID），这里用占位
+	sessionID := SessionID(config.Host, config.Repository.FullName(), item.Kind, item.Number, "<head>")
+	transcript := claudecfg.TranscriptPath(config.SessionDir, config.SessionProject, sessionID)
+	sessionMode := "--session-id " + sessionID + "（同一待办重试自动改 --resume 续接）"
+	if transcript != "" {
+		if _, err := os.Stat(transcript); err == nil {
+			sessionMode = "--resume " + sessionID
+		}
+	}
 	claudeArgs := []string{
 		"--permission-mode auto",
 		"--autocompact auto",
@@ -347,8 +367,14 @@ func planSteps(deps Deps, item WorkItem) []string {
 		"--mcp-config " + mcpNote,
 		"--settings " + settingsNote,
 		"--setting-sources " + claudecfg.SettingSources,
-		"--no-session-persistence",
+		sessionMode,
+		"--name " + SessionTitle(item.Kind, config.Repository.FullName(), item.Number, ""),
 		fmt.Sprintf("--max-turns %d", MaxTurns),
+	}
+	if config.SessionProject != "" {
+		claudeArgs = append(claudeArgs,
+			fmt.Sprintf("CLAUDE_CONFIG_DIR=%s CLAUDE_CODE_PROJECT_DIR_NAME=%s（文本记录：%s）",
+				config.SessionDir, config.SessionProject, transcript))
 	}
 	if _, err := os.Stat(filepath.Join(deps.RepoDir, ".assistant", "review.md")); err == nil {
 		claudeArgs = append(claudeArgs, "--append-system-prompt <项目约定 .assistant/review.md>")
@@ -499,6 +525,8 @@ type attemptRecord struct {
 	CostUSD           float64  `json:"costUsd"`
 	DurationMS        int64    `json:"durationMs"`
 	SessionID         string   `json:"sessionId"`
+	TranscriptPath    string   `json:"transcriptPath,omitempty"`
+	Resumed           bool     `json:"resumed,omitempty"`
 	Result            string   `json:"result"`
 	Errors            []string `json:"errors"`
 	PermissionDenials int      `json:"permissionDenials"`
@@ -580,7 +608,13 @@ func ProcessItem(ctx context.Context, deps Deps, item WorkItem) ProcessResult {
 	if deps.OnStart != nil {
 		deps.OnStart(item)
 	}
-	outcome := deps.RunSession(prompt, cwd, onProgress)
+	outcome := deps.RunSession(SessionRequest{
+		Item:       item,
+		HeadSHA:    headSHA,
+		Prompt:     prompt,
+		Cwd:        cwd,
+		OnProgress: onProgress,
+	})
 	if deps.OnFinish != nil {
 		deps.OnFinish(item, outcome)
 	}
@@ -593,6 +627,8 @@ func ProcessItem(ctx context.Context, deps Deps, item WorkItem) ProcessResult {
 		CostUSD:           outcome.CostUSD,
 		DurationMS:        outcome.DurationMS,
 		SessionID:         outcome.SessionID,
+		TranscriptPath:    outcome.TranscriptPath,
+		Resumed:           outcome.Resumed,
 		Result:            outcome.Result,
 		Errors:            outcome.Errors,
 		PermissionDenials: outcome.PermissionDenials,

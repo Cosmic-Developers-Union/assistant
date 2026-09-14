@@ -57,6 +57,12 @@ type Config struct {
 	Provider claudecfg.Overrides
 	// ProviderName 是生效的 provider 名（空串表示内置缺省；仅日志/状态展示）
 	ProviderName string
+	// SessionDir 是 Claude Code 配置根（缺省 $CLAUDE_CONFIG_DIR 或 ~/.claude）：
+	// 文本记录落 <SessionDir>/projects/<SessionProject>/<session-id>.jsonl
+	SessionDir string
+	// SessionProject 是本仓库稳定的会话项目目录名（缺省由站点+仓库派生）：
+	// worktree 在 /tmp 用完即删，会话记录的位置不受影响
+	SessionProject string
 	// Optimizations 是全局优化点层（Provider 之下的那一层；仅日志/状态展示，
 	// 实际生效值见 Provider）
 	Optimizations claudecfg.Overrides
@@ -225,6 +231,8 @@ func ResolveConfig(
 		Host:           strings.TrimRight(host, "/"),
 		AccessToken:    accessToken,
 		Repository:     parsedRepository,
+		SessionDir:     claudecfg.ConfigDir(),
+		SessionProject: claudecfg.ProjectDirName("assistant-" + host + "-" + repository),
 		Interval:       interval,
 		SessionTimeout: sessionTimeout,
 		LogDir:         firstNonEmpty(flags.LogDir, env("DISPATCH_LOG_DIR"), filepath.Join(repoDir, "logs")),
