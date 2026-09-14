@@ -277,7 +277,7 @@ func TestProviderValidation(t *testing.T) {
 	if got := file.WeixinProviderName(); got != "gw" {
 		t.Errorf("WeixinProviderName() fallback = %q, want gw", got)
 	}
-	if overrides := file.LookupProvider("gw").Overrides(); !overrides.Empty() {
+	if overrides := file.ProviderNameOf("gw").Overrides(); !overrides.Empty() {
 		t.Errorf("空 provider 应为空覆盖：%+v", overrides)
 	}
 }
@@ -332,5 +332,89 @@ func TestEffectiveOverridesComposition(t *testing.T) {
 	bad.Normalize()
 	if err := bad.Validate(); err == nil {
 		t.Error("非法 env 键名应报错")
+	}
+}
+
+// 一个 provider 一个文件：<配置目录>/providers/<name>.json；与内联合并、
+// 重名报错、Save 不把文件供应商内联回 config.json。
+func TestProviderFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "providers"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "config.json")
+	config := `{"default_provider": "opencode",
+		"instances": [{"host": "https://gitea.example.com", "repos": [{"name": "owner/repo", "provider": "opencode"}]}]}`
+	if err := os.WriteFile(configPath, []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	providerFile := `{
+		"env": {"ANTHROPIC_BASE_URL": "https://opencode.ai/zen", "ANTHROPIC_AUTH_TOKEN": "sk-zen"},
+		"settings": {"model": "claude-sonnet-5"},
+		"mcp": {"search": {"command": "search-mcp"}}
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "providers", "opencode.json"), []byte(providerFile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// 非 json 文件与隐藏文件忽略
+	if err := os.WriteFile(filepath.Join(dir, "providers", "notes.md"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	file, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if names := file.ProviderFileNames(); len(names) != 1 || names[0] != "opencode" {
+		t.Fatalf("ProviderFileNames() = %v", names)
+	}
+	provider, ok := file.LookupProvider("opencode")
+	if !ok || provider.Env["ANTHROPIC_BASE_URL"] != "https://opencode.ai/zen" {
+		t.Fatalf("文件 provider 未生效：%+v ok=%v", provider.Env, ok)
+	}
+	if overrides := file.EffectiveOverrides("opencode"); overrides.Env["ANTHROPIC_AUTH_TOKEN"] != "sk-zen" {
+		t.Errorf("EffectiveOverrides = %+v", overrides.Env)
+	}
+	// 保存后不把文件供应商内联，重新加载仍然工作（不会重名冲突）
+	if err := Save(configPath, file); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "sk-zen") {
+		t.Errorf("文件 provider 被写回 config.json：\n%s", raw)
+	}
+	if _, err := Load(configPath); err != nil {
+		t.Fatalf("保存后重新加载失败：%v", err)
+	}
+
+	// 内联重名报错
+	duplicate := `{"providers": {"opencode": {"env": {"A": "b"}}},
+		"instances": [{"host": "https://gitea.example.com", "repos": []}]}`
+	if err := os.WriteFile(configPath, []byte(duplicate), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(configPath); err == nil || !strings.Contains(err.Error(), "重名") {
+		t.Fatalf("重名应报错，got %v", err)
+	}
+
+	// 空文件 / 坏 JSON 报错并给出路径
+	if err := os.WriteFile(configPath, []byte(`{"instances": [{"host": "https://gitea.example.com", "repos": []}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	providerPath := filepath.Join(dir, "providers", "opencode.json")
+	if err := os.WriteFile(providerPath, []byte("  \n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(configPath); err == nil || !strings.Contains(err.Error(), "opencode.json") {
+		t.Fatalf("空文件应报错并含路径，got %v", err)
+	}
+	if err := os.WriteFile(providerPath, []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(configPath); err == nil || !strings.Contains(err.Error(), "opencode.json") {
+		t.Fatalf("坏 JSON 应报错并含路径，got %v", err)
 	}
 }
