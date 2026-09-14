@@ -88,7 +88,7 @@ assistant completion fish > ~/.config/fish/completions/assistant.fish
 
 ### 多 provider（供应商）
 
-`providers` 是手写维护的供应商配置：不同供应商（Anthropic 官方、Anthropic 兼容网关、Bedrock/Vertex 等）的 env/settings/mcp 格式各异，框架只做原样透传合并，不解释供应商语义：
+`providers` 是手写维护的供应商配置：不同供应商（Anthropic 官方、Anthropic 兼容网关、Bedrock/Vertex 等）的 env/settings/mcp 格式各异，框架只做原样透传合并，不解释供应商语义；另有全局 `optimizations` 层（同 provider 形态，见下）：
 
 - `env`：注入会话环境变量（可含密钥）；provider 自定义的 `mcp` server 会缺省继承它（server 自身 `env` 优先）；
 - `settings`：Claude Code 原生 settings 片段（如 `model`、`apiKeyHelper`、`awsAuthRefresh`），合并进会话 `--settings`（`env`/`permissions` 逐键合并，其余顶层键覆盖托管默认）；
@@ -115,6 +115,19 @@ assistant completion fish > ~/.config/fish/completions/assistant.fish
 ```
 
 选择粒度逐级回退：`repo.provider` > `instance.provider` > `default_provider`；微信对话桥用 `weixin.provider`（缺省回退 `default_provider`）。引用了未定义的名字直接报错，不会静默用错供应商。
+
+`optimizations` 是跨供应商通用的全局优化点（同 `env`/`settings`/`mcp` 三段）：对所有会话打底生效，选中 provider 的同名取值覆盖其上（`repo.provider` 亦不例外）。适合放时长、上下文窗口、遥测开关、子 agent 模型等横向调优：
+
+```json
+{
+  "optimizations": {
+    "env": { "CLAUDE_CODE_EFFORT_LEVEL": "high", "API_TIMEOUT_MS": "3000000" }
+  },
+  "default_provider": "zhipu"
+}
+```
+
+各家供应商的推荐优化点与坑位（1M 上下文、模型档位映射、tool search、beta header 等）见 [`providers.md`](providers.md)。
 
 **只作用于运行时会话**：provider 覆盖进评审/分诊/对话会话的临时 `--settings` 与 `--mcp-config`，绝不写入仓库 `.claude/settings.json`/`.mcp.json`——密钥不进 git，仓库保持供应商无关。`run --dry-run` 会打印每个目标生效的 provider 与覆盖项数（值不落日志）。
 
