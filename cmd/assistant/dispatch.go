@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -666,6 +667,13 @@ func runDispatchLoop(command *cobra.Command, repoFlag, configPath string, option
 	if !options.DryRun {
 		if err := checkTargetsHealth(command.Context(), ready, log); err != nil {
 			return err
+		}
+		if len(ready) > 0 {
+			// claude 是会话运行时依赖：提前给出可诊断的警告，而不是等会话失败
+			if _, err := exec.LookPath(ready[0].config.ClaudeBin); err != nil {
+				log(fmt.Sprintf("警告：找不到 claude 可执行文件（%s）：评审/对话会话将失败（装 claude 或用 --claude-bin 指绝对路径）",
+					ready[0].config.ClaudeBin))
+			}
 		}
 	}
 

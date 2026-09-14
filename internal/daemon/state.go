@@ -192,6 +192,11 @@ func (s *Store) Snapshot() Status {
 		PID:       s.pid,
 		StartedAt: s.startedAt,
 		Now:       time.Now(),
+		// 空集合序列化为 []（MCP/对话输出可读，而不是 null）
+		Targets:  []Target{},
+		Queue:    []Queue{},
+		Sessions: []Session{},
+		Recent:   []Result{},
 	}
 	for _, repositoryKey := range s.order {
 		status.Targets = append(status.Targets, s.targets[repositoryKey])

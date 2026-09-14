@@ -31,16 +31,19 @@ RUN set -eu; \
     curl --fail --show-error --location --retry 5 https://bun.sh/install | bash; \
     /root/.bun/bin/bun --version
 
-# Claude Code CLI：npm 优先，失败回退官方脚本（低带宽场景带重试）；安装脚本
-# 可能落在 /root/.local/bin（非 root 运行 daemon 时不可达），统一补到 /usr/local/bin
+# Claude Code CLI：npm 优先，失败回退官方脚本（低带宽场景带重试）。安装位置随
+# 基础镜像变化（runner 的 node 工具缓存 /opt/acttoolcache/...、npm 全局前缀或
+# /root/.local/bin）；统一软链到 /usr/local/bin，保证非 root 运行 daemon 时也能
+# 在受限 PATH 下解析到 claude
 RUN set -eu; \
     npm install -g @anthropic-ai/claude-code --registry=https://registry.npmjs.org/ \
       || npm install -g @anthropic-ai/claude-code --registry=https://registry.npmjs.org/; \
     if ! command -v claude &> /dev/null; then \
       curl -fsSL https://claude.ai/cli/install.sh | sh || true; \
     fi; \
-    if [ ! -x /usr/local/bin/claude ] && [ -x /root/.local/bin/claude ]; then \
-      install -m 0755 /root/.local/bin/claude /usr/local/bin/claude; \
+    claude_bin="$(command -v claude || true)"; \
+    if [ -n "$claude_bin" ] && [ "$claude_bin" != "/usr/local/bin/claude" ]; then \
+      ln -sfn "$claude_bin" /usr/local/bin/claude; \
     fi; \
     command -v claude &> /dev/null && claude --version || echo "Claude Code installation pending"
 
