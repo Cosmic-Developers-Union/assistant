@@ -20,6 +20,7 @@
 | `assistant install` | 开发者 | 在仓库检出内配置 skills / AGENTS.md / workflow / 各 AI CLI 的 MCP |
 | `assistant uninstall` | 开发者 | 移除 `install` 写入的内容（只触碰带 marker 的） |
 | `assistant doctor` | 开发者 | 两级体检：本地 install 产物 + 服务端（分支保护/标签/协作者/merge 令牌），只读 |
+| `assistant validate` | 部署 | 校验用户配置：config.json（平台/仓库/provider/微信桥）与 credentials.json（身份与用途令牌），只读不联网 |
 | `assistant mcp gitea` | 开发者 | MCP 包装层：自动检测项目站点与开发者令牌后拉起 gitea-mcp |
 | `assistant mcp daemon` | 开发者 | 自举的 daemon 状态 MCP：自动发现运行中的 `assistant run`，只读查询队列/会话/结果 |
 | `assistant weixin` | 初始化 | 微信对话桥（openclaw ilink 协议）：`login` 扫码、`status` 查看 |
@@ -85,7 +86,7 @@ assistant completion fish > ~/.config/fish/completions/assistant.fish
 
 ### 多 provider（供应商）
 
-`providers` 是供应商配置：**内置了开箱即用预设**（`zhipu`/`glm`、`kimi`、`moonshot`、`minimax`、`opencode`/`zen`、`anthropic`、`openai` 等），预设补齐端点、令牌变量、模型档位、超时与上下文窗口——多数情况下只写 `api_key`（或 `auth_token`）即可，其余键（`env`/`settings`/`mcp`）按需覆盖预设同名取值：
+`providers` 是供应商配置，**直接写在 `config.json` 里**（它就是用户配置的一部分）：**内置了开箱即用预设**（`zhipu`/`glm`、`kimi`、`moonshot`、`minimax`、`opencode`/`zen`、`anthropic`、`openai` 等），预设补齐端点、令牌变量、模型档位、超时与上下文窗口——多数情况下只写 `api_key`（或 `auth_token`）即可，其余键（`env`/`settings`/`mcp`）按需覆盖预设同名取值：
 
 - `env`：注入会话环境变量（可含密钥）；provider 自定义的 `mcp` server 会缺省继承它（server 自身 `env` 优先）；
 - `settings`：Claude Code 原生 settings 片段（如 `model`、`apiKeyHelper`、`awsAuthRefresh`），合并进会话 `--settings`（`env`/`permissions` 逐键合并，其余顶层键覆盖托管默认）；
@@ -108,7 +109,9 @@ assistant completion fish > ~/.config/fish/completions/assistant.fish
 
 预设还会带上供应商官方 MCP（智谱视觉理解、MiniMax coding-plan 等，随会话注入；daemon 镜像已内置 `npx`/`uvx`）。未识别的 provider 名没有预设，按纯手写透传处理（`env`/`settings`/`mcp` 原样合并）；`env` 里给空串可删除预设默认，`mcp` 里给 `null` 可关闭预设 MCP。内置预设、各家的覆盖要点与坑位见 [`providers.md`](providers.md)。
 
-选择粒度逐级回退：`repo.provider` > `instance.provider` > `default_provider`；微信对话桥用 `weixin.provider`（缺省回退 `default_provider`）。引用了未定义的名字直接报错，不会静默用错供应商。
+选择粒度逐级回退：`repo.provider` > `instance.provider` > `default_provider`；微信对话桥用 `weixin.provider`（缺省回退 `default_provider`）。引用了未定义的名字直接报错，不会静默用错供应商。改完配置先跑 `assistant validate`：它会指出没被任何地方引用的 provider（配了但没生效）、缺 `api_key` 的 provider、缺身份或用途令牌的平台。
+
+供应商定义也可以一个 provider 一个文件放在 `<配置目录>/providers/<名字>.json`（内容即 provider 对象，适合不想把密钥写进 `config.json` 的场合；两处重名报错，文件供应商不会被写回 `config.json`）。
 
 `optimizations` 是跨供应商通用的全局优化点（同 `env`/`settings`/`mcp` 三段）：对所有会话打底生效，选中 provider 的同名取值覆盖其上（`repo.provider` 亦不例外）。适合放时长、上下文窗口、遥测开关、子 agent 模型等横向调优：
 
@@ -125,7 +128,7 @@ assistant completion fish > ~/.config/fish/completions/assistant.fish
 
 **只作用于运行时会话**：provider 覆盖进评审/分诊/对话会话的临时 `--settings` 与 `--mcp-config`，绝不写入仓库 `.claude/settings.json`/`.mcp.json`——密钥不进 git，仓库保持供应商无关。`run --dry-run` 会打印每个目标生效的 provider 与覆盖项数（值不落日志）。
 
-供应商定义可以内联在 `providers`，也可以**一个 provider 一个文件**放在 `<配置目录>/providers/<名字>.json`（内容即 provider 对象；两处重名报错；文件供应商不会被写回 `config.json`）。少数供应商需要在会话启动时做动态调整（例如 opencode 网关要求的 `x-opencode-session` 会话请求头，经 `ANTHROPIC_CUSTOM_HEADERS` 注入）：这由代码级特化处理——`internal/provider/` 下一个供应商一个文件，实现 `Handler` 并在 `init` 注册，即可在会话启动前读写 `env`/`settings`/`mcp`；没有注册 handler 的 provider 原样通过。
+供应商定义也可以**一个 provider 一个文件**放在 `<配置目录>/providers/<名字>.json`（内容即 provider 对象，适合不想把密钥写进 `config.json` 的场合；两处重名报错；文件供应商不会被写回 `config.json`）。少数供应商需要在会话启动时做动态调整（例如 opencode 网关要求的 `x-opencode-session` 会话请求头，经 `ANTHROPIC_CUSTOM_HEADERS` 注入）：这由代码级特化处理——`internal/provider/` 下一个供应商一个文件，实现 `Handler` 并在 `init` 注册，即可在会话启动前读写 `env`/`settings`/`mcp`；没有注册 handler 的 provider 原样通过。
 
 ### 平台管理：assistant login
 
@@ -383,6 +386,28 @@ status/triage     Issue ───────▶  triage issue #N               
 - 不再传 `--no-session-persistence`：会话记录是审计与排障的一等数据。
 - 容器部署下 `CLAUDE_CONFIG_DIR=<配置目录>/claude`：它就是挂载进去的 assistant 配置目录里的 `claude/`，记录与 claude 全局配置一起持久化（首次运行自动创建）；**不挂载也不读写 `~/.claude`**，凭据由 provider 配置提供。
 
+### 校验配置：assistant validate
+
+改完 `config.json`（或 `credentials.json`）先跑一次，再重启 daemon：
+
+```bash
+assistant validate                 # 用默认配置；--config / ASSISTANT_CONFIG 可指定
+```
+
+只读、不联网、不改文件，逐行给出结论（`OK / WARN / ERROR / SKIP`），有问题以退出码 1 结束。检查项：
+
+- `config.json` 本身：JSON 合法性、平台与仓库、`default_provider`、微信桥状态；
+- **provider**：被引用的 provider 能否解析、有没有凭据（`api_key`/`auth_token`）、端点与模型、MCP 数量，以及**定义了却没被任何地方引用**的 provider（配了但没生效，最常见的失误）；
+- **credentials.json**：每个平台是否有登录身份，`review`/`merge`/`admin`/`mcp` 用途令牌是否齐（缺 review/merge 会指向 `assistant setup --host <host>`）。
+
+```
+$ assistant validate
+OK        /home/ge/.config/.../config.json — 1 个平台、1 个仓库、1 个 provider 定义
+OK        providers.minimax — 内置预设；端点 https://api.minimax.io/anthropic；模型 MiniMax-M3[1m]；env 8 / settings 0 / mcp 1；凭据：provider env ANTHROPIC_AUTH_TOKEN（被 default_provider 引用）
+WARN      credentials https://gitea.example.com — 身份 developer（管理员）；令牌：admin/review/merge；缺 mcp（…）
+OK        校验通过：config.json 与 credentials.json 可用于 assistant run（另有 1 条提示，不阻断启动）
+```
+
 ### daemon 模式：状态 API 与微信对话桥
 
 `assistant run` 是 daemon：除调度主循环外，还提供只读状态 API 与可选的微信对话桥。
@@ -477,7 +502,7 @@ make build && docker compose up -d --force-recreate    # 升级：重新构建�
 
 镜像只用 `images/review/Dockerfile` 的 `review` target（评审环境：claude / go / bun / uv / node，与评审会话镜像共用 `review-env` 层，无需从 registry 拉取预构建镜像）。容器入口固定指向挂载进来的二进制：**只替换文件不会重启进程**，所以升级要用 `docker compose up -d --force-recreate`（即 `make compose-up`）或 `docker compose restart assistant`。想让镜像自带二进制（离线分发、不走挂载）时用 `make daemon-image` 构建 `daemon` target。
 
-- **AI 凭据来自 assistant 配置**：容器**不挂载 `~/.claude`**，会话不读宿主的 OAuth 登录态。评审/分诊/对话会话的凭据取自 `config.json` 的 `providers`/`optimizations`（`api_key`/`auth_token` 简写，见上文「多 provider」），也在 `<配置目录>/providers/*.json` 里；进程环境里的 `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` 只是兜底（compose 内已注释示例）。启动日志会打印 claude 版本、会话配置根与凭据来源，没有凭据时直接告警。
+- **AI 凭据来自 assistant 配置**：容器**不挂载 `~/.claude`**，会话不读宿主的 OAuth 登录态。评审/分诊/对话会话的凭据取自 `config.json` 的 `providers`/`optimizations`（`api_key`/`auth_token` 简写，见上文「多 provider」）；进程环境里的 `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` 只是兜底（compose 内已注释示例）。改完配置先 `docker compose exec assistant assistant validate` 校验，再 `docker compose restart assistant`（启动日志也会打印 claude 版本、会话配置根与凭据来源，缺凭据直接告警）。
 - **会话配置根**：`<配置目录>/claude`（`instances.ClaudeDir`，`CLAUDE_CONFIG_DIR` 可覆盖）——会话文本记录与 claude 的全局配置都在这里，随配置目录一起挂载/备份，与宿主上的 Claude 安装互不影响。
 - **二进制挂载**：`${ASSISTANT_BINARY:-./assistant}` → `/usr/local/bin/assistant:ro`（相对路径按 compose 文件所在目录解析，默认就是仓库根目录下 `make build` 的产物）。`make compose-up` 先构建再启动，因此不存在挂载点缺失；手工 `docker compose up` 前请确认该文件已存在——路径不存在时 docker 会把它建成**目录**，容器启动会报 `is a directory`。`make build` 用 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64` 构建，静态链接，不依赖容器基座的 C 库。
 - 挂载是**细粒度**的（不用整目录 `$HOME`）：`~/.config/Cosmic-Developers-Union/assistant`（config.json / credentials.json（`assistant login` 派生的用途令牌）/ daemon.json / chat 会话 / claude 会话配置根）、`~/.local/share/Cosmic-Developers-Union/assistant`（受管克隆与状态）、`~/.cache`（MCP 与工具链缓存）读写；git 身份与 `docker.sock` 按需（compose 内已注释示例）。
