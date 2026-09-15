@@ -1,0 +1,77 @@
+{
+  "listen": "127.0.0.1:8780",
+  "session": {
+    "secret": "change-me-random-32-bytes-base64",
+    "headers": ["x-session-id", "x-session-affinity", "x-opencode-session"]
+  },
+  "keys": [
+    {
+      "name": "assistant",
+      "token": "gateway-virtual-token"
+    }
+  ],
+  "upstreams": [
+    {
+      "name": "zhipu",
+      "base_url": "https://api.z.ai/api/anthropic",
+      "token": "your_zai_key",
+      "models": {
+        "claude-sonnet-5": "glm-5.3-flash[1m]",
+        "claude-haiku-4-5": "glm-5.3-flash[1m]"
+      },
+      "session": { "metadata_user_id": true },
+      "timeout_ms": 3000000
+    },
+    {
+      "name": "minimax",
+      "base_url": "https://api.minimaxi.com/anthropic",
+      "token": "your_minimax_key",
+      "models": {
+        "claude-sonnet-5": "MiniMax-M3[1m]",
+        "claude-haiku-4-5": "MiniMax-M3[1m]"
+      },
+      "session": { "metadata_user_id": true }
+    },
+    {
+      "name": "kimi",
+      "base_url": "https://api.moonshot.cn/anthropic",
+      "token": "your_moonshot_key",
+      "models": {
+        "claude-sonnet-5": "kimi-k3",
+        "claude-haiku-4-5": "kimi-k3"
+      },
+      "session": { "metadata_user_id": true }
+    },
+    {
+      "name": "opencode",
+      "base_url": "https://opencode.ai/zen",
+      "token": "sk-zen-your-key",
+      "session": {
+        "headers": ["x-opencode-session", "x-session-affinity"],
+        "metadata_user_id": true
+      }
+    },
+    {
+      "name": "openai-proxy",
+      "base_url": "http://127.0.0.1:4000",
+      "token": "sk-litellm-virtual-key",
+      "models": {
+        "claude-sonnet-5": "gpt-5.2",
+        "claude-haiku-4-5": "gpt-5.2-mini"
+      },
+      "session": { "body_field": "prompt_cache_key", "metadata_user_id": true }
+    },
+    {
+      "name": "anthropic",
+      "base_url": "https://api.anthropic.com",
+      "auth": "x-api-key",
+      "token": "sk-ant-your-key",
+      "session": { "metadata_user_id": true }
+    }
+  ],
+  "routes": {
+    "claude-sonnet-5": ["zhipu", "minimax", "anthropic"],
+    "claude-haiku-4-5": ["zhipu", "minimax"],
+    "*": ["zhipu", "anthropic"]
+  }
+}

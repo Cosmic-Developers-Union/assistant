@@ -323,6 +323,7 @@ cython_debug/
 
 # assistant 构建产物与调度引擎运行时产物
 /assistant
+/ai-gateway
 /assistant.exe
 /dispatcher.lock
 /worktrees/

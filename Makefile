@@ -64,6 +64,19 @@ build: ## 构建 assistant 二进制 (Linux/amd64, 静态链接, 供 generic pac
 		go build -ldflags="$(LDFLAGS)" -o $(BINARY_NAME) ./cmd/assistant
 	@echo "==> 构建完成: $(BINARY_NAME)"
 
+.PHONY: gateway
+gateway: ## 构建 AI 网关 (Linux/amd64, cmd/ai-gateway)
+	@echo "==> 构建 ai-gateway 二进制..."
+	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=$(GOARCH) \
+		go build -ldflags="$(LDFLAGS)" -o ai-gateway ./cmd/ai-gateway
+	@echo "==> 构建完成: ai-gateway"
+
+.PHONY: gateway-local
+gateway-local: ## 构建 AI 网关 (本地平台, 用于开发测试)
+	@echo "==> 构建本地 ai-gateway..."
+	go build -o ai-gateway ./cmd/ai-gateway
+	@echo "==> 构建完成: ai-gateway"
+
 .PHONY: build-local
 build-local: ## 构建本地平台二进制 (用于开发测试)
 	@echo "==> 构建本地平台二进制..."
