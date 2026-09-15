@@ -70,7 +70,7 @@ func (g *Gateway) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":        true,
-			"upstreams": len(g.config.Upstreams),
+			"backends":  BackendNames(),
 			"protocols": SupportedProtocols(),
 			"tools":     ToolNames(),
 			"residency": g.recorder != nil,
@@ -118,10 +118,10 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	session := g.resolver.Resolve(r.Header, document, key.Name)
 	tool := DetectTool(r.Header)
-	chain := g.config.UpstreamsFor(model, protocol)
+	chain := g.config.Candidates(model, protocol)
 	if len(chain) == 0 {
 		writeAPIError(w, http.StatusBadRequest, "invalid_request_error",
-			fmt.Sprintf("没有匹配的模型路由：%s（协议 %s；检查 routes 与上游 protocols）", model, protocol))
+			fmt.Sprintf("没有匹配的模型路由：%s（协议 %s；检查 models 与后端类型支持的协议）", model, protocol))
 		return
 	}
 
@@ -137,6 +137,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 	var lastErr error
 	for index, upstream := range chain {
 		last := index == len(chain)-1
+		session.Protocol = protocol
 		record := g.beginRecord(r, key, session, tool, protocol, model, upstream)
 		response, upstreamBody, err := g.attempt(r.Context(), upstream, r, raw, session, model, tool)
 		if err != nil {
@@ -195,7 +196,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
 // 返回实际上游请求体（未改写时为原始字节）。
 func (g *Gateway) attempt(
 	parent context.Context,
-	upstream Upstream,
+	upstream ResolvedUpstream,
 	original *http.Request,
 	raw []byte,
 	session Session,
@@ -211,28 +212,24 @@ func (g *Gateway) attempt(
 	}
 	NormalizeUserAgent(header, tool, g.config.UserAgent)
 
-	// 只有需要改体时才重新解析+序列化，否则逐字节透传
-	upstreamBody := raw
-	mapped := upstream.Models[model]
-	needsBody := mapped != "" || upstream.Session.BodyField != "" || upstream.Session.MetadataUserID
-	if needsBody {
-		document := map[string]any{}
-		if err := json.Unmarshal(raw, &document); err != nil {
-			return nil, nil, fmt.Errorf("解析请求体: %w", err)
-		}
-		if mapped != "" {
-			document["model"] = mapped
-		}
-		upstream.Session.Apply(header, document, session.ID)
-		encoded, err := json.Marshal(document)
-		if err != nil {
-			return nil, nil, fmt.Errorf("序列化上游请求: %w", err)
-		}
-		upstreamBody = encoded
-	} else {
-		upstream.Session.Apply(header, nil, session.ID)
+	// 请求体延迟解析：只有模型映射或后端特化真正写字段时才重新序列化，
+	// 否则逐字节透传给上游
+	body := NewBody(raw)
+	if upstream.Model != "" && upstream.Model != model {
+		body.Set("model", upstream.Model)
 	}
-	switch upstream.Auth {
+	if upstream.Prepare != nil {
+		upstream.Prepare(header, body, session)
+	}
+	upstreamBody, err := body.Encoded()
+	if err != nil {
+		return nil, nil, fmt.Errorf("序列化上游请求: %w", err)
+	}
+	auth := upstream.Auth
+	if auth == "" {
+		auth = "bearer"
+	}
+	switch auth {
 	case "x-api-key":
 		header.Set("x-api-key", upstream.Token)
 	default:
@@ -273,11 +270,9 @@ func (g *Gateway) handleModels(w http.ResponseWriter, r *http.Request) {
 		ID          string `json:"id"`
 		DisplayName string `json:"display_name"`
 	}
-	data := make([]modelEntry, 0, len(g.config.Routes))
-	for model := range g.config.Routes {
-		if model == "*" {
-			continue
-		}
+	models := g.config.ModelIDs()
+	data := make([]modelEntry, 0, len(models))
+	for _, model := range models {
 		data = append(data, modelEntry{Type: "model", ID: model, DisplayName: model})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": data, "has_more": false})
@@ -297,6 +292,7 @@ func (g *Gateway) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"tools":      g.tools,
 		"protocols":  g.protocol,
 		"upstreams":  g.upstream,
+		"backends":   BackendNames(),
 		"user_agent": g.config.UserAgent,
 		"residency":  g.recorder != nil,
 	})
@@ -308,7 +304,7 @@ func (g *Gateway) beginRecord(
 	key APIKey,
 	session Session,
 	tool, protocol, model string,
-	upstream Upstream,
+	upstream ResolvedUpstream,
 ) *Record {
 	if g.recorder == nil {
 		return nil
@@ -342,8 +338,8 @@ func (g *Gateway) finishRecord(record *Record, meta ResponseMeta) {
 	}
 }
 
-func (g *Gateway) logAttempt(session Session, tool, key, model, protocol string, upstream Upstream, status int, bytes int64, err error) {
-	upstreamModel := upstream.Models[model]
+func (g *Gateway) logAttempt(session Session, tool, key, model, protocol string, upstream ResolvedUpstream, status int, bytes int64, err error) {
+	upstreamModel := upstream.Model
 	if upstreamModel == "" {
 		upstreamModel = model
 	}

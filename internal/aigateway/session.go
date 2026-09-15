@@ -46,6 +46,8 @@ type Session struct {
 	// Source 说明来源（诊断/审计）：header:<名字> / metadata.user_id /
 	// derived:content / derived:client
 	Source string
+	// Protocol 是客户端协议（后端特化按它选择注入载体）；由代理在解析后填入
+	Protocol string
 }
 
 // SessionResolver 解析会话键：显式来源优先，缺失时确定性派生（同样输入必得
@@ -55,22 +57,6 @@ type SessionResolver struct {
 	Secret []byte
 	// HeaderNames 是显式会话头候选；空用 DefaultSessionHeaderNames
 	HeaderNames []string
-}
-
-// SessionSpec 是**上游**对会话标识的注入规则（各厂商载体不同）。
-type SessionSpec struct {
-	// Headers 是注入的请求头名（如 x-opencode-session、x-session-affinity）
-	Headers []string `json:"headers,omitempty"`
-	// BodyField 是注入的请求体顶层字段（如 OpenAI 兼容的 prompt_cache_key）
-	BodyField string `json:"body_field,omitempty"`
-	// MetadataUserID 为真时按 Anthropic 原生格式写 metadata.user_id 的
-	// session_id（保留其中已有的其他键，如 device_id）
-	MetadataUserID bool `json:"metadata_user_id,omitempty"`
-}
-
-// HasInjections 报告该 spec 是否会改动请求。
-func (s SessionSpec) HasInjections() bool {
-	return len(s.Headers) > 0 || strings.TrimSpace(s.BodyField) != "" || s.MetadataUserID
 }
 
 // headerNames 返回候选头（含默认）。
@@ -126,29 +112,6 @@ func (r *SessionResolver) derive(client string, body map[string]any, firstUser s
 		sum = hashed[:]
 	}
 	return uuidFromBytes(sum)
-}
-
-// Apply 把会话标识按规则注入上游请求（请求头与请求体，就地修改）。
-func (s SessionSpec) Apply(header http.Header, body map[string]any, sessionID string) {
-	if sessionID == "" {
-		return
-	}
-	if header != nil {
-		for _, name := range s.Headers {
-			if trimmed := strings.TrimSpace(name); trimmed != "" {
-				header.Set(trimmed, sessionID)
-			}
-		}
-	}
-	if body == nil {
-		return
-	}
-	if field := strings.TrimSpace(s.BodyField); field != "" {
-		body[field] = sessionID
-	}
-	if s.MetadataUserID {
-		mergeMetadataSession(body, sessionID)
-	}
 }
 
 // sessionIDFromMetadata 抽取 Anthropic 约定的 metadata.user_id 会话标识：

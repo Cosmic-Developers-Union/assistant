@@ -8,11 +8,11 @@ Anthropic 官方）转发，按路由链故障转移。它与 `assistant` 是**�
 
 ## 协议面与透传语义
 
-| 客户端路径 | 协议 | 上游要求 |
+| 客户端路径 | 协议 | 后端要求 |
 | --- | --- | --- |
-| `POST /v1/messages`、`/v1/messages/count_tokens` | `anthropic` | 上游声明 `protocols: ["anthropic"]` |
-| `POST /v1/chat/completions` | `openai-chat` | 上游声明 `openai-chat` |
-| `POST /v1/responses` | `openai-responses` | 上游声明 `openai-responses` |
+| `POST /v1/messages`、`/v1/messages/count_tokens` | `anthropic-messages` | 后端支持该协议（内置后端在代码里声明；standard 全部支持） |
+| `POST /v1/chat/completions` | `openai-compatible` | 同上 |
+| `POST /v1/responses` | `openai-responses` | 同上 |
 
 **只做同协议透传**（不做跨协议翻译）：路由按「虚拟模型 + 客户端协议」过滤上游，
 未声明该协议的上游不参与（否则 400 并提示检查 `routes`/`protocols`）。请求体
@@ -49,20 +49,14 @@ Anthropic 官方）转发，按路由链故障转移。它与 `assistant` 是**�
 4. **约束提醒**：账号用途/转售/限流等是上游条款，网关只在日志与 `/status` 里
    提供 `tool` / `session` 归因，便于自我审计。
 
-opencode 上游示例（Go 三协议全开）：
+opencode 后端在代码里特化（`internal/aigateway/backend_opencode.go`：内置端点
+`https://opencode.ai/zen/go`，三协议全开；自动注入 `x-opencode-session` +
+`x-session-affinity`，OpenAI 面写 `prompt_cache_key`、Anthropic 面写
+`metadata.user_id`）。配置里只有一行：
 
 ```json
-{
-  "name": "opencode-go",
-  "base_url": "https://opencode.ai/zen/go",
-  "token": "sk-zen-...",
-  "protocols": ["anthropic", "openai-chat", "openai-responses"],
-  "session": {
-    "headers": ["x-opencode-session", "x-session-affinity"],
-    "body_field": "prompt_cache_key",
-    "metadata_user_id": true
-  }
-}
+{ "id": "deepseek-flash", "protocol": "openai-compatible",
+  "backend": "opencode-go", "api-key": "$OPENCODE_API_KEY" }
 ```
 
 ## 数据驻留（完整保留请求与响应）
@@ -144,36 +138,41 @@ assistant 侧只加一个 provider（无需预设，纯透传）：
 
 ## 配置参考
 
+保持简单：只有一张**模型表**。每条声明「虚拟模型 + 协议类型 + 后端类型 + api-key」，
+端点与会话/参数特化都在后端代码里（一个后端一个文件 `backend_*.go`）。同一个 `id`
+写多条 = 故障转移链（按顺序尝试）。
+
 ```jsonc
 {
-  "listen": "127.0.0.1:8780",          // 只绑环回；对外暴露请自行加 TLS/反代
-  "session": {
-    "secret": "随机 32 字节 base64",     // 内容派生 HMAC 密钥（集群内一致）
-    "headers": ["x-session-id", "..."]   // 覆盖默认会话头候选顺序
+  "listen": "127.0.0.1:8780",
+  "keys": [ { "name": "assistant", "token": "gateway-virtual-token" } ],  // 可选；空=环回免鉴权
+  "models": [
+    { "id": "deepseek-flash", "protocol": "openai-compatible", "backend": "opencode-go",
+      "api-key": "$OPENCODE_API_KEY" },                       // 内置后端：端点/会话头都在代码里
+    { "id": "claude-sonnet-5", "protocol": "anthropic-messages", "backend": "zhipu",
+      "api-key": "$ZAI_API_KEY", "model": "glm-5.3-flash[1m]" },  // model=上游模型名（缺省=id）
+    { "id": "claude-sonnet-5", "protocol": "anthropic-messages", "backend": "minimax-cn",
+      "api-key": "$MINIMAX_API_KEY", "model": "MiniMax-M3[1m]" }  // 同 id 第二条 = 故障转移
+  ],
+  "backends": {                                               // 可选：自定义/标准后端
+    "my-proxy": { "type": "standard", "base_url": "http://127.0.0.1:4000", "api-key": "$LITELLM_KEY" }
   },
-  "keys": [                             // 接入密钥（虚拟 key）
-    { "name": "assistant", "token": "gateway-virtual-token", "models": ["*"] }
-  ],
-  "upstreams": [
-    {
-      "name": "zhipu",
-      "base_url": "https://api.z.ai/api/anthropic",  // Anthropic Messages 兼容根
-      "token": "your_zai_key",
-      "auth": "bearer",                 // 缺省 bearer（Authorization: Bearer）；或 x-api-key
-      "headers": {},                    // 额外静态头（可选）
-      "models": {                       // 虚拟模型 → 上游模型（未命中原样透传）
-        "claude-sonnet-5": "glm-5.3-flash[1m]"
-      },
-      "session": { "metadata_user_id": true },   // 会话注入规则
-      "timeout_ms": 3000000              // 单次上游超时（缺省 30 分钟）
-    }
-  ],
-  "routes": {                            // 虚拟模型 → 上游优先级（按序故障转移）
-    "claude-sonnet-5": ["zhipu", "minimax", "anthropic"],
-    "*": ["zhipu", "anthropic"]          // 兜底
-  }
+  "residency": { "enabled": false, "dir": "~/…/ai-gateway-residency" },
+  "session": { "secret": "随机 32 字节" }
 }
 ```
+
+- **协议类型**（`protocol`）：`anthropic-messages` / `openai-compatible` /
+  `openai-responses`（别名 `anthropic`、`openai-chat`、`responses`）。只能选后端支持的
+  协议，配置加载期即校验。
+- **后端类型**（`backend`）：
+  - 内置：`opencode-go`、`opencode-zen`、`anthropic`、`openai`、`zhipu`、`bigmodel`、
+    `kimi`、`moonshot`、`minimax`、`minimax-cn`——端点、鉴权风格、会话注入都在代码里；
+  - `standard`：标准后端，**纯透传**，必须给 `base_url`；
+  - 或 `backends` 里的命名后端（`type` 可指向内置类型，缺省 standard）。
+- **api-key**：支持 `$ENV_VAR` / `${ENV_VAR}` 展开（未设置即报错），也可直接写字面值。
+- `keys` 留空 = 不鉴权，此时只能监听环回地址（对外必须配 keys）。
+- `backend` 支持的协议之外不参与路由；`/v1/models` 会列出全部 `id`。
 
 端点：`POST /v1/messages`、`POST /v1/messages/count_tokens`（同一路由与注入）、
 `GET /v1/models`（列出 `routes` 的虚拟模型，供 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`）、
@@ -200,8 +199,8 @@ assistant 侧只加一个 provider（无需预设，纯透传）：
 
 - **跨协议翻译**（当前是「同协议透传 + 路由」；需要 OpenAI→Anthropic 之类转换时，
   先接 LiteLLM 作为 `openai-proxy` 上游，或后续在网关内做翻译层）；
-- **复用 `internal/provider` 预设**：把 zhipu/opencode 等厂商的端点、模型映射、会话
-  规格收敛为一份「一供应商一文件」的共享注册表，assistant 与网关同源；
+- **与 `internal/provider` 预设同源**：把后端注册表（端点/鉴权/会话特化）与 assistant
+  的 provider 预设收敛为一份「一供应商一文件」的共享知识，避免两处漂移；
 - **成本归因**：解析响应 `usage`，按会话/密钥/上游累计，供 assistant 的
   `daemon_status` 或微信问答展示；
 - **compose service**：与 daemon 同栈部署（独立镜像、独立重启策略）。

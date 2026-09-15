@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -82,7 +83,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go func() {
-		log.Printf("ai-gateway 监听 %s（上游 %d 个，路由 %d 条）", config.Listen, len(config.Upstreams), len(config.Routes))
+		log.Printf("ai-gateway 监听 %s（模型 %d 个，内置后端 %s）",
+			config.Listen, len(config.ModelIDs()), strings.Join(aigateway.BackendNames(), "/"))
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("网关退出: %v", err)
 		}

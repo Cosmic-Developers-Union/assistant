@@ -331,6 +331,7 @@ cython_debug/
 
 # 配置文件
 config.json
+ai-gateway.json
 
 # IDE
 .idea/

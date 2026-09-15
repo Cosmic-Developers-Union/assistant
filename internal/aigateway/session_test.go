@@ -97,38 +97,6 @@ func TestSessionDeriveWithoutSecret(t *testing.T) {
 	}
 }
 
-// 注入规则：头、请求体字段、Anthropic metadata.user_id（保留既有键）。
-func TestSessionSpecApply(t *testing.T) {
-	spec := SessionSpec{
-		Headers:        []string{"x-opencode-session", "x-session-affinity"},
-		BodyField:      "prompt_cache_key",
-		MetadataUserID: true,
-	}
-	header := http.Header{}
-	body := decodeBody(t, `{"model":"m","metadata":{"user_id":"{\"device_id\":\"d1\",\"session_id\":\"old\"}"}}`)
-	spec.Apply(header, body, "new-session")
-	if header.Get("x-opencode-session") != "new-session" || header.Get("x-session-affinity") != "new-session" {
-		t.Errorf("headers = %+v", header)
-	}
-	if body["prompt_cache_key"] != "new-session" {
-		t.Errorf("body = %+v", body)
-	}
-	metadata, _ := body["metadata"].(map[string]any)
-	var userID map[string]any
-	if err := json.Unmarshal([]byte(metadata["user_id"].(string)), &userID); err != nil {
-		t.Fatalf("metadata.user_id = %v", metadata["user_id"])
-	}
-	if userID["session_id"] != "new-session" || userID["device_id"] != "d1" {
-		t.Errorf("metadata.user_id = %+v", userID)
-	}
-	// 空会话不注入
-	empty := http.Header{}
-	spec.Apply(empty, body, "")
-	if empty.Get("x-opencode-session") != "" {
-		t.Error("空会话不应注入")
-	}
-}
-
 // 超长/含控制字符的显式标识规范化为 UUID。
 func TestSessionNormalizeOversized(t *testing.T) {
 	resolver := &SessionResolver{}
@@ -137,5 +105,41 @@ func TestSessionNormalizeOversized(t *testing.T) {
 	session := resolver.Resolve(header, nil, "k")
 	if len(session.ID) != 36 || session.ID[14] != '5' {
 		t.Errorf("应规范化为 UUID：%q", session.ID)
+	}
+}
+
+// Body：未改写时逐字节返回原始体；写入时合并 metadata.user_id（保留既有键）。
+func TestBodyPassthroughAndMetadataMerge(t *testing.T) {
+	raw := []byte(`{"model":"m","metadata":{"user_id":"{\"device_id\":\"d1\",\"session_id\":\"old\"}"}}`)
+	body := NewBody(raw)
+	if body.Mutated() {
+		t.Fatal("初始不应标记改写")
+	}
+	if encoded, _ := body.Encoded(); string(encoded) != string(raw) {
+		t.Error("未改写应返回原始字节")
+	}
+	body.MetadataSession("new-session")
+	encoded, err := body.Encoded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := map[string]any{}
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		t.Fatal(err)
+	}
+	metadata, _ := document["metadata"].(map[string]any)
+	var userID map[string]any
+	if err := json.Unmarshal([]byte(metadata["user_id"].(string)), &userID); err != nil {
+		t.Fatal(err)
+	}
+	if userID["session_id"] != "new-session" || userID["device_id"] != "d1" {
+		t.Errorf("metadata.user_id = %+v", userID)
+	}
+	// Set 顶层字段
+	other := NewBody([]byte(`{"model":"m"}`))
+	other.Set("prompt_cache_key", "s1")
+	encoded, _ = other.Encoded()
+	if !strings.Contains(string(encoded), `"prompt_cache_key":"s1"`) {
+		t.Errorf("encoded = %s", encoded)
 	}
 }

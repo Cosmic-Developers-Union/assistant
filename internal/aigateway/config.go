@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -20,15 +23,32 @@ const DefaultUpstreamTimeoutMS = 30 * 60 * 1000
 const MaxRequestBodyBytes = 64 << 20
 
 // 支持的协议面（客户端路径 → 上游协议族；网关只做同协议透传，不做翻译）。
+// 配置里的 protocol 别名见 NormalizeProtocol。
 const (
-	ProtocolAnthropic       = "anthropic"        // POST /v1/messages
-	ProtocolOpenAIChat      = "openai-chat"      // POST /v1/chat/completions
-	ProtocolOpenAIResponses = "openai-responses" // POST /v1/responses
+	ProtocolAnthropic       = "anthropic-messages" // POST /v1/messages
+	ProtocolOpenAIChat      = "openai-compatible"  // POST /v1/chat/completions
+	ProtocolOpenAIResponses = "openai-responses"   // POST /v1/responses
 )
 
 // DefaultUserAgent 是网关转发时的默认 UA（客户端 UA 缺失或为通用 SDK 名时使用，
 // OpenCode Go 要求客户端使用专属 UA）。
 const DefaultUserAgent = "assistant-ai-gateway/1.0"
+
+// protocolAliases 把常见叫法归一化。
+var protocolAliases = map[string]string{
+	"anthropic-messages": ProtocolAnthropic,
+	"anthropic":          ProtocolAnthropic,
+	"openai-compatible":  ProtocolOpenAIChat,
+	"openai-chat":        ProtocolOpenAIChat,
+	"chat-completions":   ProtocolOpenAIChat,
+	"openai-responses":   ProtocolOpenAIResponses,
+	"responses":          ProtocolOpenAIResponses,
+}
+
+// NormalizeProtocol 归一化协议名；未识别返回空串。
+func NormalizeProtocol(value string) string {
+	return protocolAliases[strings.ToLower(strings.TrimSpace(value))]
+}
 
 // ProtocolForPath 把客户端请求路径映射到协议。
 func ProtocolForPath(path string) (string, bool) {
@@ -49,22 +69,29 @@ func SupportedProtocols() []string {
 }
 
 // Config 是 AI 网关配置（JSON；建议放 <配置目录>/ai-gateway.json，0600）。
+//
+// 保持简单：只有一张模型表。每个条目声明「虚拟模型 + 协议类型 + 后端类型 +
+// api-key」，端点与会话/参数特化都在后端的代码里（见 backend*.go）。同一个 id
+// 写多条 = 故障转移链（按顺序尝试）。
 type Config struct {
 	// Listen 是监听地址（缺省 127.0.0.1:8780）
 	Listen string `json:"listen,omitempty"`
-	// Session 是会话机制配置
-	Session SessionConfig `json:"session,omitempty"`
 	// UserAgent 是转发时使用的网关 UA（缺省 assistant-ai-gateway/1.0）
 	UserAgent string `json:"user_agent,omitempty"`
+	// Session 是会话机制配置
+	Session SessionConfig `json:"session,omitempty"`
 	// Residency 是数据驻留：完整保留请求与响应（默认关闭）
 	Residency Residency `json:"residency,omitempty"`
-	// Keys 是接入密钥（虚拟 key，如 assistant 使用）；至少一个
-	Keys []APIKey `json:"keys"`
-	// Upstreams 是上游厂商接入点（Anthropic Messages 兼容）；至少一个
-	Upstreams []Upstream `json:"upstreams"`
-	// Routes 是虚拟模型 → 上游优先级列表（按顺序故障转移）；"*" 为兜底。
-	// 至少要有 "*" 或覆盖客户端使用的模型。
-	Routes map[string][]string `json:"routes"`
+	// Keys 是接入密钥（可选；留空表示不鉴权——此时必须监听环回地址）
+	Keys []APIKey `json:"keys,omitempty"`
+	// Backends 是自定义/命名后端：标准后端在这里给 base_url 与凭据；type 可
+	// 指向内置后端类型（缺省 standard）
+	Backends map[string]BackendConfig `json:"backends,omitempty"`
+	// Models 是模型路由表；至少一条
+	Models []Model `json:"models"`
+
+	// chains 是解析后的路由（Normalize 期计算；不参与序列化）
+	chains map[string][]ResolvedUpstream
 }
 
 // SessionConfig 是会话机制的全局配置。
@@ -76,6 +103,13 @@ type SessionConfig struct {
 	Headers []string `json:"headers,omitempty"`
 }
 
+// Residency 是数据驻留配置：把每个请求（原始体、改写后的上游体）与响应（流式
+// 完整落盘）按请求归档到 <Dir>/<日期>/<id>/，供审计与排障。
+type Residency struct {
+	Enabled bool   `json:"enabled,omitempty"`
+	Dir     string `json:"dir,omitempty"`
+}
+
 // APIKey 是一个接入密钥。
 type APIKey struct {
 	Name  string `json:"name"`
@@ -84,47 +118,65 @@ type APIKey struct {
 	Models []string `json:"models,omitempty"`
 }
 
-// Residency 是数据驻留配置：把每个请求（原始体、改写后的上游体）与响应（流式
-// 完整落盘）按请求归档到 <Dir>/<日期>/<id>/，供审计与排障。
-type Residency struct {
-	Enabled bool `json:"enabled,omitempty"`
-	// Dir 是归档根目录（启用时必填）
-	Dir string `json:"dir,omitempty"`
-}
-
-// Upstream 是一个上游厂商接入点。
-type Upstream struct {
-	Name string `json:"name"`
-	// BaseURL 是上游根地址（Anthropic Messages / OpenAI 兼容，按 Protocols 声明）
-	BaseURL string `json:"base_url"`
-	// Protocols 是该上游支持的协议（缺省 ["anthropic"]）：路由时按客户端协议
-	// 过滤，只做同协议透传，不做跨协议翻译
-	Protocols []string `json:"protocols,omitempty"`
-	// Token 是上游凭据
-	Token string `json:"token"`
-	// Auth 是鉴权方式：bearer（Authorization: Bearer，缺省）或 x-api-key
-	Auth string `json:"auth,omitempty"`
-	// Headers 是附加的静态请求头（如网关标识、自定义 beta）
+// Model 是模型路由表的一条：虚拟模型 → 后端。
+type Model struct {
+	// ID 是客户端请求的模型名（OpenAI/Anthropic 请求体里的 model）
+	ID string `json:"id"`
+	// Protocol 是客户端协议：anthropic-messages / openai-compatible /
+	// openai-responses（别名见 NormalizeProtocol）
+	Protocol string `json:"protocol"`
+	// Backend 是后端类型名（内置，如 opencode-go / zhipu / anthropic /
+	// openai），或 backends 里的命名后端；标准后端写 "standard"
+	Backend string `json:"backend"`
+	// APIKey 是上游凭据（支持 $ENV_VAR / ${ENV_VAR} 展开）；内置后端用它，
+	// 命名后端可省略（用 backends 里的）
+	APIKey string `json:"api-key,omitempty"`
+	// Model 是上游模型名（缺省与 ID 相同，原样透传）
+	Model string `json:"model,omitempty"`
+	// BaseURL / Auth / Headers 覆盖后端默认（standard 后端必须给 base_url）
+	BaseURL string            `json:"base_url,omitempty"`
+	Auth    string            `json:"auth,omitempty"`
 	Headers map[string]string `json:"headers,omitempty"`
-	// Models 是虚拟模型 → 上游模型名映射；未命中时原样透传
-	Models map[string]string `json:"models,omitempty"`
-	// Session 是该上游的会话注入规则（各厂商载体不同）
-	Session SessionSpec `json:"session,omitempty"`
 	// TimeoutMS 是单次上游请求超时（缺省 30 分钟）
 	TimeoutMS int64 `json:"timeout_ms,omitempty"`
 }
 
-// Normalize 填充默认值并清理空白，幂等。
+// BackendConfig 是 backends 里的命名后端。
+type BackendConfig struct {
+	// Type 是后端类型（缺省 standard：纯透传，由 base_url 指定端点）
+	Type      string            `json:"type,omitempty"`
+	BaseURL   string            `json:"base_url,omitempty"`
+	APIKey    string            `json:"api-key,omitempty"`
+	Auth      string            `json:"auth,omitempty"`
+	Headers   map[string]string `json:"headers,omitempty"`
+	TimeoutMS int64             `json:"timeout_ms,omitempty"`
+}
+
+// ResolvedUpstream 是解析后的可执行上游（Normalize 期算好，运行时不再解释
+// 配置；后端特化以函数形式携带）。
+type ResolvedUpstream struct {
+	Name      string
+	Type      string // 后端类型名（standard 表示纯透传）
+	BaseURL   string
+	Token     string
+	Auth      string
+	Headers   map[string]string
+	Model     string // 上游模型名（空 = 原样）
+	TimeoutMS int64
+	Prepare   func(header http.Header, body *Body, session Session)
+}
+
+// Normalize 填充默认值、展开环境变量并解析路由，幂等。
 func (c *Config) Normalize() {
 	c.Listen = strings.TrimSpace(c.Listen)
 	if c.Listen == "" {
 		c.Listen = DefaultListen
 	}
-	c.Session.Secret = strings.TrimSpace(c.Session.Secret)
 	c.UserAgent = strings.TrimSpace(c.UserAgent)
 	if c.UserAgent == "" {
 		c.UserAgent = DefaultUserAgent
 	}
+	c.Session.Secret = strings.TrimSpace(c.Session.Secret)
 	c.Residency.Dir = strings.TrimSpace(c.Residency.Dir)
 	for index := range c.Session.Headers {
 		c.Session.Headers[index] = strings.TrimSpace(c.Session.Headers[index])
@@ -132,113 +184,262 @@ func (c *Config) Normalize() {
 	for index := range c.Keys {
 		c.Keys[index].Name = strings.TrimSpace(c.Keys[index].Name)
 		c.Keys[index].Token = strings.TrimSpace(c.Keys[index].Token)
-		for modelIndex := range c.Keys[index].Models {
-			c.Keys[index].Models[modelIndex] = strings.TrimSpace(c.Keys[index].Models[modelIndex])
+	}
+	for name, backend := range c.Backends {
+		backend.Type = strings.ToLower(strings.TrimSpace(backend.Type))
+		backend.BaseURL = strings.TrimRight(strings.TrimSpace(backend.BaseURL), "/")
+		backend.Auth = strings.ToLower(strings.TrimSpace(backend.Auth))
+		if backend.Auth == "" {
+			backend.Auth = "bearer"
+		}
+		if backend.TimeoutMS <= 0 {
+			backend.TimeoutMS = DefaultUpstreamTimeoutMS
+		}
+		backend.Headers = trimHeaders(backend.Headers)
+		c.Backends[name] = backend
+	}
+	for index := range c.Models {
+		model := &c.Models[index]
+		model.ID = strings.TrimSpace(model.ID)
+		model.Protocol = NormalizeProtocol(model.Protocol)
+		model.Backend = strings.TrimSpace(model.Backend)
+		model.Model = strings.TrimSpace(model.Model)
+		model.BaseURL = strings.TrimRight(strings.TrimSpace(model.BaseURL), "/")
+		model.Auth = strings.ToLower(strings.TrimSpace(model.Auth))
+		model.Headers = trimHeaders(model.Headers)
+		if model.TimeoutMS <= 0 {
+			model.TimeoutMS = DefaultUpstreamTimeoutMS
 		}
 	}
-	for index := range c.Upstreams {
-		upstream := &c.Upstreams[index]
-		upstream.Name = strings.TrimSpace(upstream.Name)
-		upstream.BaseURL = strings.TrimRight(strings.TrimSpace(upstream.BaseURL), "/")
-		upstream.Token = strings.TrimSpace(upstream.Token)
-		upstream.Auth = strings.ToLower(strings.TrimSpace(upstream.Auth))
-		if upstream.Auth == "" {
-			upstream.Auth = "bearer"
-		}
-		if upstream.TimeoutMS <= 0 {
-			upstream.TimeoutMS = DefaultUpstreamTimeoutMS
-		}
-		if len(upstream.Protocols) == 0 {
-			upstream.Protocols = []string{ProtocolAnthropic}
-		}
-		for protocolIndex := range upstream.Protocols {
-			upstream.Protocols[protocolIndex] = strings.ToLower(strings.TrimSpace(upstream.Protocols[protocolIndex]))
-		}
-		if upstream.Headers != nil {
-			cleaned := make(map[string]string, len(upstream.Headers))
-			for key, value := range upstream.Headers {
-				cleaned[strings.TrimSpace(key)] = strings.TrimSpace(value)
-			}
-			upstream.Headers = cleaned
-		}
-		if upstream.Models != nil {
-			cleaned := make(map[string]string, len(upstream.Models))
-			for key, value := range upstream.Models {
-				cleaned[strings.TrimSpace(key)] = strings.TrimSpace(value)
-			}
-			upstream.Models = cleaned
-		}
+	c.chains = nil
+}
+
+func trimHeaders(headers map[string]string) map[string]string {
+	if headers == nil {
+		return nil
 	}
+	trimmed := make(map[string]string, len(headers))
+	for key, value := range headers {
+		trimmed[strings.TrimSpace(key)] = strings.TrimSpace(value)
+	}
+	return trimmed
+}
+
+// expandEnv 展开 $VAR / ${VAR}（$$ 转义为字面 $）；未设置的变量报错（凭据缺失
+// 应在加载期暴露，而不是等请求打到上游 401）。
+func expandEnv(value string, getenv func(string) string) (string, error) {
+	if !strings.Contains(value, "$") {
+		return value, nil
+	}
+	var builder strings.Builder
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if character != '$' {
+			builder.WriteByte(character)
+			continue
+		}
+		if index+1 < len(value) && value[index+1] == '$' {
+			builder.WriteByte('$')
+			index++
+			continue
+		}
+		name := ""
+		if index+1 < len(value) && value[index+1] == '{' {
+			end := strings.IndexByte(value[index+2:], '}')
+			if end < 0 {
+				return "", fmt.Errorf("环境变量写法不完整：%q", value)
+			}
+			name = value[index+2 : index+2+end]
+			index += end + 2
+		} else {
+			end := index + 1
+			for end < len(value) && (value[end] == '_' || value[end] >= 'A' && value[end] <= 'Z' ||
+				value[end] >= 'a' && value[end] <= 'z' || value[end] >= '0' && value[end] <= '9') {
+				end++
+			}
+			name = value[index+1 : end]
+			index = end - 1
+		}
+		if name == "" {
+			return "", fmt.Errorf("环境变量名称为空：%q", value)
+		}
+		resolved := getenv(name)
+		if strings.TrimSpace(resolved) == "" {
+			return "", fmt.Errorf("环境变量 %s 未设置（api-key 支持 $VAR / ${VAR}）", name)
+		}
+		builder.WriteString(resolved)
+	}
+	return builder.String(), nil
+}
+
+// resolveChains 解析 models 表为可执行链（同 id 多条 = 故障转移链）。
+func (c *Config) resolveChains(getenv func(string) string) error {
+	chains := map[string][]ResolvedUpstream{}
+	for index, model := range c.Models {
+		if model.ID == "" {
+			return fmt.Errorf("models[%d] 缺少 id", index)
+		}
+		if model.Protocol == "" {
+			return fmt.Errorf("models[%d]（%s）的 protocol 无效（支持 %s）",
+				index, model.ID, strings.Join(SupportedProtocols(), " / "))
+		}
+		if model.Backend == "" {
+			return fmt.Errorf("models[%d]（%s）缺少 backend", index, model.ID)
+		}
+		resolved := ResolvedUpstream{
+			Name:      model.Backend,
+			BaseURL:   model.BaseURL,
+			Auth:      model.Auth,
+			Headers:   model.Headers,
+			Model:     model.Model,
+			TimeoutMS: model.TimeoutMS,
+		}
+		backend, builtin := LookupBackend(model.Backend)
+		if named, exists := c.Backends[model.Backend]; exists {
+			// 命名后端：类型可指向内置类型，缺省 standard
+			if named.Type != "" {
+				inner, found := LookupBackend(named.Type)
+				if !found && named.Type != "standard" {
+					return fmt.Errorf("models[%d]（%s）：backends.%s.type 未知：%s",
+						index, model.ID, model.Backend, named.Type)
+				}
+				backend, builtin = inner, found
+			} else {
+				backend, builtin = Backend{}, false
+			}
+			resolved.Name = model.Backend
+			resolved.BaseURL = firstNonEmpty(model.BaseURL, named.BaseURL, backend.BaseURL)
+			resolved.Auth = firstNonEmpty(model.Auth, named.Auth, backend.Auth, "bearer")
+			resolved.Headers = mergeHeaders(backend.Headers, named.Headers, model.Headers)
+			resolved.TimeoutMS = firstNonZero(model.TimeoutMS, named.TimeoutMS, backend.TimeoutMS, DefaultUpstreamTimeoutMS)
+			resolved.Token = firstNonEmpty(model.APIKey, named.APIKey)
+			resolved.Prepare = backend.Prepare
+			resolved.Type = backendTypeName(backend, named.Type)
+		} else if builtin {
+			resolved.BaseURL = firstNonEmpty(model.BaseURL, backend.BaseURL)
+			resolved.Auth = firstNonEmpty(model.Auth, backend.Auth, "bearer")
+			resolved.Headers = mergeHeaders(backend.Headers, model.Headers)
+			resolved.TimeoutMS = firstNonZero(model.TimeoutMS, backend.TimeoutMS, DefaultUpstreamTimeoutMS)
+			resolved.Token = model.APIKey
+			resolved.Prepare = backend.Prepare
+			resolved.Type = backend.Name
+		} else if strings.EqualFold(model.Backend, "standard") {
+			resolved.Type = "standard"
+			resolved.Auth = firstNonEmpty(model.Auth, "bearer")
+			resolved.Token = model.APIKey
+		} else {
+			return fmt.Errorf("models[%d]（%s）：未知后端 %q（内置：standard、%s；或先在 backends 里定义）",
+				index, model.ID, model.Backend, strings.Join(BackendNames(), "、"))
+		}
+		if !builtin && resolved.Type == "standard" && resolved.BaseURL == "" {
+			return fmt.Errorf("models[%d]（%s）：标准后端需要 base_url", index, model.ID)
+		}
+		if builtin && !backendSupportsProtocol(backend, model.Protocol) {
+			return fmt.Errorf("models[%d]（%s）：后端 %s 不支持协议 %s（支持 %s）",
+				index, model.ID, backend.Name, model.Protocol, strings.Join(backend.Protocols, " / "))
+		}
+		token, err := expandEnv(resolved.Token, getenv)
+		if err != nil {
+			return fmt.Errorf("models[%d]（%s）：%w", index, model.ID, err)
+		}
+		if strings.TrimSpace(token) == "" {
+			return fmt.Errorf("models[%d]（%s）：缺少 api-key", index, model.ID)
+		}
+		resolved.Token = token
+		if resolved.BaseURL != "" {
+			parsed, err := url.Parse(resolved.BaseURL)
+			if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+				return fmt.Errorf("models[%d]（%s）：base_url 必须是绝对 HTTP(S) URL：%q",
+					index, model.ID, resolved.BaseURL)
+			}
+		}
+		if resolved.Auth != "bearer" && resolved.Auth != "x-api-key" {
+			return fmt.Errorf("models[%d]（%s）：auth 只支持 bearer / x-api-key：%q", index, model.ID, resolved.Auth)
+		}
+		chains[model.ID] = append(chains[model.ID], resolved)
+	}
+	c.chains = chains
+	return nil
 }
 
 // Validate 校验配置（必须在 Normalize 之后调用）。
-func (c *Config) Validate() error {
-	if len(c.Keys) == 0 {
-		return fmt.Errorf("keys 不能为空（至少一个接入密钥）")
+func (c *Config) Validate() error { return c.validate(os.Getenv) }
+
+func (c *Config) validate(getenv func(string) string) error {
+	if len(c.Keys) == 0 && !isLoopbackListen(c.Listen) {
+		return fmt.Errorf("keys 为空时只能监听环回地址（当前 %s）；对外监听必须配置接入密钥", c.Listen)
 	}
-	if len(c.Upstreams) == 0 {
-		return fmt.Errorf("upstreams 不能为空（至少一个上游）")
-	}
-	seenKeys := map[string]bool{}
+	seen := map[string]bool{}
 	for index, key := range c.Keys {
 		if key.Name == "" || key.Token == "" {
 			return fmt.Errorf("keys[%d] 需要 name 与 token", index)
 		}
-		if seenKeys[key.Token] {
+		if seen[key.Token] {
 			return fmt.Errorf("keys[%d] 的 token 与前面重复", index)
 		}
-		seenKeys[key.Token] = true
-	}
-	upstreamNames := map[string]bool{}
-	for index, upstream := range c.Upstreams {
-		if upstream.Name == "" {
-			return fmt.Errorf("upstreams[%d] 需要 name", index)
-		}
-		if upstreamNames[upstream.Name] {
-			return fmt.Errorf("upstreams[%d] 的 name 重复：%s", index, upstream.Name)
-		}
-		upstreamNames[upstream.Name] = true
-		parsed, err := url.Parse(upstream.BaseURL)
-		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-			return fmt.Errorf("upstreams[%d].base_url 必须是绝对 HTTP(S) URL：%q", index, upstream.BaseURL)
-		}
-		if upstream.Auth != "bearer" && upstream.Auth != "x-api-key" {
-			return fmt.Errorf("upstreams[%d].auth 只支持 bearer / x-api-key：%q", index, upstream.Auth)
-		}
-		for _, protocol := range upstream.Protocols {
-			supported := false
-			for _, candidate := range SupportedProtocols() {
-				if protocol == candidate {
-					supported = true
-					break
-				}
-			}
-			if !supported {
-				return fmt.Errorf("upstreams[%d].protocols 含未知协议 %q（支持 %s）",
-					index, protocol, strings.Join(SupportedProtocols(), "/"))
-			}
-		}
+		seen[key.Token] = true
 	}
 	if c.Residency.Enabled && c.Residency.Dir == "" {
 		return fmt.Errorf("residency.enabled 需要 residency.dir")
 	}
-	if len(c.Routes) == 0 {
-		return fmt.Errorf("routes 不能为空（至少要覆盖客户端使用的模型或 \"*\"）")
+	if len(c.Models) == 0 {
+		return fmt.Errorf("models 不能为空")
 	}
-	for model, names := range c.Routes {
-		if strings.TrimSpace(model) == "" {
-			return fmt.Errorf("routes 含空模型名")
+	return c.resolveChains(getenv)
+}
+
+func isLoopbackListen(listen string) bool {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		host = listen
+	}
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	if host == "" || strings.EqualFold(host, "localhost") {
+		return true
+	}
+	parsed := net.ParseIP(host)
+	return parsed != nil && parsed.IsLoopback()
+}
+
+func backendTypeName(backend Backend, fallback string) string {
+	if backend.Name != "" {
+		return backend.Name
+	}
+	return firstNonEmpty(fallback, "standard")
+}
+
+func mergeHeaders(groups ...map[string]string) map[string]string {
+	var merged map[string]string
+	for _, group := range groups {
+		if len(group) == 0 {
+			continue
 		}
-		if len(names) == 0 {
-			return fmt.Errorf("routes[%s] 的上游列表为空", model)
+		if merged == nil {
+			merged = map[string]string{}
 		}
-		for _, name := range names {
-			if !upstreamNames[name] {
-				return fmt.Errorf("routes[%s] 引用了未定义的上游：%s", model, name)
-			}
+		for key, value := range group {
+			merged[key] = value
 		}
 	}
-	return nil
+	return merged
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func firstNonZero(values ...int64) int64 {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 // Load 读取、规范化并校验配置文件。
@@ -260,47 +461,48 @@ func Load(path string) (*Config, error) {
 	return &config, nil
 }
 
-// UpstreamByName 查找上游。
-func (c *Config) UpstreamByName(name string) (Upstream, bool) {
-	for _, upstream := range c.Upstreams {
-		if upstream.Name == name {
-			return upstream, true
+// Candidates 返回虚拟模型 + 协议对应的上游链（按配置顺序故障转移；协议不匹配
+// 的上游跳过——网关只做同协议透传）。
+func (c *Config) Candidates(model, protocol string) []ResolvedUpstream {
+	chain := c.chains[model]
+	candidates := make([]ResolvedUpstream, 0, len(chain))
+	for _, upstream := range chain {
+		if upstream.Type == "standard" || upstreamSupportsProtocol(upstream, protocol) {
+			candidates = append(candidates, upstream)
 		}
 	}
-	return Upstream{}, false
+	return candidates
 }
 
-// UpstreamsFor 返回虚拟模型 + 协议对应的上游链（未命中用 "*" 兜底；只保留
-// 声明支持该协议的上游——网关不做跨协议翻译）。
-func (c *Config) UpstreamsFor(model, protocol string) []Upstream {
-	names, ok := c.Routes[model]
+func upstreamSupportsProtocol(upstream ResolvedUpstream, protocol string) bool {
+	backend, ok := LookupBackend(upstream.Type)
 	if !ok {
-		names = c.Routes["*"]
+		return true // standard / 命名后端：使用者负责
 	}
-	chain := make([]Upstream, 0, len(names))
-	for _, name := range names {
-		upstream, found := c.UpstreamByName(name)
-		if !found || !upstream.SupportsProtocol(protocol) {
+	return backendSupportsProtocol(backend, protocol)
+}
+
+// ModelIDs 返回去重后的虚拟模型名（/v1/models 用）。
+func (c *Config) ModelIDs() []string {
+	seen := map[string]bool{}
+	ids := make([]string, 0, len(c.chains))
+	for id := range c.chains {
+		if seen[id] {
 			continue
 		}
-		chain = append(chain, upstream)
+		seen[id] = true
+		ids = append(ids, id)
 	}
-	return chain
+	sort.Strings(ids)
+	return ids
 }
 
-// SupportsProtocol 报告上游是否声明支持该协议。
-func (u Upstream) SupportsProtocol(protocol string) bool {
-	for _, candidate := range u.Protocols {
-		if candidate == protocol {
-			return true
-		}
-	}
-	return false
-}
-
-// KeyFor 按令牌查找接入密钥；支持 Authorization: Bearer 与 x-api-key 两种
-// 载体（Claude Code 用前者）。比较为常量时间（避免时序侧信道）。
+// KeyFor 按令牌查找接入密钥（未配置 keys 时全部放行）；支持
+// Authorization: Bearer 与 x-api-key 两种载体，比较为常量时间。
 func (c *Config) KeyFor(authorization, apiKeyHeader string) (APIKey, bool) {
+	if len(c.Keys) == 0 {
+		return APIKey{Name: "anonymous"}, true
+	}
 	token := ""
 	if bearer, ok := strings.CutPrefix(strings.TrimSpace(authorization), "Bearer "); ok {
 		token = strings.TrimSpace(bearer)

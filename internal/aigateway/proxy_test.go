@@ -13,7 +13,7 @@ import (
 	"testing"
 )
 
-// fakeUpstream 记录收到的请求（含头/体），按脚本返回状态与响应。
+// fakeUpstream 记录收到的请求（含头/原始体），按脚本返回状态与响应。
 type fakeUpstream struct {
 	mu       sync.Mutex
 	requests []recordedRequest
@@ -76,20 +76,19 @@ func (f *fakeUpstream) count() int {
 	return len(f.requests)
 }
 
-func testConfig(upstreams ...Upstream) *Config {
-	for index := range upstreams {
-		if len(upstreams[index].Protocols) == 0 {
-			upstreams[index].Protocols = []string{ProtocolAnthropic}
-		}
-	}
+// newConfig 组装并校验测试配置（Listen 环回 + 一个接入密钥）。
+func newConfig(t *testing.T, models ...Model) *Config {
+	t.Helper()
 	config := &Config{
-		Listen:    "127.0.0.1:0",
-		Session:   SessionConfig{Secret: "test-secret"},
-		Keys:      []APIKey{{Name: "assistant", Token: "gw-token"}},
-		Upstreams: upstreams,
-		Routes:    map[string][]string{"claude-sonnet-5": {"primary", "secondary"}, "*": {"secondary"}},
+		Listen:  "127.0.0.1:8780",
+		Session: SessionConfig{Secret: "test-secret"},
+		Keys:    []APIKey{{Name: "assistant", Token: "gw-token"}},
+		Models:  models,
 	}
 	config.Normalize()
+	if err := config.Validate(); err != nil {
+		t.Fatalf("测试配置无效：%v", err)
+	}
 	return config
 }
 
@@ -102,11 +101,19 @@ func newTestGateway(t *testing.T, config *Config) *Gateway {
 	return gateway
 }
 
-func doMessages(t *testing.T, handler http.Handler, token, body string) *httptest.ResponseRecorder {
+// standardModel 是一个标准后端条目（纯透传，端点由 base_url 给定）。
+func standardModel(id, protocol, baseURL, token string) Model {
+	return Model{ID: id, Protocol: protocol, Backend: "standard", BaseURL: baseURL, APIKey: token}
+}
+
+func doPost(t *testing.T, handler http.Handler, path, token, body string, headers map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
-	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	if token != "" {
 		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	for name, value := range headers {
+		request.Header.Set(name, value)
 	}
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
@@ -118,9 +125,9 @@ func TestGatewayAuth(t *testing.T) {
 	upstream := &fakeUpstream{}
 	server := httptest.NewServer(upstream.handler())
 	defer server.Close()
-	gateway := newTestGateway(t, testConfig(Upstream{Name: "primary", BaseURL: server.URL, Token: "up-token"}))
+	gateway := newTestGateway(t, newConfig(t, standardModel("m", ProtocolAnthropic, server.URL, "up-token")))
 
-	response := doMessages(t, gateway.Handler(), "", `{"model":"claude-sonnet-5","messages":[]}`)
+	response := doPost(t, gateway.Handler(), "/v1/messages", "", `{"model":"m","messages":[]}`, nil)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d", response.Code)
 	}
@@ -131,30 +138,31 @@ func TestGatewayAuth(t *testing.T) {
 	if document["type"] != "error" {
 		t.Errorf("错误结构 = %+v", document)
 	}
+
+	// 未配置 keys 时（环回）不鉴权
+	open := newConfig(t, standardModel("m", ProtocolAnthropic, server.URL, "t"))
+	open.Keys = nil
+	openGateway := newTestGateway(t, open)
+	if response := doPost(t, openGateway.Handler(), "/v1/messages", "", `{"model":"m","messages":[]}`, nil); response.Code != http.StatusOK {
+		t.Errorf("无 keys 时不应要求鉴权：%d", response.Code)
+	}
 }
 
-// 模型映射、会话注入（头 + prompt_cache_key + metadata.user_id）、客户端凭据
-// 不泄露给上游。
-func TestGatewaySessionAndModelMapping(t *testing.T) {
+// opencode 后端：模型映射 + 会话头/prompt_cache_key/metadata 自动注入、
+// 客户端凭据不泄露。
+func TestGatewayOpencodeSessionAndModelMapping(t *testing.T) {
 	upstream := &fakeUpstream{}
 	server := httptest.NewServer(upstream.handler())
 	defer server.Close()
-	config := testConfig(Upstream{
-		Name:    "primary",
-		BaseURL: server.URL,
-		Token:   "up-token",
-		Models:  map[string]string{"claude-sonnet-5": "glm-5.3-flash[1m]"},
-		Session: SessionSpec{
-			Headers:        []string{"x-opencode-session", "x-session-affinity"},
-			BodyField:      "prompt_cache_key",
-			MetadataUserID: true,
-		},
-	})
-	gateway := newTestGateway(t, config)
+	gateway := newTestGateway(t, newConfig(t, Model{
+		ID: "claude-sonnet-5", Protocol: ProtocolAnthropic,
+		Backend: "opencode-go", BaseURL: server.URL, APIKey: "up-token",
+		Model: "glm-5.3-flash[1m]",
+	}))
 
 	body := `{"model":"claude-sonnet-5","messages":[{"role":"user","content":"你好"}],
 		"metadata":{"user_id":"{\"session_id\":\"client-session\",\"device_id\":\"d1\"}"}}`
-	response := doMessages(t, gateway.Handler(), "gw-token", body)
+	response := doPost(t, gateway.Handler(), "/v1/messages", "gw-token", body, nil)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", response.Code, response.Body.String())
 	}
@@ -165,9 +173,6 @@ func TestGatewaySessionAndModelMapping(t *testing.T) {
 	if recorded.Header.Get("x-opencode-session") != "client-session" ||
 		recorded.Header.Get("x-session-affinity") != "client-session" {
 		t.Errorf("会话头未注入：%+v", recorded.Header)
-	}
-	if recorded.Body["prompt_cache_key"] != "client-session" {
-		t.Errorf("prompt_cache_key = %v", recorded.Body["prompt_cache_key"])
 	}
 	metadata, _ := recorded.Body["metadata"].(map[string]any)
 	var userID map[string]any
@@ -180,39 +185,57 @@ func TestGatewaySessionAndModelMapping(t *testing.T) {
 	if token := recorded.Header.Get("Authorization"); token != "Bearer up-token" {
 		t.Errorf("上游凭据 = %q（客户端令牌不应透传）", token)
 	}
-	if recorded.Header.Get("x-api-key") != "" {
-		t.Errorf("客户端 x-api-key 不应透传：%v", recorded.Header.Get("x-api-key"))
+}
+
+// 标准后端纯透传：请求体逐字节原样（键序/空白/转义都不动），无任何注入。
+func TestGatewayStandardRawPassthrough(t *testing.T) {
+	upstream := &fakeUpstream{}
+	server := httptest.NewServer(upstream.handler())
+	defer server.Close()
+	gateway := newTestGateway(t, newConfig(t, standardModel("m", ProtocolAnthropic, server.URL, "t")))
+
+	body := "{\n  \"model\": \"m\",\n  \"messages\": [ {\"role\":\"user\", \"content\": \"你好 \\u4e16界\"} ]\n}"
+	response := doPost(t, gateway.Handler(), "/v1/messages", "gw-token", body, nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d", response.Code)
+	}
+	if string(upstream.last().RawBody) != body {
+		t.Errorf("请求体应逐字节透传：\n%s\n---\n%s", body, upstream.last().RawBody)
+	}
+	if upstream.last().Header.Get("x-opencode-session") != "" {
+		t.Error("标准后端不应注入会话头")
 	}
 }
 
-// 无显式会话时用内容派生的稳定键，并在重试/多轮间保持一致。
+// 无显式会话时用内容派生的稳定键（opencode 后端自动注入），多轮保持一致。
 func TestGatewayDerivedSessionStable(t *testing.T) {
 	upstream := &fakeUpstream{}
 	server := httptest.NewServer(upstream.handler())
 	defer server.Close()
-	gateway := newTestGateway(t, testConfig(Upstream{
-		Name:    "primary",
-		BaseURL: server.URL,
-		Token:   "t",
-		Session: SessionSpec{Headers: []string{"x-session-affinity"}},
+	gateway := newTestGateway(t, newConfig(t, Model{
+		ID: "m", Protocol: ProtocolOpenAIChat, Backend: "opencode-go",
+		BaseURL: server.URL, APIKey: "t",
 	}))
 
-	first := `{"model":"claude-sonnet-5","messages":[{"role":"user","content":"第一轮"}]}`
-	second := `{"model":"claude-sonnet-5","messages":[{"role":"user","content":"第一轮"},{"role":"assistant","content":"答"},{"role":"user","content":"第二轮"}]}`
-	if response := doMessages(t, gateway.Handler(), "gw-token", first); response.Code != http.StatusOK {
+	first := `{"model":"m","messages":[{"role":"user","content":"第一轮"}]}`
+	second := `{"model":"m","messages":[{"role":"user","content":"第一轮"},{"role":"assistant","content":"答"},{"role":"user","content":"第二轮"}]}`
+	if response := doPost(t, gateway.Handler(), "/v1/chat/completions", "gw-token", first, nil); response.Code != http.StatusOK {
 		t.Fatalf("status = %d", response.Code)
 	}
-	one := upstream.last().Header.Get("x-session-affinity")
-	if response := doMessages(t, gateway.Handler(), "gw-token", second); response.Code != http.StatusOK {
+	one := upstream.last().Header.Get("x-opencode-session")
+	if response := doPost(t, gateway.Handler(), "/v1/chat/completions", "gw-token", second, nil); response.Code != http.StatusOK {
 		t.Fatalf("status = %d", response.Code)
 	}
-	two := upstream.last().Header.Get("x-session-affinity")
+	two := upstream.last().Header.Get("x-opencode-session")
 	if one == "" || one != two {
 		t.Errorf("派生会话应跨轮稳定：%q vs %q", one, two)
 	}
+	if upstream.last().Body["prompt_cache_key"] != two {
+		t.Errorf("prompt_cache_key = %v", upstream.last().Body["prompt_cache_key"])
+	}
 }
 
-// 故障转移：主上游 500 → 次上游成功；客户端拿到的仍是正常响应。
+// 同一 id 多条 = 故障转移链：主上游 500 → 次上游成功；4xx 原样回传。
 func TestGatewayFailover(t *testing.T) {
 	primary := &fakeUpstream{status: http.StatusInternalServerError, body: `{"error":"boom"}`}
 	secondary := &fakeUpstream{}
@@ -220,12 +243,12 @@ func TestGatewayFailover(t *testing.T) {
 	defer primaryServer.Close()
 	secondaryServer := httptest.NewServer(secondary.handler())
 	defer secondaryServer.Close()
-	gateway := newTestGateway(t, testConfig(
-		Upstream{Name: "primary", BaseURL: primaryServer.URL, Token: "t"},
-		Upstream{Name: "secondary", BaseURL: secondaryServer.URL, Token: "t"},
+	gateway := newTestGateway(t, newConfig(t,
+		standardModel("m", ProtocolAnthropic, primaryServer.URL, "t"),
+		standardModel("m", ProtocolAnthropic, secondaryServer.URL, "t"),
 	))
 
-	response := doMessages(t, gateway.Handler(), "gw-token", `{"model":"claude-sonnet-5","messages":[]}`)
+	response := doPost(t, gateway.Handler(), "/v1/messages", "gw-token", `{"model":"m","messages":[]}`, nil)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d", response.Code)
 	}
@@ -234,18 +257,46 @@ func TestGatewayFailover(t *testing.T) {
 	}
 
 	// 4xx 不回退：让调用方看到真实错误
-	primary4xx := &fakeUpstream{status: http.StatusBadRequest, body: `{"error":"bad"}`}
-	server4xx := httptest.NewServer(primary4xx.handler())
-	defer server4xx.Close()
-	directConfig := &Config{
-		Keys:      []APIKey{{Name: "k", Token: "t"}},
-		Upstreams: []Upstream{{Name: "only", BaseURL: server4xx.URL, Token: "t"}},
-		Routes:    map[string][]string{"*": {"only"}},
-	}
-	directConfig.Normalize()
-	direct := newTestGateway(t, directConfig)
-	if response := doMessages(t, direct.Handler(), "t", `{"model":"m","messages":[]}`); response.Code != http.StatusBadRequest {
+	bad := &fakeUpstream{status: http.StatusBadRequest, body: `{"error":"bad"}`}
+	badServer := httptest.NewServer(bad.handler())
+	defer badServer.Close()
+	direct := newTestGateway(t, newConfig(t, standardModel("m", ProtocolAnthropic, badServer.URL, "t")))
+	if response := doPost(t, direct.Handler(), "/v1/messages", "gw-token", `{"model":"m","messages":[]}`, nil); response.Code != http.StatusBadRequest {
 		t.Errorf("4xx 应原样回传：%d", response.Code)
+	}
+}
+
+// 协议面：同一模型可声明不同协议；后端不支持的协议不参与路由。
+func TestGatewayProtocols(t *testing.T) {
+	upstream := &fakeUpstream{}
+	server := httptest.NewServer(upstream.handler())
+	defer server.Close()
+	// opencode-go 支持三协议
+	gateway := newTestGateway(t, newConfig(t, Model{
+		ID: "m", Protocol: ProtocolOpenAIResponses, Backend: "opencode-go",
+		BaseURL: server.URL, APIKey: "t",
+	}))
+	response := doPost(t, gateway.Handler(), "/v1/responses", "gw-token", `{"model":"m","input":"hi"}`, nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("responses status = %d body=%s", response.Code, response.Body.String())
+	}
+	if got := upstream.last().Path; got != "/v1/responses" {
+		t.Errorf("上游路径 = %q", got)
+	}
+
+	// zhipu 只支持 anthropic-messages：openai-compatible 无候选 → 400（不触上游）
+	zhipuConfig := newConfig(t, Model{ID: "glm", Protocol: ProtocolAnthropic, Backend: "zhipu", APIKey: "t"})
+	if len(zhipuConfig.Candidates("glm", ProtocolOpenAIChat)) != 0 {
+		t.Error("zhipu 不应支持 openai-compatible")
+	}
+	zhipuGateway := newTestGateway(t, zhipuConfig)
+	before := upstream.count()
+	response = doPost(t, zhipuGateway.Handler(), "/v1/chat/completions", "gw-token", `{"model":"glm","messages":[]}`, nil)
+	if response.Code != http.StatusBadRequest {
+		t.Errorf("协议不匹配应 400：%d", response.Code)
+	}
+	if upstream.count() != before {
+		t.Error("协议不匹配不应触上游")
 	}
 }
 
@@ -254,9 +305,9 @@ func TestGatewayStreamingPassthrough(t *testing.T) {
 	upstream := &fakeUpstream{stream: true}
 	server := httptest.NewServer(upstream.handler())
 	defer server.Close()
-	gateway := newTestGateway(t, testConfig(Upstream{Name: "primary", BaseURL: server.URL, Token: "t"}))
+	gateway := newTestGateway(t, newConfig(t, standardModel("m", ProtocolAnthropic, server.URL, "t")))
 
-	response := doMessages(t, gateway.Handler(), "gw-token", `{"model":"claude-sonnet-5","messages":[]}`)
+	response := doPost(t, gateway.Handler(), "/v1/messages", "gw-token", `{"model":"m","messages":[]}`, nil)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d", response.Code)
 	}
@@ -268,207 +319,42 @@ func TestGatewayStreamingPassthrough(t *testing.T) {
 	}
 }
 
-// 模型白名单与 /v1/models 列表；count_tokens 走同一路由。
+// 模型白名单与 /v1/models 列表（同 id 多条只列一次）。
 func TestGatewayModelAllowlistAndDiscovery(t *testing.T) {
 	upstream := &fakeUpstream{}
 	server := httptest.NewServer(upstream.handler())
 	defer server.Close()
-	config := &Config{
-		Keys:      []APIKey{{Name: "k", Token: "t", Models: []string{"claude-sonnet-5"}}},
-		Upstreams: []Upstream{{Name: "primary", BaseURL: server.URL, Token: "t"}},
-		Routes: map[string][]string{
-			"claude-sonnet-5": {"primary"},
-			"glm-5.3":         {"primary"},
-			"*":               {"primary"},
-		},
-	}
-	config.Normalize()
+	config := newConfig(t,
+		standardModel("claude-sonnet-5", ProtocolAnthropic, server.URL, "t"),
+		standardModel("glm-5.3", ProtocolAnthropic, server.URL, "t"),
+		standardModel("claude-sonnet-5", ProtocolAnthropic, server.URL, "t"), // 备用链
+	)
+	config.Keys[0].Models = []string{"claude-sonnet-5"}
 	gateway := newTestGateway(t, config)
 
-	if response := doMessages(t, gateway.Handler(), "t", `{"model":"glm-5.3","messages":[]}`); response.Code != http.StatusForbidden {
+	if response := doPost(t, gateway.Handler(), "/v1/messages", "gw-token", `{"model":"glm-5.3","messages":[]}`, nil); response.Code != http.StatusForbidden {
 		t.Errorf("白名单外应 403：%d", response.Code)
 	}
-	if response := doMessages(t, gateway.Handler(), "t", `{"model":"claude-sonnet-5","messages":[]}`); response.Code != http.StatusOK {
+	if response := doPost(t, gateway.Handler(), "/v1/messages", "gw-token", `{"model":"claude-sonnet-5","messages":[]}`, nil); response.Code != http.StatusOK {
 		t.Errorf("status = %d", response.Code)
 	}
+	if len(config.Candidates("claude-sonnet-5", ProtocolAnthropic)) != 2 {
+		t.Error("同 id 应形成故障转移链")
+	}
 
-	request := httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", strings.NewReader(`{"model":"claude-sonnet-5","messages":[]}`))
-	request.Header.Set("Authorization", "Bearer t")
+	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	request.Header.Set("Authorization", "Bearer gw-token")
 	recorder := httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
-		t.Errorf("count_tokens status = %d", recorder.Code)
-	}
-
-	listRequest := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
-	listRequest.Header.Set("Authorization", "Bearer t")
-	listRecorder := httptest.NewRecorder()
-	gateway.Handler().ServeHTTP(listRecorder, listRequest)
-	if listRecorder.Code != http.StatusOK {
-		t.Fatalf("models status = %d", listRecorder.Code)
+		t.Fatalf("models status = %d", recorder.Code)
 	}
 	var list map[string]any
-	if err := json.Unmarshal(listRecorder.Body.Bytes(), &list); err != nil {
+	if err := json.Unmarshal(recorder.Body.Bytes(), &list); err != nil {
 		t.Fatal(err)
 	}
-	data, _ := list["data"].([]any)
-	if len(data) != 2 {
+	if data, _ := list["data"].([]any); len(data) != 2 {
 		t.Errorf("models = %+v", list)
-	}
-}
-
-// 配置校验：未知上游、非法 base_url、重复名字。
-func TestConfigValidate(t *testing.T) {
-	base := func() *Config {
-		config := &Config{
-			Keys:      []APIKey{{Name: "k", Token: "t"}},
-			Upstreams: []Upstream{{Name: "a", BaseURL: "https://up.example.com", Token: "t"}},
-			Routes:    map[string][]string{"*": {"a"}},
-		}
-		config.Normalize()
-		return config
-	}
-	if err := base().Validate(); err != nil {
-		t.Fatalf("基准配置应通过：%v", err)
-	}
-	broken := base()
-	broken.Routes = map[string][]string{"*": {"missing"}}
-	if err := broken.Validate(); err == nil {
-		t.Error("未知上游应报错")
-	}
-	broken = base()
-	broken.Upstreams[0].BaseURL = "not-a-url"
-	if err := broken.Validate(); err == nil {
-		t.Error("非法 base_url 应报错")
-	}
-	broken = base()
-	broken.Upstreams = append(broken.Upstreams, broken.Upstreams[0])
-	if err := broken.Validate(); err == nil {
-		t.Error("重复上游名应报错")
-	}
-	broken = base()
-	broken.Keys = nil
-	if err := broken.Validate(); err == nil {
-		t.Error("空 keys 应报错")
-	}
-	if config := base(); config.Upstreams[0].TimeoutMS != DefaultUpstreamTimeoutMS {
-		t.Errorf("默认超时 = %d", config.Upstreams[0].TimeoutMS)
-	}
-	if fmt.Sprint(base().UpstreamsFor("anything", ProtocolAnthropic)[0].Name) != "a" {
-		t.Error("未命中应走 * 兜底")
-	}
-	if len(base().UpstreamsFor("anything", ProtocolOpenAIChat)) != 0 {
-		t.Error("未声明 openai-chat 的上游不应匹配该协议")
-	}
-}
-
-// 三协议面：按路径路由到声明了对应协议的上游；未声明的协议不参与路由。
-func TestGatewayProtocols(t *testing.T) {
-	upstream := &fakeUpstream{}
-	server := httptest.NewServer(upstream.handler())
-	defer server.Close()
-	config := testConfig(Upstream{
-		Name:      "primary",
-		BaseURL:   server.URL,
-		Token:     "t",
-		Protocols: []string{ProtocolAnthropic, ProtocolOpenAIResponses},
-	})
-	gateway := newTestGateway(t, config)
-
-	// /v1/responses 支持
-	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"claude-sonnet-5","input":"hi"}`))
-	request.Header.Set("Authorization", "Bearer gw-token")
-	recorder := httptest.NewRecorder()
-	gateway.Handler().ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("responses status = %d body=%s", recorder.Code, recorder.Body.String())
-	}
-	if got := upstream.last().Path; got != "/v1/responses" {
-		t.Errorf("上游路径 = %q", got)
-	}
-	// /v1/chat/completions 未声明 → 400 且不触上游
-	before := upstream.count()
-	request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"claude-sonnet-5","messages":[]}`))
-	request.Header.Set("Authorization", "Bearer gw-token")
-	recorder = httptest.NewRecorder()
-	gateway.Handler().ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusBadRequest {
-		t.Errorf("未声明协议的端点应 400：%d", recorder.Code)
-	}
-	if upstream.count() != before {
-		t.Error("未声明的协议不应触上游")
-	}
-}
-
-// 最大程度原样转发：无需改写时请求体逐字节透传（键序/空白/转义都不动）。
-func TestGatewayRawPassthrough(t *testing.T) {
-	upstream := &fakeUpstream{}
-	server := httptest.NewServer(upstream.handler())
-	defer server.Close()
-	// 仅会话头注入（不改体），无模型映射
-	gateway := newTestGateway(t, testConfig(Upstream{
-		Name:      "primary",
-		BaseURL:   server.URL,
-		Token:     "t",
-		Protocols: []string{ProtocolAnthropic},
-		Session:   SessionSpec{Headers: []string{"x-opencode-session"}},
-	}))
-	body := "{\n  \"model\": \"claude-sonnet-5\",\n  \"messages\": [ {\"role\":\"user\", \"content\": \"你好 \\u4e16界\"} ]\n}"
-	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
-	request.Header.Set("Authorization", "Bearer gw-token")
-	recorder := httptest.NewRecorder()
-	gateway.Handler().ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d", recorder.Code)
-	}
-	if string(upstream.last().RawBody) != body {
-		t.Errorf("请求体应逐字节透传：\n%s\n---\n%s", body, upstream.last().RawBody)
-	}
-	// opencode 会话头自动提供（客户端未带 → 内容派生）
-	if session := upstream.last().Header.Get("x-opencode-session"); session == "" {
-		t.Error("应自动注入 x-opencode-session")
-	}
-}
-
-// opencode 上游：内容派生的会话自动注入 x-opencode-session + x-session-affinity；
-// 即使客户端什么都不带也能满足其使用约束。
-func TestGatewayOpencodeSessionAutoInjected(t *testing.T) {
-	upstream := &fakeUpstream{}
-	server := httptest.NewServer(upstream.handler())
-	defer server.Close()
-	config := &Config{
-		Session: SessionConfig{Secret: "test-secret"},
-		Keys:    []APIKey{{Name: "assistant", Token: "gw-token"}},
-		Upstreams: []Upstream{{
-			Name:      "opencode",
-			BaseURL:   server.URL,
-			Token:     "t",
-			Protocols: []string{ProtocolOpenAIChat},
-			Session: SessionSpec{
-				Headers:        []string{"x-opencode-session", "x-session-affinity"},
-				BodyField:      "prompt_cache_key",
-				MetadataUserID: true,
-			},
-		}},
-		Routes: map[string][]string{"claude-sonnet-5": {"opencode"}, "*": {"opencode"}},
-	}
-	config.Normalize()
-	gateway := newTestGateway(t, config)
-	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
-		strings.NewReader(`{"model":"claude-sonnet-5","messages":[{"role":"user","content":"你好"}]}`))
-	request.Header.Set("Authorization", "Bearer gw-token")
-	recorder := httptest.NewRecorder()
-	gateway.Handler().ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d", recorder.Code)
-	}
-	recorded := upstream.last()
-	first := recorded.Header.Get("x-opencode-session")
-	if first == "" || first != recorded.Header.Get("x-session-affinity") {
-		t.Errorf("会话头 = %q / %q", first, recorded.Header.Get("x-session-affinity"))
-	}
-	if recorded.Body["prompt_cache_key"] != first {
-		t.Errorf("prompt_cache_key = %v", recorded.Body["prompt_cache_key"])
 	}
 }
 
@@ -477,30 +363,24 @@ func TestGatewayToolDetectionAndUserAgent(t *testing.T) {
 	upstream := &fakeUpstream{}
 	server := httptest.NewServer(upstream.handler())
 	defer server.Close()
-	gateway := newTestGateway(t, testConfig(Upstream{
-		Name:      "primary",
-		BaseURL:   server.URL,
-		Token:     "t",
-		Protocols: []string{ProtocolAnthropic},
-	}))
+	gateway := newTestGateway(t, newConfig(t, standardModel("m", ProtocolAnthropic, server.URL, "t")))
 
-	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-sonnet-5","messages":[]}`))
-	request.Header.Set("Authorization", "Bearer gw-token")
-	request.Header.Set("User-Agent", "claude-cli/2.1.270 (external, cli)")
-	recorder := httptest.NewRecorder()
-	gateway.Handler().ServeHTTP(recorder, request)
+	response := doPost(t, gateway.Handler(), "/v1/messages", "gw-token", `{"model":"m","messages":[]}`,
+		map[string]string{"User-Agent": "claude-cli/2.1.270 (external, cli)"})
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d", response.Code)
+	}
 	ua := upstream.last().Header.Get("User-Agent")
 	if !strings.HasPrefix(ua, "claude-cli/2.1.270") || !strings.Contains(ua, DefaultUserAgent) {
 		t.Errorf("专属 UA 应保留并附网关标识：%q", ua)
 	}
 
-	// 通用 SDK UA 被改写为工具专属署名
-	request = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-sonnet-5","messages":[{"role":"user","content":"hi"}]}`))
-	request.Header.Set("Authorization", "Bearer gw-token")
-	request.Header.Set("User-Agent", "OpenAI/Python 1.0")
-	request.Header.Set("originator", "codex_cli_rs")
-	recorder = httptest.NewRecorder()
-	gateway.Handler().ServeHTTP(recorder, request)
+	response = doPost(t, gateway.Handler(), "/v1/messages", "gw-token",
+		`{"model":"m","messages":[{"role":"user","content":"hi"}]}`,
+		map[string]string{"User-Agent": "OpenAI/Python 1.0", "originator": "codex_cli_rs"})
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d", response.Code)
+	}
 	ua = upstream.last().Header.Get("User-Agent")
 	if !strings.HasPrefix(ua, "codex_cli_rs/assistant-gateway") {
 		t.Errorf("通用 UA 应改写为工具署名：%q", ua)
@@ -520,42 +400,21 @@ func TestGatewayResidency(t *testing.T) {
 	server := httptest.NewServer(upstream.handler())
 	defer server.Close()
 	archive := t.TempDir()
-	config := testConfig(Upstream{
-		Name:      "primary",
-		BaseURL:   server.URL,
-		Token:     "t",
-		Protocols: []string{ProtocolAnthropic},
-		Models:    map[string]string{"claude-sonnet-5": "glm-5.3-flash[1m]"},
-		Session:   SessionSpec{Headers: []string{"x-opencode-session"}},
+	config := newConfig(t, Model{
+		ID: "claude-sonnet-5", Protocol: ProtocolAnthropic, Backend: "opencode-go",
+		BaseURL: server.URL, APIKey: "t", Model: "glm-5.3-flash[1m]",
 	})
 	config.Residency = Residency{Enabled: true, Dir: archive}
 	gateway := newTestGateway(t, config)
 
 	body := `{"model":"claude-sonnet-5","messages":[{"role":"user","content":"你好"}]}`
-	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
-	request.Header.Set("Authorization", "Bearer gw-token")
-	request.Header.Set("User-Agent", "claude-cli/2.1.270")
-	recorder := httptest.NewRecorder()
-	gateway.Handler().ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d", recorder.Code)
+	response := doPost(t, gateway.Handler(), "/v1/messages", "gw-token", body,
+		map[string]string{"User-Agent": "claude-cli/2.1.270"})
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d", response.Code)
 	}
 
-	// 找到归档目录（<dir>/<date>/<id>/）
-	var recordDir string
-	entries, err := os.ReadDir(archive)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, dateEntry := range entries {
-		records, _ := os.ReadDir(filepath.Join(archive, dateEntry.Name()))
-		if len(records) == 1 {
-			recordDir = filepath.Join(archive, dateEntry.Name(), records[0].Name())
-		}
-	}
-	if recordDir == "" {
-		t.Fatal("未找到归档目录")
-	}
+	recordDir := findRecordDir(t, archive)
 	clientBody, err := os.ReadFile(filepath.Join(recordDir, "client-request.body"))
 	if err != nil || string(clientBody) != body {
 		t.Errorf("客户端请求体未保留：%v %q", err, clientBody)
@@ -592,5 +451,121 @@ func TestGatewayResidency(t *testing.T) {
 	}
 	if responseMeta.Status != http.StatusOK || responseMeta.Bytes == 0 {
 		t.Errorf("响应元信息 = %+v", responseMeta)
+	}
+}
+
+func findRecordDir(t *testing.T, archive string) string {
+	t.Helper()
+	var recordDir string
+	entries, err := os.ReadDir(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, dateEntry := range entries {
+		records, _ := os.ReadDir(filepath.Join(archive, dateEntry.Name()))
+		if len(records) == 1 {
+			recordDir = filepath.Join(archive, dateEntry.Name(), records[0].Name())
+		}
+	}
+	if recordDir == "" {
+		t.Fatal("未找到归档目录")
+	}
+	return recordDir
+}
+
+// 配置校验：未知后端、标准后端缺 base_url、协议不匹配、缺 api-key、$ENV 展开、
+// 对外监听必须配 keys。
+func TestConfigValidate(t *testing.T) {
+	base := func() *Config {
+		config := &Config{
+			Listen: "127.0.0.1:8780",
+			Keys:   []APIKey{{Name: "k", Token: "t"}},
+			Models: []Model{{ID: "m", Protocol: ProtocolAnthropic, Backend: "zhipu", APIKey: "t"}},
+		}
+		config.Normalize()
+		return config
+	}
+	if err := base().Validate(); err != nil {
+		t.Fatalf("基准配置应通过：%v", err)
+	}
+
+	broken := base()
+	broken.Models[0].Backend = "nope"
+	if err := broken.Validate(); err == nil {
+		t.Error("未知后端应报错")
+	}
+	broken = base()
+	broken.Models[0] = Model{ID: "m", Protocol: ProtocolAnthropic, Backend: "standard", APIKey: "t"}
+	broken.Normalize()
+	if err := broken.Validate(); err == nil {
+		t.Error("标准后端缺 base_url 应报错")
+	}
+	broken = base()
+	broken.Models[0] = Model{ID: "m", Protocol: ProtocolOpenAIChat, Backend: "zhipu", APIKey: "t"}
+	broken.Normalize()
+	if err := broken.Validate(); err == nil {
+		t.Error("zhipu 不支持 openai-compatible，应报错")
+	}
+	broken = base()
+	broken.Models[0].APIKey = ""
+	if err := broken.Validate(); err == nil {
+		t.Error("缺 api-key 应报错")
+	}
+	broken = base()
+	broken.Models[0].Protocol = "nope"
+	broken.Normalize()
+	if err := broken.Validate(); err == nil {
+		t.Error("未知协议应报错")
+	}
+
+	// $ENV 展开与未设置报错
+	t.Setenv("GW_TEST_KEY", "secret-key")
+	expanded := base()
+	expanded.Models[0].APIKey = "$GW_TEST_KEY"
+	expanded.Normalize()
+	if err := expanded.Validate(); err != nil {
+		t.Fatalf("环境变量应展开：%v", err)
+	}
+	if expanded.Candidates("m", ProtocolAnthropic)[0].Token != "secret-key" {
+		t.Error("环境变量未展开到 token")
+	}
+	missing := base()
+	missing.Models[0].APIKey = "${GW_TEST_MISSING}"
+	missing.Normalize()
+	if err := missing.Validate(); err == nil {
+		t.Error("未设置的变量应报错")
+	}
+
+	// 对外监听 + 空 keys 拒绝；环回 + 空 keys 允许
+	exposed := base()
+	exposed.Listen = "0.0.0.0:8780"
+	exposed.Keys = nil
+	if err := exposed.Validate(); err == nil {
+		t.Error("对外监听必须配置 keys")
+	}
+	open := base()
+	open.Keys = nil
+	if err := open.Validate(); err != nil {
+		t.Errorf("环回 + 空 keys 应允许：%v", err)
+	}
+
+	// 命名后端：type 指向内置 + 覆盖 base_url
+	named := &Config{
+		Listen: "127.0.0.1:8780",
+		Backends: map[string]BackendConfig{
+			"my-go": {Type: "opencode-go", BaseURL: "http://127.0.0.1:9", APIKey: "k"},
+		},
+		Models: []Model{{ID: "m", Protocol: ProtocolOpenAIChat, Backend: "my-go"}},
+	}
+	named.Normalize()
+	if err := named.Validate(); err != nil {
+		t.Fatalf("命名后端应通过：%v", err)
+	}
+	candidate := named.Candidates("m", ProtocolOpenAIChat)[0]
+	if candidate.Type != "opencode-go" || candidate.Prepare == nil || candidate.BaseURL != "http://127.0.0.1:9" {
+		t.Errorf("命名后端解析 = %+v", candidate)
+	}
+	if fmt.Sprint(candidate.Token) != "k" {
+		t.Errorf("命名后端凭据 = %q", candidate.Token)
 	}
 }

@@ -44,9 +44,6 @@ func NewRecorder(dir string) (*Recorder, error) {
 	return &Recorder{dir: trimmed, now: time.Now}, nil
 }
 
-// Dir 返回归档根目录。
-func (r *Recorder) Dir() string { return r.dir }
-
 // RequestMeta 是请求侧元信息（写入 request.meta.json）。
 type RequestMeta struct {
 	ID            string              `json:"id"`

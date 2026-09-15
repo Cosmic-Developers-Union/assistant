@@ -1,13 +1,7 @@
 {
   "listen": "127.0.0.1:8780",
-  "user_agent": "assistant-ai-gateway/1.0",
   "session": {
-    "secret": "change-me-random-32-bytes-base64",
-    "headers": ["x-session-id", "x-opencode-session", "x-session-affinity", "session_id", "x-dsh-session"]
-  },
-  "residency": {
-    "enabled": false,
-    "dir": "/home/you/.config/Cosmic-Developers-Union/assistant/ai-gateway-residency"
+    "secret": "change-me-random-32-bytes-base64"
   },
   "keys": [
     {
@@ -15,80 +9,53 @@
       "token": "gateway-virtual-token"
     }
   ],
-  "upstreams": [
+  "models": [
     {
-      "name": "opencode-go",
-      "base_url": "https://opencode.ai/zen/go",
-      "token": "sk-zen-your-key",
-      "protocols": ["anthropic", "openai-chat", "openai-responses"],
-      "models": {
-        "claude-sonnet-5": "glm-5.3-flash",
-        "claude-haiku-4-5": "minimax-m3"
-      },
-      "session": {
-        "headers": ["x-opencode-session", "x-session-affinity"],
-        "body_field": "prompt_cache_key",
-        "metadata_user_id": true
-      },
-      "timeout_ms": 3000000
+      "id": "deepseek-flash",
+      "protocol": "openai-compatible",
+      "backend": "opencode-go",
+      "api-key": "$OPENCODE_API_KEY"
     },
     {
-      "name": "zhipu",
-      "base_url": "https://api.z.ai/api/anthropic",
-      "token": "your_zai_key",
-      "protocols": ["anthropic"],
-      "models": {
-        "claude-sonnet-5": "glm-5.3-flash[1m]",
-        "claude-haiku-4-5": "glm-5.3-flash[1m]"
-      },
-      "session": { "metadata_user_id": true },
-      "timeout_ms": 3000000
+      "id": "qwen3.8-flash",
+      "protocol": "anthropic-messages",
+      "backend": "opencode-go",
+      "api-key": "$OPENCODE_API_KEY"
     },
     {
-      "name": "minimax",
-      "base_url": "https://api.minimaxi.com/anthropic",
-      "token": "your_minimax_key",
-      "protocols": ["anthropic"],
-      "models": {
-        "claude-sonnet-5": "MiniMax-M3[1m]",
-        "claude-haiku-4-5": "MiniMax-M3[1m]"
-      },
-      "session": { "metadata_user_id": true }
+      "id": "gpt-5.6-luna",
+      "protocol": "openai-responses",
+      "backend": "opencode-go",
+      "api-key": "$OPENCODE_API_KEY"
     },
     {
-      "name": "kimi",
-      "base_url": "https://api.moonshot.cn/anthropic",
-      "token": "your_moonshot_key",
-      "protocols": ["anthropic"],
-      "models": {
-        "claude-sonnet-5": "kimi-k3",
-        "claude-haiku-4-5": "kimi-k3"
-      },
-      "session": { "metadata_user_id": true }
+      "id": "claude-sonnet-5",
+      "protocol": "anthropic-messages",
+      "backend": "zhipu",
+      "api-key": "$ZAI_API_KEY",
+      "model": "glm-5.3-flash[1m]"
     },
     {
-      "name": "openai-proxy",
-      "base_url": "http://127.0.0.1:4000",
-      "token": "sk-litellm-virtual-key",
-      "protocols": ["openai-chat", "openai-responses"],
-      "models": {
-        "claude-sonnet-5": "gpt-5.2",
-        "claude-haiku-4-5": "gpt-5.2-mini"
-      },
-      "session": { "body_field": "prompt_cache_key" }
+      "id": "claude-sonnet-5",
+      "protocol": "anthropic-messages",
+      "backend": "minimax-cn",
+      "api-key": "$MINIMAX_API_KEY",
+      "model": "MiniMax-M3[1m]"
     },
     {
-      "name": "anthropic",
-      "base_url": "https://api.anthropic.com",
-      "auth": "x-api-key",
-      "token": "sk-ant-your-key",
-      "protocols": ["anthropic"],
-      "session": { "metadata_user_id": true }
+      "id": "my-proxy-model",
+      "protocol": "openai-compatible",
+      "backend": "my-proxy"
     }
   ],
-  "routes": {
-    "claude-sonnet-5": ["opencode-go", "zhipu", "minimax", "anthropic"],
-    "claude-haiku-4-5": ["opencode-go", "zhipu", "minimax"],
-    "*": ["zhipu", "anthropic"]
+  "backends": {
+    "my-proxy": {
+      "base_url": "http://127.0.0.1:4000",
+      "api-key": "$LITELLM_KEY"
+    }
+  },
+  "residency": {
+    "enabled": false,
+    "dir": "~/.config/Cosmic-Developers-Union/assistant/ai-gateway-residency"
   }
 }
