@@ -26,11 +26,17 @@ import (
 
 // DefaultSessionHeaderNames 是显式会话头的候选顺序（不区分大小写）：覆盖
 // 当前主流 Agent 的命名，先到先用。
+//   - Claude Code：metadata.user_id（请求体），部分版本也带 x-session-id；
+//   - codex：session_id；
+//   - dsh（DeepSeek Harness）：x-dsh-session / session_id；
+//   - OpenCode：x-opencode-session / x-session-affinity。
 var DefaultSessionHeaderNames = []string{
 	"x-session-id",
-	"x-session-affinity",
 	"x-opencode-session",
+	"x-session-affinity",
 	"x-claude-session-id",
+	"session_id",
+	"x-dsh-session",
 }
 
 // Session 是一次请求解析出的会话身份。

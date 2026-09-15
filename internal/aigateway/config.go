@@ -19,12 +19,45 @@ const DefaultUpstreamTimeoutMS = 30 * 60 * 1000
 // MaxRequestBodyBytes 是请求体上限（长上下文请求可能很大）。
 const MaxRequestBodyBytes = 64 << 20
 
+// 支持的协议面（客户端路径 → 上游协议族；网关只做同协议透传，不做翻译）。
+const (
+	ProtocolAnthropic       = "anthropic"        // POST /v1/messages
+	ProtocolOpenAIChat      = "openai-chat"      // POST /v1/chat/completions
+	ProtocolOpenAIResponses = "openai-responses" // POST /v1/responses
+)
+
+// DefaultUserAgent 是网关转发时的默认 UA（客户端 UA 缺失或为通用 SDK 名时使用，
+// OpenCode Go 要求客户端使用专属 UA）。
+const DefaultUserAgent = "assistant-ai-gateway/1.0"
+
+// ProtocolForPath 把客户端请求路径映射到协议。
+func ProtocolForPath(path string) (string, bool) {
+	switch path {
+	case "/v1/messages", "/v1/messages/count_tokens":
+		return ProtocolAnthropic, true
+	case "/v1/chat/completions":
+		return ProtocolOpenAIChat, true
+	case "/v1/responses":
+		return ProtocolOpenAIResponses, true
+	}
+	return "", false
+}
+
+// SupportedProtocols 返回全部协议名（校验/文档用）。
+func SupportedProtocols() []string {
+	return []string{ProtocolAnthropic, ProtocolOpenAIChat, ProtocolOpenAIResponses}
+}
+
 // Config 是 AI 网关配置（JSON；建议放 <配置目录>/ai-gateway.json，0600）。
 type Config struct {
 	// Listen 是监听地址（缺省 127.0.0.1:8780）
 	Listen string `json:"listen,omitempty"`
 	// Session 是会话机制配置
 	Session SessionConfig `json:"session,omitempty"`
+	// UserAgent 是转发时使用的网关 UA（缺省 assistant-ai-gateway/1.0）
+	UserAgent string `json:"user_agent,omitempty"`
+	// Residency 是数据驻留：完整保留请求与响应（默认关闭）
+	Residency Residency `json:"residency,omitempty"`
 	// Keys 是接入密钥（虚拟 key，如 assistant 使用）；至少一个
 	Keys []APIKey `json:"keys"`
 	// Upstreams 是上游厂商接入点（Anthropic Messages 兼容）；至少一个
@@ -51,11 +84,22 @@ type APIKey struct {
 	Models []string `json:"models,omitempty"`
 }
 
-// Upstream 是一个上游厂商接入点（Anthropic Messages 兼容端点）。
+// Residency 是数据驻留配置：把每个请求（原始体、改写后的上游体）与响应（流式
+// 完整落盘）按请求归档到 <Dir>/<日期>/<id>/，供审计与排障。
+type Residency struct {
+	Enabled bool `json:"enabled,omitempty"`
+	// Dir 是归档根目录（启用时必填）
+	Dir string `json:"dir,omitempty"`
+}
+
+// Upstream 是一个上游厂商接入点。
 type Upstream struct {
 	Name string `json:"name"`
-	// BaseURL 是 Anthropic Messages 兼容根地址（如 https://api.z.ai/api/anthropic）
+	// BaseURL 是上游根地址（Anthropic Messages / OpenAI 兼容，按 Protocols 声明）
 	BaseURL string `json:"base_url"`
+	// Protocols 是该上游支持的协议（缺省 ["anthropic"]）：路由时按客户端协议
+	// 过滤，只做同协议透传，不做跨协议翻译
+	Protocols []string `json:"protocols,omitempty"`
 	// Token 是上游凭据
 	Token string `json:"token"`
 	// Auth 是鉴权方式：bearer（Authorization: Bearer，缺省）或 x-api-key
@@ -77,6 +121,11 @@ func (c *Config) Normalize() {
 		c.Listen = DefaultListen
 	}
 	c.Session.Secret = strings.TrimSpace(c.Session.Secret)
+	c.UserAgent = strings.TrimSpace(c.UserAgent)
+	if c.UserAgent == "" {
+		c.UserAgent = DefaultUserAgent
+	}
+	c.Residency.Dir = strings.TrimSpace(c.Residency.Dir)
 	for index := range c.Session.Headers {
 		c.Session.Headers[index] = strings.TrimSpace(c.Session.Headers[index])
 	}
@@ -98,6 +147,12 @@ func (c *Config) Normalize() {
 		}
 		if upstream.TimeoutMS <= 0 {
 			upstream.TimeoutMS = DefaultUpstreamTimeoutMS
+		}
+		if len(upstream.Protocols) == 0 {
+			upstream.Protocols = []string{ProtocolAnthropic}
+		}
+		for protocolIndex := range upstream.Protocols {
+			upstream.Protocols[protocolIndex] = strings.ToLower(strings.TrimSpace(upstream.Protocols[protocolIndex]))
 		}
 		if upstream.Headers != nil {
 			cleaned := make(map[string]string, len(upstream.Headers))
@@ -150,6 +205,22 @@ func (c *Config) Validate() error {
 		if upstream.Auth != "bearer" && upstream.Auth != "x-api-key" {
 			return fmt.Errorf("upstreams[%d].auth 只支持 bearer / x-api-key：%q", index, upstream.Auth)
 		}
+		for _, protocol := range upstream.Protocols {
+			supported := false
+			for _, candidate := range SupportedProtocols() {
+				if protocol == candidate {
+					supported = true
+					break
+				}
+			}
+			if !supported {
+				return fmt.Errorf("upstreams[%d].protocols 含未知协议 %q（支持 %s）",
+					index, protocol, strings.Join(SupportedProtocols(), "/"))
+			}
+		}
+	}
+	if c.Residency.Enabled && c.Residency.Dir == "" {
+		return fmt.Errorf("residency.enabled 需要 residency.dir")
 	}
 	if len(c.Routes) == 0 {
 		return fmt.Errorf("routes 不能为空（至少要覆盖客户端使用的模型或 \"*\"）")
@@ -199,19 +270,32 @@ func (c *Config) UpstreamByName(name string) (Upstream, bool) {
 	return Upstream{}, false
 }
 
-// UpstreamsFor 返回虚拟模型对应的上游链（未命中用 "*" 兜底）。
-func (c *Config) UpstreamsFor(model string) []Upstream {
+// UpstreamsFor 返回虚拟模型 + 协议对应的上游链（未命中用 "*" 兜底；只保留
+// 声明支持该协议的上游——网关不做跨协议翻译）。
+func (c *Config) UpstreamsFor(model, protocol string) []Upstream {
 	names, ok := c.Routes[model]
 	if !ok {
 		names = c.Routes["*"]
 	}
 	chain := make([]Upstream, 0, len(names))
 	for _, name := range names {
-		if upstream, found := c.UpstreamByName(name); found {
-			chain = append(chain, upstream)
+		upstream, found := c.UpstreamByName(name)
+		if !found || !upstream.SupportsProtocol(protocol) {
+			continue
 		}
+		chain = append(chain, upstream)
 	}
 	return chain
+}
+
+// SupportsProtocol 报告上游是否声明支持该协议。
+func (u Upstream) SupportsProtocol(protocol string) bool {
+	for _, candidate := range u.Protocols {
+		if candidate == protocol {
+			return true
+		}
+	}
+	return false
 }
 
 // KeyFor 按令牌查找接入密钥；支持 Authorization: Bearer 与 x-api-key 两种

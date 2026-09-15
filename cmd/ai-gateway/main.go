@@ -30,6 +30,9 @@ import (
 	"assistant/internal/instances"
 )
 
+// version 由构建注入（-X main.version=...）；缺省 dev。
+var version = "dev"
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	var configPath string
@@ -53,10 +56,23 @@ func main() {
 	if listen != "" {
 		config.Listen = listen
 	}
+	if config.Residency.Enabled && config.Residency.Dir == "" {
+		// 缺省归档到配置目录下，避免相对路径随工作目录漂移
+		config.Residency.Dir = filepath.Join(filepath.Dir(path), "ai-gateway-residency")
+	}
+	if config.UserAgent == aigateway.DefaultUserAgent {
+		config.UserAgent = "assistant-ai-gateway/" + version
+	}
 
-	gateway := aigateway.New(config, func(format string, args ...any) {
+	gateway, err := aigateway.New(config, func(format string, args ...any) {
 		log.Printf(format, args...)
 	})
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	if config.Residency.Enabled {
+		log.Printf("数据驻留已启用：%s", config.Residency.Dir)
+	}
 	server := &http.Server{
 		Addr:              config.Listen,
 		Handler:           gateway.Handler(),

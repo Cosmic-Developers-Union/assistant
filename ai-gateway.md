@@ -6,6 +6,83 @@ Anthropic 官方）转发，按路由链故障转移。它与 `assistant` 是**�
 不同镜像**：网关是数据面（持厂商密钥、逐请求代理），assistant 是控制面（调度 +
 对话），互不拖累发布与故障域。
 
+## 协议面与透传语义
+
+| 客户端路径 | 协议 | 上游要求 |
+| --- | --- | --- |
+| `POST /v1/messages`、`/v1/messages/count_tokens` | `anthropic` | 上游声明 `protocols: ["anthropic"]` |
+| `POST /v1/chat/completions` | `openai-chat` | 上游声明 `openai-chat` |
+| `POST /v1/responses` | `openai-responses` | 上游声明 `openai-responses` |
+
+**只做同协议透传**（不做跨协议翻译）：路由按「虚拟模型 + 客户端协议」过滤上游，
+未声明该协议的上游不参与（否则 400 并提示检查 `routes`/`protocols`）。请求体
+**默认逐字节透传**——键序、空白、转义都不动；只有在「模型映射命中」或「需要写
+`prompt_cache_key`/`metadata.user_id`」时才重新解析序列化（语义等价）。请求头
+除 hop-by-hop 与客户端凭据外原样保留，另加上游鉴权、静态头、会话注入与 UA 规范化。
+
+## 客户端工具（claude / codex / dsh）
+
+一个工具一个文件（`internal/aigateway/tool_*.go`），识别后用于日志、指标与 UA
+规范化：
+
+| 工具 | 协议 | 会话来源 | 说明 |
+| --- | --- | --- | --- |
+| `claude`（Claude Code） | Anthropic Messages | 请求体 `metadata.user_id`，兼容 `x-session-id` | UA `claude-cli/*` 原样保留 + 网关后缀 |
+| `codex`（Codex CLI） | OpenAI Responses | `session_id` 头（部分版本缺失 → 内容派生兜底） | `originator: codex_*` / UA 识别 |
+| `dsh`（DeepSeek Harness） | OpenAI Chat Completions | `x-dsh-session` / `session_id`（部分路径缺失 → 兜底） | UA/`x-app` 识别 |
+
+识别出工具后若客户端 UA 是通用 SDK/库名（`OpenAI/Python`、`httpx/`、`go-http-client`…）
+或缺失，会被改写为工具专属署名——满足 OpenCode Go「客户端应使用自身专属 UA」
+的约束。
+
+## OpenCode Go/Zen 使用约束（网关侧保证）
+
+参考 [OpenCode Go 文档](https://opencode.ai/docs/zh-cn/go/)：客户端应发送典型的
+编程 Agent 流量、使用专属 UA、并在 `x-opencode-session` 中发送**每段对话稳定的
+会话 ID**。网关对 opencode 上游的保证：
+
+1. **会话头永远存在**：客户端带（`x-opencode-session`/`x-session-affinity`/`session_id`/
+   `metadata.user_id`…）就透传/规范化；没带就按内容确定性派生——包括 dsh 这类
+   “部分调用路径缺失会话头”的工具也自动补齐。
+2. **专属 UA**：识别 claude/codex/dsh 并规范化为其专属署名（见上表）。
+3. **会话头保留**：转发时不清除任何会话头（只替换鉴权与 hop-by-hop）。
+4. **约束提醒**：账号用途/转售/限流等是上游条款，网关只在日志与 `/status` 里
+   提供 `tool` / `session` 归因，便于自我审计。
+
+opencode 上游示例（Go 三协议全开）：
+
+```json
+{
+  "name": "opencode-go",
+  "base_url": "https://opencode.ai/zen/go",
+  "token": "sk-zen-...",
+  "protocols": ["anthropic", "openai-chat", "openai-responses"],
+  "session": {
+    "headers": ["x-opencode-session", "x-session-affinity"],
+    "body_field": "prompt_cache_key",
+    "metadata_user_id": true
+  }
+}
+```
+
+## 数据驻留（完整保留请求与响应）
+
+`residency.enabled` + `residency.dir` 打开后，每个请求归档为：
+
+```
+<dir>/<YYYY-MM-DD>/<时间>-<随机>/
+  request.meta.json        请求元信息（头已脱敏：Authorization/x-api-key/Cookie/会话头）
+  client-request.body      客户端原始请求体（逐字节）
+  upstream-request.body    改写后的上游请求体（仅改写时）
+  response.meta.json       响应元信息（状态/头/字节数/耗时/错误）
+  upstream-response.body   上游响应体（SSE 流式边收边写，完整保留）
+```
+
+- 元信息含 `session`/`session_source`/`tool`/`key`/`protocol`/`model`/`upstream`/耗时，
+  方便按会话或工具归因；凭据一律不入盘。
+- 流式响应不占内存（边收边写文件），适合长会话大 diff。
+- 目录保留策略由运维决定（`find` + 定期清理或挂载到专用盘）。
+
 ## 为什么不是 LiteLLM/new-api
 
 通用网关做协议转换与渠道管理很好，但**解决不了“会话”这件事**：不同 Agent 与
@@ -109,7 +186,7 @@ assistant 侧只加一个 provider（无需预设，纯透传）：
 - 客户端凭据不会透传给上游（网关用上游自己的 `token`）；`anthropic-beta`、
   `anthropic-version` 等头原样透传；
 - 响应（含 SSE 流式）实时回传并逐块 flush；
-- 日志一行一次尝试：`session=… source=… key=… model=… upstream=… status=… bytes=…`。
+- 日志一行一次尝试：`session=… source=… tool=… key=… protocol=… model=… upstream=… status=… bytes=…`。
 
 ## 安全
 
@@ -121,8 +198,8 @@ assistant 侧只加一个 provider（无需预设，纯透传）：
 
 ## 路线图
 
-- **OpenAI/Gemini 格式上游的原生翻译**（当前要求上游 Anthropic 兼容；OpenAI 侧先接
-  LiteLLM 之类的翻译代理，作为 `openai-proxy` 上游即可）；
+- **跨协议翻译**（当前是「同协议透传 + 路由」；需要 OpenAI→Anthropic 之类转换时，
+  先接 LiteLLM 作为 `openai-proxy` 上游，或后续在网关内做翻译层）；
 - **复用 `internal/provider` 预设**：把 zhipu/opencode 等厂商的端点、模型映射、会话
   规格收敛为一份「一供应商一文件」的共享注册表，assistant 与网关同源；
 - **成本归因**：解析响应 `usage`，按会话/密钥/上游累计，供 assistant 的

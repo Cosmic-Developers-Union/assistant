@@ -13,26 +13,32 @@ import (
 	"time"
 )
 
-// Gateway 是网关运行时：鉴权 → 会话解析 → 上游链故障转移 → 流式回传。
+// Gateway 是网关运行时：鉴权 → 协议/会话/工具识别 → 上游链故障转移 → 流式
+// 回传（可选数据驻留归档）。请求体只在**必须改写**时才重新序列化（模型映射、
+// prompt_cache_key / metadata 注入）；其余情况逐字节透传。
 type Gateway struct {
 	config   *Config
 	resolver *SessionResolver
 	client   *http.Client
+	recorder *Recorder
 	log      func(string, ...any)
 
 	mu       sync.Mutex
 	requests int64
 	failures int64
 	sources  map[string]int64
+	tools    map[string]int64
+	protocol map[string]int64
 	upstream map[string]int64
 }
 
-// New 构造网关（配置需已 Normalize/Validate）。
-func New(config *Config, log func(string, ...any)) *Gateway {
+// New 构造网关（配置需已 Normalize/Validate）；启用数据驻留但目录不可用时
+// 返回错误（审计能力不静默降级）。
+func New(config *Config, log func(string, ...any)) (*Gateway, error) {
 	if log == nil {
 		log = func(string, ...any) {}
 	}
-	return &Gateway{
+	gateway := &Gateway{
 		config:   config,
 		resolver: &SessionResolver{Secret: []byte(config.Session.Secret), HeaderNames: config.Session.Headers},
 		client: &http.Client{
@@ -40,25 +46,46 @@ func New(config *Config, log func(string, ...any)) *Gateway {
 		},
 		log:      log,
 		sources:  map[string]int64{},
+		tools:    map[string]int64{},
+		protocol: map[string]int64{},
 		upstream: map[string]int64{},
 	}
+	if config.Residency.Enabled {
+		recorder, err := NewRecorder(config.Residency.Dir)
+		if err != nil {
+			return nil, err
+		}
+		gateway.recorder = recorder
+	}
+	return gateway, nil
 }
 
 // Handler 返回网关的 HTTP 路由。
 func (g *Gateway) Handler() http.Handler {
 	mux := http.NewServeMux()
-	handleMessages := func(w http.ResponseWriter, r *http.Request) { g.handleMessages(w, r) }
-	mux.HandleFunc("POST /v1/messages", handleMessages)
-	mux.HandleFunc("POST /v1/messages/count_tokens", handleMessages)
+	for _, path := range []string{"/v1/messages", "/v1/messages/count_tokens", "/v1/chat/completions", "/v1/responses"} {
+		mux.HandleFunc("POST "+path, g.handleProxy)
+	}
 	mux.HandleFunc("GET /v1/models", g.handleModels)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "upstreams": len(g.config.Upstreams)})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":        true,
+			"upstreams": len(g.config.Upstreams),
+			"protocols": SupportedProtocols(),
+			"tools":     ToolNames(),
+			"residency": g.recorder != nil,
+		})
 	})
 	mux.HandleFunc("GET /status", g.handleStatus)
 	return mux
 }
 
-func (g *Gateway) handleMessages(w http.ResponseWriter, r *http.Request) {
+func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request) {
+	protocol, ok := ProtocolForPath(r.URL.Path)
+	if !ok {
+		writeAPIError(w, http.StatusNotFound, "not_found_error", "未知端点："+r.URL.Path)
+		return
+	}
 	key, ok := g.config.KeyFor(r.Header.Get("Authorization"), r.Header.Get("x-api-key"))
 	if !ok {
 		writeAPIError(w, http.StatusUnauthorized, "authentication_error", "无效的网关令牌（Authorization: Bearer <token>）")
@@ -73,6 +100,7 @@ func (g *Gateway) handleMessages(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "请求体超过上限")
 		return
 	}
+	// 解析只用于路由 / 会话 / 工具识别；转发默认用原始字节
 	document := map[string]any{}
 	if err := json.Unmarshal(raw, &document); err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid_request_error", "请求体不是 JSON："+err.Error())
@@ -89,29 +117,41 @@ func (g *Gateway) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session := g.resolver.Resolve(r.Header, document, key.Name)
-	chain := g.config.UpstreamsFor(model)
+	tool := DetectTool(r.Header)
+	chain := g.config.UpstreamsFor(model, protocol)
 	if len(chain) == 0 {
-		writeAPIError(w, http.StatusBadRequest, "invalid_request_error", "没有匹配的模型路由："+model)
+		writeAPIError(w, http.StatusBadRequest, "invalid_request_error",
+			fmt.Sprintf("没有匹配的模型路由：%s（协议 %s；检查 routes 与上游 protocols）", model, protocol))
 		return
 	}
 
 	g.mu.Lock()
 	g.requests++
 	g.sources[session.Source]++
+	g.protocol[protocol]++
+	if tool != "" {
+		g.tools[tool]++
+	}
 	g.mu.Unlock()
 
 	var lastErr error
 	for index, upstream := range chain {
 		last := index == len(chain)-1
-		response, err := g.attempt(r.Context(), upstream, r, raw, session, model)
+		record := g.beginRecord(r, key, session, tool, protocol, model, upstream)
+		response, upstreamBody, err := g.attempt(r.Context(), upstream, r, raw, session, model, tool)
 		if err != nil {
 			lastErr = err
-			g.logAttempt(session, key.Name, model, upstream, 0, 0, err)
+			g.finishRecord(record, ResponseMeta{Error: err.Error()})
+			g.logAttempt(session, tool, key.Name, model, protocol, upstream, 0, 0, err)
 			continue
+		}
+		if record != nil {
+			_ = record.WriteBodies(raw, upstreamBody)
 		}
 		if !last && retryableStatus(response.StatusCode) {
 			lastErr = fmt.Errorf("上游 %s 返回 %d", upstream.Name, response.StatusCode)
-			g.logAttempt(session, key.Name, model, upstream, response.StatusCode, 0, lastErr)
+			g.finishRecord(record, ResponseMeta{Status: response.StatusCode, Headers: RedactRequestHeaders(response.Header)})
+			g.logAttempt(session, tool, key.Name, model, protocol, upstream, response.StatusCode, 0, lastErr)
 			_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
 			response.Body.Close()
 			continue
@@ -119,8 +159,25 @@ func (g *Gateway) handleMessages(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
 		g.upstream[upstream.Name]++
 		g.mu.Unlock()
-		written := streamResponse(w, response)
-		g.logAttempt(session, key.Name, model, upstream, response.StatusCode, written, nil)
+		var sink io.Writer
+		var sinkCloser io.Closer
+		if record != nil {
+			if closer, sinkErr := record.ResponseWriter(); sinkErr == nil {
+				sink, sinkCloser = closer, closer
+			} else {
+				g.log("数据驻留写入失败：%v", sinkErr)
+			}
+		}
+		written := streamResponse(w, response, sink)
+		if sinkCloser != nil {
+			_ = sinkCloser.Close()
+		}
+		g.finishRecord(record, ResponseMeta{
+			Status:  response.StatusCode,
+			Headers: RedactRequestHeaders(response.Header),
+			Bytes:   written,
+		})
+		g.logAttempt(session, tool, key.Name, model, protocol, upstream, response.StatusCode, written, nil)
 		return
 	}
 	g.mu.Lock()
@@ -134,7 +191,8 @@ func (g *Gateway) handleMessages(w http.ResponseWriter, r *http.Request) {
 	writeAPIError(w, http.StatusBadGateway, "api_error", message)
 }
 
-// attempt 向上游发起一次请求：重写模型名与鉴权、注入会话、附加静态头。
+// attempt 向上游发起一次请求：模型映射与鉴权改写、会话注入、UA 规范化。
+// 返回实际上游请求体（未改写时为原始字节）。
 func (g *Gateway) attempt(
 	parent context.Context,
 	upstream Upstream,
@@ -142,32 +200,45 @@ func (g *Gateway) attempt(
 	raw []byte,
 	session Session,
 	model string,
-) (*http.Response, error) {
-	document := map[string]any{}
-	if err := json.Unmarshal(raw, &document); err != nil {
-		return nil, fmt.Errorf("解析请求体: %w", err)
-	}
-	if mapped := upstream.Models[model]; mapped != "" {
-		document["model"] = mapped
-	}
+	tool string,
+) (*http.Response, []byte, error) {
 	header := original.Header.Clone()
-	// 客户端凭据不进上游（上游用自身令牌）
+	// 客户端凭据不进上游（上游用自身令牌）；其余头原样保留
 	header.Del("Authorization")
 	header.Del("x-api-key")
 	for name, value := range upstream.Headers {
 		header.Set(name, value)
 	}
-	upstream.Session.Apply(header, document, session.ID)
+	NormalizeUserAgent(header, tool, g.config.UserAgent)
+
+	// 只有需要改体时才重新解析+序列化，否则逐字节透传
+	upstreamBody := raw
+	mapped := upstream.Models[model]
+	needsBody := mapped != "" || upstream.Session.BodyField != "" || upstream.Session.MetadataUserID
+	if needsBody {
+		document := map[string]any{}
+		if err := json.Unmarshal(raw, &document); err != nil {
+			return nil, nil, fmt.Errorf("解析请求体: %w", err)
+		}
+		if mapped != "" {
+			document["model"] = mapped
+		}
+		upstream.Session.Apply(header, document, session.ID)
+		encoded, err := json.Marshal(document)
+		if err != nil {
+			return nil, nil, fmt.Errorf("序列化上游请求: %w", err)
+		}
+		upstreamBody = encoded
+	} else {
+		upstream.Session.Apply(header, nil, session.ID)
+	}
 	switch upstream.Auth {
 	case "x-api-key":
 		header.Set("x-api-key", upstream.Token)
 	default:
 		header.Set("Authorization", "Bearer "+upstream.Token)
 	}
-	encoded, err := json.Marshal(document)
-	if err != nil {
-		return nil, fmt.Errorf("序列化上游请求: %w", err)
-	}
+
 	target := upstream.BaseURL + original.URL.Path
 	if original.URL.RawQuery != "" {
 		target += "?" + original.URL.RawQuery
@@ -177,20 +248,19 @@ func (g *Gateway) attempt(
 		timeout = time.Duration(DefaultUpstreamTimeoutMS) * time.Millisecond
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
-	request, err := http.NewRequestWithContext(ctx, original.Method, target, bytes.NewReader(encoded))
+	request, err := http.NewRequestWithContext(ctx, original.Method, target, bytes.NewReader(upstreamBody))
 	if err != nil {
 		cancel()
-		return nil, err
+		return nil, nil, err
 	}
 	request.Header = header
 	response, err := g.client.Do(request)
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("连接上游 %s: %w", upstream.Name, err)
+		return nil, nil, fmt.Errorf("连接上游 %s: %w", upstream.Name, err)
 	}
-	// 取消要在响应体读完后进行：包一层
 	response.Body = &cancelReadCloser{inner: response.Body, cancel: cancel}
-	return response, nil
+	return response, upstreamBody, nil
 }
 
 func (g *Gateway) handleModels(w http.ResponseWriter, r *http.Request) {
@@ -221,14 +291,58 @@ func (g *Gateway) handleStatus(w http.ResponseWriter, r *http.Request) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"requests":  g.requests,
-		"failures":  g.failures,
-		"sources":   g.sources,
-		"upstreams": g.upstream,
+		"requests":   g.requests,
+		"failures":   g.failures,
+		"sources":    g.sources,
+		"tools":      g.tools,
+		"protocols":  g.protocol,
+		"upstreams":  g.upstream,
+		"user_agent": g.config.UserAgent,
+		"residency":  g.recorder != nil,
 	})
 }
 
-func (g *Gateway) logAttempt(session Session, key, model string, upstream Upstream, status int, bytes int64, err error) {
+// beginRecord 创建数据驻留记录（未启用时返回 nil）。
+func (g *Gateway) beginRecord(
+	r *http.Request,
+	key APIKey,
+	session Session,
+	tool, protocol, model string,
+	upstream Upstream,
+) *Record {
+	if g.recorder == nil {
+		return nil
+	}
+	record, err := g.recorder.Begin(RequestMeta{
+		Method:        r.Method,
+		Path:          r.URL.Path,
+		Protocol:      protocol,
+		Model:         model,
+		Upstream:      upstream.Name,
+		Key:           key.Name,
+		Tool:          tool,
+		ToolVersion:   ToolVersion(tool, r.Header),
+		Session:       session.ID,
+		SessionSource: session.Source,
+		Headers:       RedactRequestHeaders(r.Header),
+	})
+	if err != nil {
+		g.log("数据驻留写入失败：%v", err)
+		return nil
+	}
+	return record
+}
+
+func (g *Gateway) finishRecord(record *Record, meta ResponseMeta) {
+	if record == nil {
+		return
+	}
+	if err := record.Finish(meta); err != nil {
+		g.log("数据驻留写入失败：%v", err)
+	}
+}
+
+func (g *Gateway) logAttempt(session Session, tool, key, model, protocol string, upstream Upstream, status int, bytes int64, err error) {
 	upstreamModel := upstream.Models[model]
 	if upstreamModel == "" {
 		upstreamModel = model
@@ -237,8 +351,12 @@ func (g *Gateway) logAttempt(session Session, key, model string, upstream Upstre
 	if err != nil {
 		note = " error=" + err.Error()
 	}
-	g.log("session=%s source=%s key=%s model=%s upstream=%s upstream_model=%s status=%d bytes=%d%s",
-		session.ID, session.Source, key, model, upstream.Name, upstreamModel, status, bytes, note)
+	toolNote := ""
+	if tool != "" {
+		toolNote = " tool=" + tool
+	}
+	g.log("session=%s source=%s%s key=%s protocol=%s model=%s upstream=%s upstream_model=%s status=%d bytes=%d%s",
+		session.ID, session.Source, toolNote, key, protocol, model, upstream.Name, upstreamModel, status, bytes, note)
 }
 
 // retryableStatus 报告该状态是否值得故障转移到下一上游：网络类/限流/服务端
@@ -247,8 +365,9 @@ func retryableStatus(status int) bool {
 	return status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500
 }
 
-// streamResponse 把上游响应透传回客户端（含 SSE 流式），返回写入字节数。
-func streamResponse(w http.ResponseWriter, response *http.Response) int64 {
+// streamResponse 把上游响应透传回客户端（含 SSE 流式），可选同时落盘（数据
+// 驻留：上游响应体完整保留），返回写入客户端的字节数。
+func streamResponse(w http.ResponseWriter, response *http.Response, sink io.Writer) int64 {
 	defer response.Body.Close()
 	copyHeaders(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
@@ -258,6 +377,9 @@ func streamResponse(w http.ResponseWriter, response *http.Response) int64 {
 	for {
 		read, err := response.Body.Read(buffer)
 		if read > 0 {
+			if sink != nil {
+				_, _ = sink.Write(buffer[:read])
+			}
 			count, writeErr := w.Write(buffer[:read])
 			written += int64(count)
 			if flusher != nil {
@@ -305,7 +427,7 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	_, _ = w.Write(append(encoded, '\n'))
 }
 
-// writeAPIError 按 Anthropic 错误结构回传，客户端（Claude Code）能原样展示。
+// writeAPIError 按 Anthropic 错误结构回传，客户端能原样展示。
 func writeAPIError(w http.ResponseWriter, status int, kind, message string) {
 	writeJSON(w, status, map[string]any{
 		"type": "error",
