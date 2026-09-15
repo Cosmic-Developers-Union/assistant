@@ -1,10 +1,12 @@
 package dispatcher
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"assistant/internal/claudecfg"
 )
@@ -33,36 +35,42 @@ func writeClaudeSessionSettings(dir string, overrides claudecfg.Overrides) (stri
 	return path, nil
 }
 
-// writeSessionMCPConfig 生成会话的 MCP 配置：provider 定义了原生 server 时，
-// 把 basePath（宿主仓库 .mcp.json）与 provider server 合并写入会话配置目录
-// （同名 server 由 provider 覆盖，provider env 缺省注入其 stdio server 的 env）。
-// provider 未定义 mcp 或 basePath 为空时原样返回 basePath，不产生临时文件。
+// writeSessionMCPConfig 生成会话的 MCP 配置：**assistant 指定的 gitea server 恒
+// 注入**（覆盖仓库 .mcp.json 里的同名条目——工具面由 assistant 决定，跟具体仓库
+// 写了什么无关），仓库既有的其它 server 保留，provider 定义的原生 server 最后
+// 合并（同名由 provider 覆盖）。basePath 缺失/为空也照常生成，因此仓库没有
+// .mcp.json 不影响评审。
 func writeSessionMCPConfig(dir, basePath string, overrides claudecfg.Overrides) (string, error) {
-	if len(overrides.MCP) == 0 || basePath == "" {
-		return basePath, nil
-	}
 	document := map[string]any{}
-	data, err := os.ReadFile(basePath)
-	switch {
-	case err == nil:
-		if trimmed := len(data); trimmed > 0 {
-			if err := json.Unmarshal(data, &document); err != nil {
-				return "", fmt.Errorf("解析 MCP 配置 %s: %w", basePath, err)
+	if path := strings.TrimSpace(basePath); path != "" {
+		data, err := os.ReadFile(path)
+		switch {
+		case err == nil:
+			if len(bytes.TrimSpace(data)) > 0 {
+				if err := json.Unmarshal(data, &document); err != nil {
+					return "", fmt.Errorf("解析 MCP 配置 %s: %w", path, err)
+				}
 			}
+		case !os.IsNotExist(err):
+			return "", fmt.Errorf("读取 MCP 配置 %s: %w", path, err)
 		}
-	case !os.IsNotExist(err):
-		return "", fmt.Errorf("读取 MCP 配置 %s: %w", basePath, err)
 	}
+	servers, _ := document["mcpServers"].(map[string]any)
+	if servers == nil {
+		servers = map[string]any{}
+	}
+	servers[claudecfg.MCPServerGitea] = claudecfg.GiteaMCPServer(claudecfg.AssistantCommand())
+	document["mcpServers"] = servers
 	claudecfg.MergeMCPServers(document, overrides)
 	encoded, err := json.MarshalIndent(document, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("生成合并后的 MCP 配置: %w", err)
 	}
-	path := filepath.Join(dir, "mcp.json")
-	if err := os.WriteFile(path, append(encoded, '\n'), 0o600); err != nil {
+	file := filepath.Join(dir, "mcp.json")
+	if err := os.WriteFile(file, append(encoded, '\n'), 0o600); err != nil {
 		return "", fmt.Errorf("写入合并后的 MCP 配置: %w", err)
 	}
-	return path, nil
+	return file, nil
 }
 
 // sessionMountDirs 返回容器形态下需要挂载的宿主目录（MCP 配置、独立会话配置

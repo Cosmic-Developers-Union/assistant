@@ -26,7 +26,7 @@ func TestBuildPromptPull(t *testing.T) {
 		"head 已更新，需以新 head 重新评审",
 		"结论正文注明所评审的 head（abc1234）",
 		"仅处理该 PR",
-		"SKILL.md",
+		"附加 system 提示词",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt missing %q:\n%s", want, prompt)
@@ -150,12 +150,18 @@ func TestRunSessionDrivesClaudeAndCollectsStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	argsFile := filepath.Join(dir, "args.txt")
+	sessionMCPCopy := filepath.Join(dir, "session-mcp.json")
 	bin := fakeClaude(t, dir, fmt.Sprintf(
 		`printf '%%s\n' "$@" > '%s'
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--mcp-config" ]; then cp "$arg" '%s'; fi
+  prev="$arg"
+done
 printf '%%s\n' '{"type":"system","subtype":"init","session_id":"s-9","model":"fake"}'
 printf '%%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"读取 diff"},{"type":"tool_use","name":"mcp__gitea__pull_request_read"}]}}'
 printf '%%s\n' '{"type":"result","subtype":"success","is_error":false,"num_turns":3,"total_cost_usd":1.5,"duration_ms":900,"session_id":"s-9","result":"评审完成"}'`,
-		argsFile,
+		argsFile, sessionMCPCopy,
 	))
 	var progress []string
 	outcome := RunSession(SessionOptions{
@@ -184,12 +190,28 @@ printf '%%s\n' '{"type":"result","subtype":"success","is_error":false,"num_turns
 		"--permission-mode", "auto",
 		"--autocompact", "auto",
 		"--strict-mcp-config",
-		"--mcp-config", mcpConfigPath,
 		"--max-turns", "300",
 	} {
 		if !containsString(args, flag) {
 			t.Errorf("missing arg %q in %v", flag, args)
 		}
+	}
+	// -mcp-config 指向生成的会话配置（assistant 注入的 gitea server），不再是仓库文件
+	index := slices.Index(args, "--mcp-config")
+	if index < 0 || index+1 >= len(args) {
+		t.Fatalf("missing --mcp-config in %v", args)
+	}
+	if sessionMCP := args[index+1]; sessionMCP == mcpConfigPath {
+		t.Errorf("--mcp-config 应指向生成的会话配置，而不是仓库 .mcp.json：%v", args)
+	} else if _, ok := readMCPServers(t, sessionMCPCopy)[claudecfg.MCPServerGitea]; !ok {
+		t.Errorf("会话 MCP 配置缺少 gitea server：%s", sessionMCPCopy)
+	}
+	// --append-system-prompt 带上 assistant 内置的评审协议（不依赖仓库里的 skill 文件；
+	// 多行提示词在参数文件里被拆成多行，所以按整体内容断言）
+	if !strings.Contains(string(raw), "--append-system-prompt") ||
+		!strings.Contains(string(raw), "PR 审查协议") ||
+		!strings.Contains(string(raw), "标签体系") {
+		t.Errorf("附加 system 提示词缺少内置评审协议：%s", raw)
 	}
 	if !containsString(args, "review pr #64") {
 		t.Errorf("prompt missing in %v", args)
@@ -558,5 +580,34 @@ func TestReadReviewConventions(t *testing.T) {
 	got := ReadReviewConventions(dir)
 	if !strings.Contains(got, "已截断") {
 		t.Errorf("超长约定应截断，len=%d", len(got))
+	}
+}
+
+// 评审/分诊协议来自 assistant 内置的 review 技能（仓库没 install 也生效），
+// 项目自有约定（.assistant/review.md）附在其后。
+func TestReviewProtocolPrompt(t *testing.T) {
+	dir := t.TempDir()
+	prompt := ReviewProtocolPrompt(dir)
+	for _, want := range []string{"PR 审查协议", "Issue 分诊协议", "标签体系", "type/bug"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("内置协议缺少 %q", want)
+		}
+	}
+	if strings.Contains(prompt, "项目评审约定") {
+		t.Errorf("没有 .assistant/review.md 时不该有项目约定段：%s", prompt)
+	}
+
+	if err := os.MkdirAll(filepath.Join(dir, ".assistant"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".assistant", "review.md"), []byte("# 项目约定\n\n必须跑 go test ./...\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prompt = ReviewProtocolPrompt(dir)
+	if !strings.Contains(prompt, "必须跑 go test ./...") || !strings.Contains(prompt, "## 项目评审约定") {
+		t.Errorf("项目约定未附上：%s", prompt)
+	}
+	if !strings.Contains(prompt, "PR 审查协议") {
+		t.Errorf("追加项目约定后内置协议不该丢：%s", prompt)
 	}
 }

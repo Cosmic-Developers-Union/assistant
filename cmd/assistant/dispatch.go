@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"assistant/internal/claudecfg"
 	"assistant/internal/credentials"
 	"assistant/internal/daemon"
 	"assistant/internal/dispatcher"
@@ -572,10 +573,11 @@ func previewManagedTargets(command *cobra.Command, targets []dispatchTarget) {
 	}
 }
 
-// prepareManagedTargets 就地准备受管克隆（缺失时按平台/仓库 clone）并检查仓库内
-// 已具备运行所需约定（assistant install 产物）；非受管检出（显式 dir）不触碰。
-// 单个仓库未就绪只标记 skipReason 并记录，不拖垮整个 daemon——其余仓库、状态 API
-// 与对话能力保持可用。
+// prepareManagedTargets 就地准备受管克隆（缺失时按平台/仓库 clone）；非受管检出
+// （显式 dir）不触碰。克隆失败（网络/权限）才算未就绪——**仓库里有没有
+// assistant install 的产物不构成门槛**：会话的 MCP 与评审协议都由 assistant 注入
+// （见 claudecfg.GiteaMCPServer / dispatcher.ReviewProtocolPrompt），仓库长什么样
+// 都照常评审。脚手架缺失只作为提示记一行，方便顺手补 install。
 func prepareManagedTargets(command *cobra.Command, targets []dispatchTarget) []dispatchTarget {
 	for index := range targets {
 		target := &targets[index]
@@ -592,21 +594,32 @@ func prepareManagedTargets(command *cobra.Command, targets []dispatchTarget) []d
 		if cloned {
 			fmt.Fprintf(command.ErrOrStderr(), "已克隆 %s → %s\n", target.repo.Name, target.repoDir)
 		}
-		missing := ""
-		for _, relative := range []string{".mcp.json", filepath.Join(".claude", "settings.json")} {
-			if _, err := os.Stat(filepath.Join(target.repoDir, relative)); err != nil {
-				missing = relative
-				break
-			}
-		}
-		if missing != "" {
-			target.skipReason = "缺少 " + missing
+		if missing := missingScaffolding(target.repoDir); len(missing) > 0 {
 			fmt.Fprintf(command.ErrOrStderr(),
-				"跳过 %s：缺少 %s：先在仓库检出运行 `assistant install` 并提交该文件（推送后重启生效）\n",
-				target.repo.Name, missing)
+				"提示：%s 没有 %s（评审照常进行，MCP 与会话配置由 assistant 注入）；"+
+					"需要仓库内的编辑器/CI 脚手架时运行 `assistant install` 并提交\n",
+				target.repo.Name, strings.Join(missing, "、"))
 		}
 	}
 	return targets
+}
+
+// missingScaffolding 返回仓库缺失的 assistant install 产物（仅用于提示，不影响
+// 就绪判定）。
+func missingScaffolding(repoDir string) []string {
+	candidates := []string{
+		".mcp.json",
+		filepath.Join(".claude", "settings.json"),
+		filepath.Join(".claude", "skills", "review", "SKILL.md"),
+		"AGENTS.md",
+	}
+	missing := make([]string, 0, len(candidates))
+	for _, relative := range candidates {
+		if _, err := os.Stat(filepath.Join(repoDir, relative)); err != nil {
+			missing = append(missing, relative)
+		}
+	}
+	return missing
 }
 
 // readyTargets 过滤掉未就绪目标（prepareManagedTargets 的结果）。
@@ -629,6 +642,51 @@ func skipSummary(targets []dispatchTarget) string {
 		}
 	}
 	return strings.Join(parts, "、")
+}
+
+// checkSessionRuntime 在调度开跑前把「会话能不能跑起来」的前提一次讲清：claude
+// 可执行文件与版本、assistant 托管的会话配置根、以及每个 provider 的 AI 凭据来源。
+// 这些前提**与仓库内容无关**，所以不管有没有就绪仓库都要检查——所有仓库都被跳过
+// 时恰恰最需要这几行日志（否则只剩一句「没有可运行的仓库」）。
+func checkSessionRuntime(command *cobra.Command, targets []dispatchTarget, log func(string)) {
+	warnf := func(format string, arguments ...any) {
+		fmt.Fprintf(command.ErrOrStderr(), "警告："+format+"\n", arguments...)
+	}
+	if len(targets) == 0 {
+		return
+	}
+	config := targets[0].config
+	if resolved, err := exec.LookPath(config.ClaudeBin); err != nil {
+		warnf("找不到 claude 可执行文件（%s）：评审与对话会话都会失败（装 claude，或用 --claude-bin 指绝对路径）",
+			config.ClaudeBin)
+	} else if version := claudecfg.ClaudeVersion(config.ClaudeBin); version != "" {
+		log(fmt.Sprintf("claude：%s（%s）", version, resolved))
+	} else {
+		log(fmt.Sprintf("claude：%s（读不出版本，可能不是 Claude Code CLI）", resolved))
+	}
+	if config.SessionDir != "" {
+		log(fmt.Sprintf("会话配置根：%s（assistant 托管：会话记录与 claude 全局配置都落这里，不读 ~/.claude）",
+			config.SessionDir))
+	}
+	// 凭据按 provider 去重报告：会话不读 ~/.claude 登录态，没有 provider 凭据就必然失败
+	reported := map[string]bool{}
+	for _, target := range targets {
+		name := target.config.ProviderName
+		if name == "" {
+			name = "内置缺省"
+		} else if provider.HasPreset(name) {
+			name += " 内置预设"
+		}
+		if reported[name] {
+			continue
+		}
+		reported[name] = true
+		if source := claudecfg.CredentialSource(target.config.Provider); source != "" {
+			log(fmt.Sprintf("AI 凭据：%s（来源 %s）", name, source))
+			continue
+		}
+		warnf("provider %s 没有可用的 AI 凭据：会话会认证失败；%s", name, claudecfg.MissingCredentialHint)
+	}
 }
 
 func dispatchLogger(w io.Writer) func(string) {
@@ -741,13 +799,8 @@ func runDispatchLoop(command *cobra.Command, repoFlag, configPath string, option
 		if err := checkTargetsHealth(command.Context(), ready, log); err != nil {
 			return err
 		}
-		if len(ready) > 0 {
-			// claude 是会话运行时依赖：提前给出可诊断的警告，而不是等会话失败
-			if _, err := exec.LookPath(ready[0].config.ClaudeBin); err != nil {
-				log(fmt.Sprintf("警告：找不到 claude 可执行文件（%s）：评审/对话会话将失败（装 claude 或用 --claude-bin 指绝对路径）",
-					ready[0].config.ClaudeBin))
-			}
-		}
+		// 会话能不能跑起来与仓库内容无关：不管有没有就绪仓库都先把前提说清楚
+		checkSessionRuntime(command, targets, log)
 		for _, target := range ready {
 			env, settings, mcp := target.config.Provider.Counts()
 			globalEnv, globalSettings, globalMCP := target.config.Optimizations.Counts()

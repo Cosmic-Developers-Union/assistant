@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"assistant/internal/claudecfg"
+	"assistant/internal/dispatcher"
 	"assistant/internal/instances"
 
 	"github.com/spf13/cobra"
@@ -148,8 +150,9 @@ func TestRepoDirOverride(t *testing.T) {
 	}
 }
 
-// 受管仓库未就绪（缺 install 产物）只跳过该仓库：其余照跑，daemon 不退出。
-func TestPrepareManagedTargetsSkipsUnprovisioned(t *testing.T) {
+// 仓库缺少 install 产物**不再是门槛**：MCP 与评审协议由 assistant 注入，两个仓库
+// 都就绪，只提示一句缺什么（受管克隆失败才跳过）。
+func TestPrepareManagedTargetsIgnoresScaffolding(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	withReviewCredential(t, "https://gitea.example.com")
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
@@ -171,37 +174,40 @@ func TestPrepareManagedTargetsSkipsUnprovisioned(t *testing.T) {
 		return target
 	}
 
-	ready := targetFor("acme/ready")
-	if err := os.MkdirAll(filepath.Join(ready.repoDir, ".git"), 0o755); err != nil {
+	provisioned := targetFor("acme/provisioned")
+	if err := os.MkdirAll(filepath.Join(provisioned.repoDir, ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(ready.repoDir, ".claude"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(provisioned.repoDir, ".claude", "skills", "review"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, relative := range []string{".mcp.json", ".claude/settings.json"} {
-		if err := os.WriteFile(filepath.Join(ready.repoDir, relative), []byte("{}"), 0o644); err != nil {
+	for _, relative := range []string{".mcp.json", ".claude/settings.json", ".claude/skills/review/SKILL.md", "AGENTS.md"} {
+		if err := os.WriteFile(filepath.Join(provisioned.repoDir, relative), []byte("{}"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	missing := targetFor("acme/missing")
-	if err := os.MkdirAll(filepath.Join(missing.repoDir, ".git"), 0o755); err != nil {
+	bare := targetFor("acme/bare")
+	if err := os.MkdirAll(filepath.Join(bare.repoDir, ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	targets := prepareManagedTargets(command, []dispatchTarget{ready, missing})
-	if targets[0].skipReason != "" {
-		t.Errorf("已就绪仓库不应跳过：%s", targets[0].skipReason)
+	targets := prepareManagedTargets(command, []dispatchTarget{provisioned, bare})
+	for index, target := range targets {
+		if target.skipReason != "" {
+			t.Errorf("仓库 %d 不应因缺脚手架被跳过：%s", index, target.skipReason)
+		}
 	}
-	if targets[1].skipReason == "" || !strings.Contains(targets[1].skipReason, ".mcp.json") {
-		t.Errorf("缺产物仓库应跳过：%q", targets[1].skipReason)
+	if !strings.Contains(stderr.String(), "acme/bare 没有 .mcp.json") ||
+		!strings.Contains(stderr.String(), "评审照常进行") {
+		t.Errorf("日志缺少缺脚手架的提示：%s", stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "跳过 acme/missing") || !strings.Contains(stderr.String(), "assistant install") {
-		t.Errorf("日志缺少跳过指引：%s", stderr.String())
+	if strings.Contains(stderr.String(), "acme/provisioned 没有") {
+		t.Errorf("已装脚手架的仓库不该有提示：%s", stderr.String())
 	}
-	if readyList := readyTargets(targets); len(readyList) != 1 || readyList[0].repo.Name != "acme/ready" {
+	if readyList := readyTargets(targets); len(readyList) != 2 {
 		t.Errorf("readyTargets = %+v", readyList)
 	}
-	if summary := skipSummary(targets); !strings.Contains(summary, "acme/missing") {
+	if summary := skipSummary(targets); summary != "" {
 		t.Errorf("skipSummary = %q", summary)
 	}
 }
@@ -268,5 +274,66 @@ func TestResolveInstanceTargetProviderCascade(t *testing.T) {
 	file.Normalize()
 	if err := file.Validate(); err == nil {
 		t.Error("未定义的 provider 引用应报错")
+	}
+}
+
+// 会话前提自检与仓库内容无关：claude 缺失、没有 AI 凭据都要在启动日志里说清楚
+// （全部仓库被跳过时这是唯一的诊断线索）。
+func TestCheckSessionRuntimeReportsPrerequisites(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "claude")
+	script := "#!/bin/sh\ncase \"$1\" in\n  --version) echo '2.1.270 (Claude Code)';;\nesac\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sessionDir := filepath.Join(dir, "claude-config")
+
+	command := &cobra.Command{}
+	command.SetOut(&bytes.Buffer{})
+	stderr := &bytes.Buffer{}
+	command.SetErr(stderr)
+	var logged []string
+	log := func(line string) { logged = append(logged, line) }
+
+	checkSessionRuntime(command, []dispatchTarget{{
+		config: dispatcher.Config{ClaudeBin: bin, SessionDir: sessionDir, ProviderName: "opencode"},
+	}}, log)
+	joined := strings.Join(logged, "\n")
+	if !strings.Contains(joined, "2.1.270") || !strings.Contains(joined, sessionDir) {
+		t.Errorf("缺少 claude/配置根日志：%s", joined)
+	}
+	if !strings.Contains(stderr.String(), "没有可用的 AI 凭据") || !strings.Contains(stderr.String(), "api_key") {
+		t.Errorf("缺少凭据告警：%s", stderr.String())
+	}
+
+	// provider 提供凭据后转为正常日志
+	logged = nil
+	stderr.Reset()
+	checkSessionRuntime(command, []dispatchTarget{{
+		config: dispatcher.Config{
+			ClaudeBin:    bin,
+			SessionDir:   sessionDir,
+			ProviderName: "opencode",
+			Provider:     claudecfg.Overrides{Env: map[string]string{"ANTHROPIC_AUTH_TOKEN": "tok"}},
+		},
+	}}, log)
+	if stderr.Len() != 0 {
+		t.Errorf("有凭据时不该告警：%s", stderr.String())
+	}
+	if !strings.Contains(strings.Join(logged, "\n"), "provider env ANTHROPIC_AUTH_TOKEN") {
+		t.Errorf("缺少凭据来源日志：%v", logged)
+	}
+
+	// claude 不存在：给出可诊断的警告而不是等会话失败
+	logged = nil
+	stderr.Reset()
+	checkSessionRuntime(command, []dispatchTarget{{
+		config: dispatcher.Config{ClaudeBin: filepath.Join(dir, "absent"), SessionDir: sessionDir},
+	}}, log)
+	if !strings.Contains(stderr.String(), "找不到 claude 可执行文件") {
+		t.Errorf("缺少 claude 缺失告警：%s", stderr.String())
 	}
 }

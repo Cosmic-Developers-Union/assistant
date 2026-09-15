@@ -705,6 +705,22 @@ func DefaultConfigDir() (string, error) {
 	return filepath.Join(directory, configNamespace, configApp), nil
 }
 
+// ClaudeDir 是 assistant 托管的 Claude Code 配置根（会话文本记录、会话状态与
+// Claude 自己的全局配置文件都落在这里）：$CLAUDE_CONFIG_DIR 优先，否则
+// <配置目录>/claude。它随配置目录一起挂载/备份，**不读也不写用户的 ~/.claude**——
+// 会话凭据由 provider 配置（config.json 的 providers/optimizations）提供，会话
+// 数据不与用户本人的 Claude 安装互相污染。
+func ClaudeDir() (string, error) {
+	if value := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); value != "" {
+		return value, nil
+	}
+	directory, err := DefaultConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(directory, "claude"), nil
+}
+
 // DefaultConfigPath 是标准配置目录下的 config.json 路径。
 func DefaultConfigPath() (string, error) {
 	directory, err := DefaultConfigDir()

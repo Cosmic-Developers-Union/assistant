@@ -103,17 +103,23 @@ func SyncMirror(repoDir, baseBranch, token string) (string, error) {
 
 // PinStandard 用宿主检出的 .claude/ 整体替换 worktree 的同名目录。worktree 按
 // PR head 检出，随带的 .claude 是 PR 自己的版本——照单全收等于允许 PR 改弱
-// 自己被审的规则（甚至自带放行权限的 settings）。宿主检出缺 .claude/ 时抛错
-// （fail-closed：宁可不起会话，不可无标准评审）。
+// 自己被审的规则（甚至自带放行权限的 settings），所以一律先删掉：基线有
+// .claude/ 就覆盖上去，没有就保持「worktree 里没有 .claude/」——会话的
+// settings、MCP 与评审协议都由 assistant 注入，仓库没装脚手架不构成起会话的
+// 门槛（缺的不是标准，只是仓库自己的项目级调优）。
 func PinStandard(repoDir, worktreeDir string) error {
 	source := filepath.Join(repoDir, ".claude")
-	if _, err := os.Stat(source); err != nil {
-		return fmt.Errorf("宿主检出缺少 .claude/（评审标准来源，应锚定基线分支）：%s", source)
-	}
-	if err := os.RemoveAll(filepath.Join(worktreeDir, ".claude")); err != nil {
+	target := filepath.Join(worktreeDir, ".claude")
+	if err := os.RemoveAll(target); err != nil {
 		return err
 	}
-	return copyDir(source, filepath.Join(worktreeDir, ".claude"))
+	if _, err := os.Stat(source); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	return copyDir(source, target)
 }
 
 // PrepareWorktree 拉取 PR head 并在 worktreeDir 建 detach 检出。

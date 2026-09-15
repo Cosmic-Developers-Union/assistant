@@ -86,15 +86,27 @@ func TestPrepareWorktreeChecksOutPullHeadAndPinsBaseline(t *testing.T) {
 	}
 }
 
-func TestPrepareWorktreeFailsClosedWithoutHostStandard(t *testing.T) {
+// 基线没有 .claude/ 也能起会话：PR 自带的那份被删掉（评审规则不可由 PR 提供），
+// 会话的 settings/MCP/协议由 assistant 注入。
+func TestPrepareWorktreeWithoutHostStandard(t *testing.T) {
 	base := makeFixture(t)
 	seed := filepath.Join(base, "seed")
 	if err := os.RemoveAll(filepath.Join(seed, ".claude")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := PrepareWorktree(seed, 1, filepath.Join(base, "wt-pr-1"), ""); err == nil ||
-		!strings.Contains(err.Error(), "评审标准") {
-		t.Errorf("error = %v, want 评审标准", err)
+	worktreeDir := filepath.Join(base, "wt-pr-1")
+	headSHA, err := PrepareWorktree(seed, 1, worktreeDir, "")
+	if err != nil {
+		t.Fatalf("PrepareWorktree() error = %v", err)
+	}
+	if headSHA == "" {
+		t.Error("headSHA 不应为空")
+	}
+	if _, err := os.Stat(filepath.Join(worktreeDir, ".claude")); !os.IsNotExist(err) {
+		t.Errorf("基线缺 .claude/ 时 worktree 里的 .claude 应被清掉：%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(worktreeDir, "pr-change.txt")); err != nil {
+		t.Errorf("PR 内容应保留：%v", err)
 	}
 }
 

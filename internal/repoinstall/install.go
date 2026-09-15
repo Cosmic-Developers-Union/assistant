@@ -422,7 +422,7 @@ func installClaude(options *Options) error {
 		if servers == nil {
 			servers = map[string]any{}
 		}
-		servers["gitea"] = map[string]any{"command": "assistant", "args": []any{"mcp", "gitea"}}
+		servers[claudecfg.MCPServerGitea] = claudecfg.GiteaMCPServer("assistant")
 		document["mcpServers"] = servers
 	}, options); err != nil {
 		return err
@@ -450,7 +450,7 @@ func installClaude(options *Options) error {
 func uninstallClaude(options *Options) error {
 	if err := updateJSON(filepath.Join(options.Dir, ".mcp.json"), func(document map[string]any) {
 		if servers, ok := document["mcpServers"].(map[string]any); ok {
-			delete(servers, "gitea")
+			delete(servers, claudecfg.MCPServerGitea)
 			if len(servers) == 0 {
 				delete(document, "mcpServers")
 			}

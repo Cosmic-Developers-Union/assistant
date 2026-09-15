@@ -45,6 +45,11 @@ type ChatConfig struct {
 	// SessionProject 是对话会话稳定的项目目录名（缺省 assistant-chat），文本
 	// 记录固定落 <SessionDir>/projects/<SessionProject>/，与启动目录无关
 	SessionProject string
+	// Bare 为真时对话会话用 claude 的 --bare 最小模式：不加载 hooks、插件同步、
+	// CLAUDE.md 自动发现与记忆，只认显式传入的 --settings/--mcp-config。对话
+	// 上下文本来就全靠显式参数（系统提示词 + 自举 daemon MCP），开关由 NewChat
+	// 按 claude 是否支持该参数探测决定。
+	Bare bool
 	// RunClaude 可覆盖 claude 调用（测试注入）；env 是额外进程环境变量；返回 stdout
 	RunClaude func(ctx context.Context, bin string, args []string, dir string, env []string) ([]byte, error)
 	// Log 输出
@@ -81,7 +86,16 @@ func NewChat(config ChatConfig) (*Chat, error) {
 		config.StateDir = filepath.Join(directory, "chat")
 	}
 	if strings.TrimSpace(config.SessionDir) == "" {
-		config.SessionDir = claudecfg.ConfigDir()
+		directory, err := instances.ClaudeDir()
+		if err != nil {
+			return nil, err
+		}
+		config.SessionDir = directory
+	}
+	// 会话配置根由 assistant 托管（claude 的全局配置、会话记录与状态都写在这里）：
+	// 启动时就建好，别把失败留到第一条微信消息
+	if err := os.MkdirAll(config.SessionDir, 0o755); err != nil {
+		return nil, fmt.Errorf("创建会话配置根 %s: %w", config.SessionDir, err)
 	}
 	if strings.TrimSpace(config.SessionProject) == "" {
 		config.SessionProject = claudecfg.ProjectDirName("assistant-chat")
@@ -102,6 +116,15 @@ func NewChat(config ChatConfig) (*Chat, error) {
 
 // StateDir 返回会话状态目录。
 func (c *Chat) StateDir() string { return c.config.StateDir }
+
+// Bare 返回对话会话是否使用 claude 的最小模式（--bare）。
+func (c *Chat) Bare() bool { return c.config.Bare }
+
+// SessionDir 返回会话配置根（assistant 托管，不是用户的 ~/.claude）。
+func (c *Chat) SessionDir() string { return c.config.SessionDir }
+
+// ClaudeBin 返回对话会话使用的 claude 可执行文件。
+func (c *Chat) ClaudeBin() string { return c.config.ClaudeBin }
 
 // Handle 处理一条对话消息，返回回复文本；同一会话的消息串行执行。
 func (c *Chat) Handle(ctx context.Context, conversationID, text string) (string, error) {
@@ -181,6 +204,11 @@ func (c *Chat) sessionArgs(sessionID, title string, fresh bool, text string) ([]
 		"--append-system-prompt", chatSystemPrompt,
 		"--max-turns", "50",
 	}
+	// 最小模式：不加载 hooks/插件同步/CLAUDE.md 自动发现与记忆，上下文只有上面
+	// 显式给的系统提示词、settings（含 provider env）与 daemon MCP
+	if c.config.Bare {
+		args = append(args, "--bare")
+	}
 	if fresh {
 		args = append(args, "--session-id", sessionID)
 	} else {
@@ -219,7 +247,7 @@ func (c *Chat) writeSettings(overrides claudecfg.Overrides) (string, error) {
 func (c *Chat) writeMCPConfig(overrides claudecfg.Overrides) (string, error) {
 	config := map[string]any{
 		"mcpServers": map[string]any{
-			"daemon": map[string]any{"command": "assistant", "args": []any{"mcp", "daemon"}},
+			claudecfg.MCPServerDaemon: claudecfg.DaemonMCPServer(claudecfg.AssistantCommand()),
 		},
 	}
 	claudecfg.MergeMCPServers(config, overrides)

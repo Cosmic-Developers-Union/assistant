@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"assistant/internal/claudecfg"
 	"assistant/internal/daemon"
 	"assistant/internal/instances"
 	"assistant/internal/provider"
@@ -197,10 +198,13 @@ func startDaemonServices(
 		if options.Weixin {
 			return fmt.Errorf("--weixin 需要 config.json 的 weixin 配置：先 assistant weixin login")
 		}
+		// 静默跳过是最难排查的一种：明确说清桥没起以及为什么
+		logf("微信桥未启用：config.json 里没有 weixin 配置（需要时先 `assistant weixin login` 扫码）")
 		return nil
 	}
 	weixinConfig := file.Weixin
 	if !options.Weixin && !weixinConfig.Enabled {
+		logf("微信桥未启用：weixin.enabled=false（`assistant weixin login` 会置为 true；--weixin 可强制开启）")
 		return nil
 	}
 	if strings.TrimSpace(weixinConfig.BotToken) == "" {
@@ -229,8 +233,14 @@ func startDaemonServices(
 		logf("微信桥使用 provider %s（env %d 项，settings %d 项，mcp %d 个）%s", name, env, settings, mcp, global)
 	}
 	timeout := time.Duration(weixinConfig.SessionTimeoutMS) * time.Millisecond
+	claudeBin := firstNonEmpty(weixinConfig.ClaudeBin, options.ClaudeBin, "claude")
+	// 对话会话走 claude 的最小模式（--bare）：上下文本来就全由显式参数给出，
+	// 最小模式顺带甩掉 hooks、插件同步、CLAUDE.md 自动发现与记忆。仅在 claude
+	// 真的支持该参数时打开，不支持就退回普通模式，不让整条桥起不来。
+	bare := claudecfg.SupportsBare(claudeBin)
 	chat, err := daemon.NewChat(daemon.ChatConfig{
-		ClaudeBin:    firstNonEmpty(weixinConfig.ClaudeBin, options.ClaudeBin),
+		ClaudeBin:    claudeBin,
+		Bare:         bare,
 		Model:        firstNonEmpty(weixinConfig.Model, options.Model),
 		Provider:     providerOverrides,
 		ProviderName: providerName,
@@ -239,6 +249,21 @@ func startDaemonServices(
 	})
 	if err != nil {
 		return err
+	}
+	// 对话会话的前提同样一次说清：claude 与最小模式是否生效、凭据从哪来
+	bareLabel := "关（claude 不支持 --bare 或未探测到）"
+	if chat.Bare() {
+		bareLabel = "开（不读 hooks/插件/CLAUDE.md，只用显式 settings 与自举 MCP）"
+	}
+	logf("微信桥对话会话：claude=%s bare=%s 配置根=%s",
+		claudeBin, bareLabel, chat.SessionDir())
+	if source := claudecfg.CredentialSource(providerOverrides); source == "" {
+		warnf := func(format string, arguments ...any) {
+			fmt.Fprintf(command.ErrOrStderr(), "警告："+format+"\n", arguments...)
+		}
+		warnf("微信桥 provider 没有可用的 AI 凭据：对话会认证失败；%s", claudecfg.MissingCredentialHint)
+	} else {
+		logf("微信桥 AI 凭据：%s", source)
 	}
 	bridgeConfig := daemon.BridgeConfig{
 		Weixin: weixin.Config{

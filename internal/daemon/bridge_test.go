@@ -58,7 +58,8 @@ func newFakeWeixin(t *testing.T, fromUser string) (*httptest.Server, *[]map[stri
 func TestBridgeRepliesToLoginUser(t *testing.T) {
 	server, sent, _ := newFakeWeixin(t, "user-1")
 	chat, err := NewChat(ChatConfig{
-		StateDir: t.TempDir(),
+		StateDir:   t.TempDir(),
+		SessionDir: t.TempDir(),
 		RunClaude: func(_ context.Context, _ string, _ []string, _ string, _ []string) ([]byte, error) {
 			return []byte(`{"subtype":"success","is_error":false,"result":"当前 1 个评审会话"}`), nil
 		},
@@ -101,8 +102,9 @@ func TestBridgeRepliesToLoginUser(t *testing.T) {
 func TestBridgeIgnoresOtherUsers(t *testing.T) {
 	server, sent, _ := newFakeWeixin(t, "intruder")
 	chat, err := NewChat(ChatConfig{
-		StateDir:  t.TempDir(),
-		RunClaude: func(context.Context, string, []string, string, []string) ([]byte, error) { return nil, nil },
+		StateDir:   t.TempDir(),
+		SessionDir: t.TempDir(),
+		RunClaude:  func(context.Context, string, []string, string, []string) ([]byte, error) { return nil, nil },
 	})
 	if err != nil {
 		t.Fatal(err)

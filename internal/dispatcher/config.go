@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"assistant/internal/claudecfg"
+	"assistant/internal/instances"
 	"assistant/internal/status"
 )
 
@@ -230,11 +231,16 @@ func ResolveConfig(
 		}
 	}
 
+	sessionDir, err := instances.ClaudeDir()
+	if err != nil {
+		return Config{}, fmt.Errorf("解析会话配置根: %w", err)
+	}
+
 	return Config{
 		Host:           strings.TrimRight(host, "/"),
 		AccessToken:    accessToken,
 		Repository:     parsedRepository,
-		SessionDir:     claudecfg.ConfigDir(),
+		SessionDir:     sessionDir,
 		SessionProject: claudecfg.ProjectDirName("assistant-" + host + "-" + repository),
 		Interval:       interval,
 		SessionTimeout: sessionTimeout,

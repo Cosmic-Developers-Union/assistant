@@ -168,6 +168,25 @@ func TestDefaultManagedPaths(t *testing.T) {
 	}
 }
 
+// 会话配置根由 assistant 托管（<配置目录>/claude），可用 CLAUDE_CONFIG_DIR 覆盖；
+// 不再默认用户的 ~/.claude。
+func TestClaudeDir(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	directory, err := ClaudeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "Cosmic-Developers-Union", "assistant", "claude")
+	if directory != want {
+		t.Errorf("ClaudeDir() = %q, want %q", directory, want)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", "/tmp/custom-claude")
+	if overridden, err := ClaudeDir(); err != nil || overridden != "/tmp/custom-claude" {
+		t.Errorf("ClaudeDir() 应尊重 CLAUDE_CONFIG_DIR：%q, %v", overridden, err)
+	}
+}
+
 // provider 定义松弛解析：env 接受标量、settings/mcp 原样保留、未知键不丢。
 func TestProviderConfigTolerantParseAndRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")

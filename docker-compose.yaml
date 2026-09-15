@@ -6,10 +6,13 @@
 # - 镜像只提供评审环境（claude / go / bun / uv / node 等），从 images/review/Dockerfile
 #   的 review target 构建（与评审会话镜像共用 review-env 层，不拉 registry）；
 #   需要自带二进制的独立镜像时用 `make daemon-image`（daemon target）；
-# - 宿主机用户目录按需**细粒度挂载**（容器内外路径一致）：~/.claude（claude
-#   登录态）、~/.config/Cosmic-Developers-Union/assistant（config.json /
-#   credentials.json / daemon.json / chat 会话）、
+# - 宿主机用户目录按需**细粒度挂载**（容器内外路径一致）：
+#   ~/.config/Cosmic-Developers-Union/assistant（config.json（**AI 凭据在这里**：
+#   providers/optimizations 的 api_key）/ credentials.json / daemon.json / chat 会话 /
+#   claude/（assistant 托管的会话配置根：文本记录与 claude 全局配置））、
 #   ~/.local/share/Cosmic-Developers-Union/assistant（受管克隆 repos/ 与状态 state/）；
+#   不挂 ~/.claude：会话的配置与凭据全部由 assistant 提供，与宿主上的 Claude 安装
+#   互不影响；
 # - /tmp 用 tmpfs（16G 上限）：评审 worktree 与会话临时目录全在 /tmp，
 #   落内存、退出即清；
 # - 状态 API 只发布在宿主 127.0.0.1:8770（`assistant mcp daemon` 走 daemon.json
@@ -22,7 +25,7 @@
 #   make build && docker compose up -d --force-recreate    # 等价手工流程
 #   make daemon-image      # 可选：构建内置二进制的独立 daemon 镜像（BASE_IMAGE=... 可换基座）
 #   docker compose logs -f
-#   docker compose exec assistant assistant weixin login   # 首次扫码（终端渲染二维码）
+#   docker compose exec -it assistant assistant weixin login   # 首次扫码（终端渲染二维码，-it 必需）
 #
 # 以宿主用户身份运行：写回挂载目录的文件属主不变；UID/GID 与 HOME 由 compose
 # 插值，缺省 1000:1000，请在 .env 或 shell 环境里按需覆盖（export ASSISTANT_UID=...）。
@@ -54,17 +57,17 @@ services:
       CARGO_HOME: ${HOME}/.cargo
       RUSTUP_HOME: ${HOME}/.rustup
       PATH: /usr/local/go/bin:${HOME}/go/bin:${HOME}/.bun/bin:/usr/local/bin:/usr/bin:/bin
-      # claude 认证按需透传；OAuth 登录态在挂载的 ~/.claude 里，通常无需设置
+      # AI 凭据走 assistant 配置（config.json 的 providers/optimizations）；
+      # 这里只在确实想用进程环境兜底时才打开（会话不读 ~/.claude 登录态）
       # ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      # CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      # ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:-}
     volumes:
       # 宿主最新二进制（make build 产物）：只读覆盖镜像同名路径，升级 = 重新构建
       # + 重建容器（文件必须已存在，否则 docker 会把它建成目录；ASSISTANT_BINARY 可换路径）
       - ${ASSISTANT_BINARY:-./assistant}:/usr/local/bin/assistant:ro
-      # claude 登录态与会话数据（评审/对话会话的认证与 --resume 数据）
-      - ${HOME}/.claude:${HOME}/.claude
-      # assistant 配置：config.json / credentials.json（login 派生的用途令牌）/
-      # daemon.json / chat 会话映射
+      # assistant 配置与会话数据：config.json（AI 凭据）/ credentials.json（login
+      # 派生的用途令牌）/ daemon.json / chat 会话 / claude（assistant 托管的会话
+      # 配置根：文本记录与 claude 全局配置都在这里，**不挂 ~/.claude**）
       - ${HOME}/.config/Cosmic-Developers-Union/assistant:${HOME}/.config/Cosmic-Developers-Union/assistant
       # 受管克隆与状态：repos/（基线检出）+ state/（日志、单飞锁）
       - ${HOME}/.local/share/Cosmic-Developers-Union/assistant:${HOME}/.local/share/Cosmic-Developers-Union/assistant

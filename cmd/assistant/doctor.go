@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 
+	"assistant/internal/claudecfg"
 	"assistant/internal/config"
 	"assistant/internal/credentials"
 	"assistant/internal/dispatcher"
@@ -32,6 +34,7 @@ func runDoctor(
 		return err
 	}
 	problems := printLocalFindings(stdout, local)
+	problems += printSessionFindings(stdout, configPath)
 
 	server, target, err := auditServer(command, configPath, options, requiredApprovals, allowAdminOverride)
 	if err != nil {
@@ -62,6 +65,53 @@ func printLocalFindings(stdout io.Writer, findings []repoinstall.Finding) int {
 	return problems
 }
 
+// printSessionFindings 体检「会话能不能跑起来」的前提（与仓库内容无关）：claude
+// 可执行文件与版本、assistant 托管的会话配置根、config.json 里生效 provider 的
+// AI 凭据来源。凭据不再来自 ~/.claude 登录态，所以缺了必须显式报出来。
+func printSessionFindings(stdout io.Writer, configPath string) int {
+	problems := 0
+	bin := "claude"
+	if resolved, err := exec.LookPath(bin); err != nil {
+		fmt.Fprintf(stdout, "%-9s 会话运行时 claude — 找不到 %q：装 claude，或用 --claude-bin / DISPATCH_CLAUDE_BIN 指绝对路径\n",
+			"MISSING", bin)
+		problems++
+	} else if version := claudecfg.ClaudeVersion(bin); version != "" {
+		fmt.Fprintf(stdout, "%-9s 会话运行时 claude — %s（%s）\n", "OK", version, resolved)
+	} else {
+		fmt.Fprintf(stdout, "%-9s 会话运行时 claude — %s（读不出版本，可能不是 Claude Code CLI）\n", "OK", resolved)
+	}
+	if directory, err := instances.ClaudeDir(); err != nil {
+		fmt.Fprintf(stdout, "%-9s 会话运行时配置根 — %v\n", "MISSING", err)
+		problems++
+	} else if err := os.MkdirAll(directory, 0o755); err != nil {
+		fmt.Fprintf(stdout, "%-9s 会话运行时配置根 — %s 不可写：%v\n", "MISSING", directory, err)
+		problems++
+	} else {
+		fmt.Fprintf(stdout, "%-9s 会话运行时配置根 — %s（会话记录与 claude 全局配置；不是 ~/.claude）\n", "OK", directory)
+	}
+	_, file, err := resolveInstanceFile(commandOptions{ConfigPath: configPath})
+	if err != nil || file == nil {
+		fmt.Fprintf(stdout, "%-9s 会话 AI 凭据 — 没有 config.json，跳过（先 assistant login）\n", "SKIPPED")
+		return problems
+	}
+	name := file.DefaultProvider
+	label := name
+	if label == "" {
+		label = "内置缺省"
+	}
+	overrides, err := file.EffectiveOverrides(name)
+	if err != nil {
+		fmt.Fprintf(stdout, "%-9s 会话 AI 凭据 — provider %s 解析失败：%v\n", "UNMANAGED", label, err)
+		return problems + 1
+	}
+	if source := claudecfg.CredentialSource(overrides); source != "" {
+		fmt.Fprintf(stdout, "%-9s 会话 AI 凭据 — provider %s（%s）\n", "OK", label, source)
+		return problems
+	}
+	fmt.Fprintf(stdout, "%-9s 会话 AI 凭据 — provider %s 没有 api_key：%s\n",
+		"MISSING", label, claudecfg.MissingCredentialHint)
+	return problems + 1
+}
 func printServerFindings(stdout io.Writer, findings []status.AuditFinding) int {
 	problems := 0
 	for _, finding := range findings {

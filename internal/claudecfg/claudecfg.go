@@ -12,7 +12,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"strings"
 )
@@ -52,19 +51,6 @@ const SettingSources = "project"
 // CleanupPeriodDays 是会话文本记录的保留天数（Claude Code 默认 30 天即被清理
 // 扫描删除；评审/分诊记录要留作审计，钉到 ~10 年，provider 覆盖可改）。
 const CleanupPeriodDays = 3650
-
-// ConfigDir 返回 Claude Code 配置根：$CLAUDE_CONFIG_DIR 优先，否则 ~/.claude。
-// 会话文本记录落 <ConfigDir>/projects/<project>/<session-id>.jsonl。
-func ConfigDir() string {
-	if value := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); value != "" {
-		return value
-	}
-	home, err := os.UserHomeDir()
-	if err != nil || strings.TrimSpace(home) == "" {
-		return ""
-	}
-	return filepath.Join(home, ".claude")
-}
 
 // ProjectDirName 把候选名折成 CLAUDE_CODE_PROJECT_DIR_NAME 的合法值（官方规则：
 // 1-64 位字母/数字/连字符/下划线，非法字符替换为 -），超长截断并附哈希；折叠

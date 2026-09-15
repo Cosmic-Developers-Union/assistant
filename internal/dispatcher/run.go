@@ -32,6 +32,7 @@ import (
 
 	"assistant/internal/claudecfg"
 	"assistant/internal/provider"
+	"assistant/skills"
 )
 
 // SessionOutcome 是一次 claude 会话的归集结果。
@@ -104,17 +105,17 @@ func BuildPrompt(kind string, number int64, ctx PromptContext) string {
 			headNote = fmt.Sprintf("（%s）", ctx.HeadSHA)
 		}
 		return fmt.Sprintf("review pr #%d\n\n对象：%s\n%s"+
-			"评审协议见 .claude/skills/review/SKILL.md，按其 PR 审查协议执行；"+
-			"项目评审约定（.assistant/review.md，如存在）已作为附加 system 提示词给出，一并遵守。\n"+
+			"评审协议（assistant 内置的 review 技能）已作为附加 system 提示词给出，按其 PR 审查协议执行；"+
+			"项目评审约定（.assistant/review.md，如存在）附在其后，一并遵守。\n"+
 			"仅处理该 PR，不要处理其他待办。"+
 			"最终以 Gitea 原生 Pull Request Review 提交结论（APPROVED / REQUEST_CHANGES / COMMENT），"+
 			"结论正文注明所评审的 head%s。", number, subject, headLine, headNote)
 	}
 	return fmt.Sprintf("triage issue #%d\n\n对象：%s\n"+
-		"分诊规则见 .claude/skills/review/SKILL.md，按其 Issue 分诊规则执行；"+
-		"项目评审约定（.assistant/review.md，如存在）已作为附加 system 提示词给出，一并遵守。\n"+
+		"分诊规则与标签体系（assistant 内置的 review 技能）已作为附加 system 提示词给出，按其 Issue 分诊规则执行；"+
+		"项目评审约定（.assistant/review.md，如存在）附在其后，一并遵守。\n"+
 		"仅处理该 Issue，不要处理其他待办。\n"+
-		"结论按 AGENTS.md 的标签规则落标签并评论。", number, subject)
+		"结论按附加提示词里的标签规则落标签并评论。", number, subject)
 }
 
 // NewSessionOutcome 返回按失败回退的初始归集。
@@ -236,8 +237,9 @@ type SessionOptions struct {
 	Config Config
 	Prompt string
 	Cwd    string
-	// MCPConfigPath 是宿主仓库 .mcp.json 的路径：工具面由 dispatcher 宿主控制，
-	// 与 PR head 解耦
+	// MCPConfigPath 是宿主基线检出的 .mcp.json（仓库自带的其它 MCP server 的
+	// 合并基线，可以不存在）：assistant 指定的 gitea server 恒注入，工具面与
+	// 具体仓库内容解耦
 	MCPConfigPath string
 	// SettingsPath 是独立会话配置（--settings）的路径：由 RunSession 生成，调用
 	// 方无需填写（测试可预置固定路径）
@@ -281,6 +283,19 @@ func ReadReviewConventions(projectDir string) string {
 		text = string(runes[:ReviewConventionsLimit]) + "\n\n（.assistant/review.md 过长，已截断）"
 	}
 	return text
+}
+
+// ReviewProtocolPrompt 组装评审/分诊会话的附加 system 提示词：assistant **内置**
+// 的 review 协议（与 skills/review/SKILL.md 同一份内容）打头，项目自有约定
+// （<projectDir>/.assistant/review.md，如存在）附在其后。协议随二进制走，因此
+// 仓库没有 install 过、或没有 .claude/skills 都不影响评审。
+func ReviewProtocolPrompt(projectDir string) string {
+	sections := []string{strings.TrimSpace(skills.Review)}
+	if conventions := ReadReviewConventions(projectDir); conventions != "" {
+		sections = append(sections,
+			"## 项目评审约定（.assistant/review.md）\n\n"+conventions)
+	}
+	return strings.Join(sections, "\n\n")
 }
 
 // sessionCommand 组装会话命令：缺省直接跑 claude；Config.DockerImage 非空时
@@ -340,6 +355,11 @@ func sessionCommand(options SessionOptions) (bin string, args []string, containe
 	// 会话输入文件（MCP 配置、独立 settings）与文本记录目录按相同绝对路径挂载
 	for _, dir := range sessionMountDirs(options) {
 		args = append(args, "-v", dir+":"+dir)
+	}
+	// assistant 二进制：会话里的 gitea MCP 由它启动（claudecfg.AssistantCommand），
+	// 按同一绝对路径只读挂进去，评审镜像不必自带 assistant
+	if assistant := claudecfg.AssistantCommand(); filepath.IsAbs(assistant) {
+		args = append(args, "-v", assistant+":"+assistant+":ro")
 	}
 	// 文本记录固定目录名靠进程环境传递，容器内显式注入并挂载（挂载点见
 	// sessionMountDirs 的 projects 目录）
@@ -435,9 +455,9 @@ func RunSession(options SessionOptions) SessionOutcome {
 	startedAt := time.Now()
 	outcome := NewSessionOutcome()
 
-	// 项目内约定：.assistant/review.md 作为附加 system 提示词（基线版本）
+	// 会话上下文：assistant 内置的评审/分诊协议 + 项目自有约定（.assistant/review.md）
 	if options.AppendSystemPrompt == "" {
-		options.AppendSystemPrompt = ReadReviewConventions(options.ProjectDir)
+		options.AppendSystemPrompt = ReviewProtocolPrompt(options.ProjectDir)
 	}
 
 	// 稳定的会话 ID 与文本记录位置：同一待办重试复用同一记录（--resume 续接），
@@ -464,6 +484,14 @@ func RunSession(options SessionOptions) SessionOutcome {
 		return outcome
 	}
 	defer cleanup()
+	// 会话配置根由 assistant 托管（claude 的全局配置与会话状态都写在这里，
+	// 不是用户的 ~/.claude）：不存在时先建，避免把失败留给第一次评审
+	if config.SessionDir != "" {
+		if err := os.MkdirAll(config.SessionDir, 0o755); err != nil {
+			outcome.Errors = append(outcome.Errors, fmt.Sprintf("创建会话配置根 %s: %v", config.SessionDir, err))
+			return outcome
+		}
+	}
 	// 供应商代码级特化（如 opencode 的会话请求头）：一次会话一个 id
 	overrides, err := provider.Apply(config.ProviderName, "review", "", config.Provider)
 	if err != nil {
@@ -476,7 +504,8 @@ func RunSession(options SessionOptions) SessionOutcome {
 		return outcome
 	}
 	options.SettingsPath = settingsPath
-	// provider 定义原生 MCP server 时：与仓库 .mcp.json 合并后注入会话
+	// 会话 MCP 配置：assistant 指定的 gitea server + 仓库 .mcp.json 的其它 server
+	// + provider 原生 server（仓库文件缺失也照常生成）
 	mergedMCPPath, err := writeSessionMCPConfig(configDir, options.MCPConfigPath, overrides)
 	if err != nil {
 		outcome.Errors = append(outcome.Errors, err.Error())

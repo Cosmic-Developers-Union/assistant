@@ -357,12 +357,13 @@ status/triage     Issue ───────▶  triage issue #N               
 ```
 
 - **会话工作区与当前目录解耦**：PR 评审在 `refs/pull/<N>/head` 的独立 worktree 里进行；Issue 分诊同样在基线 head 的 detach worktree 里跑。worktree 默认在 `<系统临时目录>/agent-dispatcher/<host>-<owner>-<repo>/worktrees/{pr,issue}-<N>`（`--worktree-root` 可改），会话结束立即移除——宿主检出只被 fetch/worktree 命令触碰，所有实验都在临时目录。
-- **评审标准锚定基线，PR 不可自改**：worktree 建成后立即以宿主检出的 `.claude/` 整体覆盖（skills、settings）——worktree 按 PR head 检出，随带的 `.claude` 是 PR 自己的版本，照单全收等于允许 PR 改弱自己被审的规则。宿主检出缺 `.claude/` 时拒绝起会话（fail-closed）。
-- **受管克隆（config.json 模式）**：`instances[].repos` 未配置 `dir` 的仓库用受管克隆——落点 `<数据目录>/Cosmic-Developers-Union/assistant/repos/<host>/<owner>/<name>`（`XDG_DATA_HOME`，缺省 `~/.local/share`）。`run` 启动时缺失自动 `git clone`（用 reviewer/admin 令牌认证，origin 保持无凭据 URL），之后每轮检测前强制对齐 `origin/<基线分支>`（`--base-branch` / `DISPATCH_BASE_BRANCH`，缺省 `main`）——`git fetch --prune origin` → `git checkout -f -B <基线> origin/<基线>` → `git clean -fd`，任何本地分叉一律丢弃。日志与单飞锁在检出外的状态目录 `<数据目录>/.../state/<host>/<owner>/<name>/`，不会被 clean 波及。受管克隆要求仓库已提交 `assistant install` 产物（`.mcp.json`、`.claude/settings.json`）：缺失的仓库会被**跳过并记录原因**（daemon 保持常驻，状态 API 里该仓库 `ready=false` + `skip_reason`，对话里可直接问「为什么没在跑」），补齐并推送后重启即可；所有仓库都未就绪时 daemon 也不会退出，只提示修复方向。
+- **评审标准锚定基线，PR 不可自改**：worktree 建成后把 PR 自带的 `.claude/` **整体删除**，再用宿主检出的 `.claude/` 覆盖（skills、settings）——worktree 按 PR head 检出，随带的 `.claude` 是 PR 自己的版本，照单全收等于允许 PR 改弱自己被审的规则。宿主检出没有 `.claude/` 也照常起会话：settings、MCP 与评审协议本来就由 assistant 注入（见下文），仓库没装脚手架不构成门槛，只是少了仓库自己的项目级调优。
+- **受管克隆（config.json 模式）**：`instances[].repos` 未配置 `dir` 的仓库用受管克隆——落点 `<数据目录>/Cosmic-Developers-Union/assistant/repos/<host>/<owner>/<name>`（`XDG_DATA_HOME`，缺省 `~/.local/share`）。`run` 启动时缺失自动 `git clone`（用 reviewer/admin 令牌认证，origin 保持无凭据 URL），之后每轮检测前强制对齐 `origin/<基线分支>`（`--base-branch` / `DISPATCH_BASE_BRANCH`，缺省 `main`）——`git fetch --prune origin` → `git checkout -f -B <基线> origin/<基线>` → `git clean -fd`，任何本地分叉一律丢弃。日志与单飞锁在检出外的状态目录 `<数据目录>/.../state/<host>/<owner>/<name>/`，不会被 clean 波及。**仓库长什么样都不阻碍评审**：只有克隆失败（网络/权限）才跳过，缺少 `.mcp.json`、`.claude/`、`AGENTS.md` 之类 install 产物只提示一句——推送后在下一轮镜像同步里自动生效，不需要删克隆重来。全部仓库都被跳过时 daemon 保持常驻（状态 API 与对话可用，状态里带 `skip_reason`）。
 - **镜像同步（显式 `dir` 的共享检出）**：`--sync-mirror` / `DISPATCH_SYNC_MIRROR=1` 开启后同样每轮强制对齐基线；受管克隆恒为开。共享开发检出勿开启。
-- **会话驱动**：`claude -p` 子进程，命令面与手工运维一致（`--permission-mode auto`、`--autocompact auto`、stream-json 输出）。无人值守必需项：`--strict-mcp-config --mcp-config` 从宿主仓库 `.mcp.json` 显式注入 gitea MCP，外加 `--max-turns` / abort 超时兜底 runaway 会话。
-- **独立会话配置**：每次会话在临时目录生成 `--settings`（同一份 env/权限放行，见上文 install 的托管键），并加 `--setting-sources project`（只加载项目级设置）、`--no-session-persistence`（不落会话历史）；**不读取也不写入任何用户级配置**（`~/.claude`）。需要 Claude Code 2.1+（`claude --help` 能看到这些参数；评审镜像安装的是 latest）。
-- **项目评审约定**：宿主基线检出的 `.assistant/review.md`（及其中的 install 托管段落）作为 `--append-system-prompt` 注入会话，PR 自带的版本不生效——与 `.claude/` 同口径，防止 PR 改弱自己被审的规则；内容上限 32000 字符，超出截断。
+- **会话驱动**：`claude -p` 子进程，命令面与手工运维一致（`--permission-mode auto`、`--autocompact auto`、stream-json 输出）。无人值守必需项：`--strict-mcp-config --mcp-config` 注入 **assistant 自己指定的 gitea MCP**（`assistant mcp gitea`，绝对路径启动，与仓库里有没有 `.mcp.json` 无关；仓库其它 MCP server 保留，provider 原生 server 合并进来），外加 `--max-turns` / abort 超时兜底 runaway 会话。
+- **独立会话配置**：每次会话在临时目录生成 `--settings`（同一份 env/权限放行，见上文 install 的托管键）与 `--mcp-config`，并加 `--setting-sources project`（只加载项目级设置）；**不读取也不写入任何用户级配置**。会话配置根是 assistant 托管的 `<配置目录>/claude`（`instances.ClaudeDir`，`CLAUDE_CONFIG_DIR` 可覆盖）——不是用户的 `~/.claude`，会话记录与 claude 全局配置都落在这里，跟宿主上的 Claude 安装互不影响。需要 Claude Code 2.1+（`claude --help` 能看到这些参数；评审镜像安装的是 latest）。
+- **AI 凭据由配置提供**：会话不读 `~/.claude` 的 OAuth 登录态，凭据来自 config.json 的 `providers`/`optimizations`（`api_key`/`auth_token` 简写落到 `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY`，见上文「多 provider」），或进程环境里的同名变量。daemon 启动时自检并打印来源：`claude` 可执行文件与版本、会话配置根、每个 provider 的凭据来源；没有凭据时直接给出告警与修复提示（而不是等每个会话认证失败）。
+- **项目评审约定与协议**：assistant 内置的 review 协议（`skills/review/SKILL.md`：PR 审查协议、Issue 分诊协议、标签体系）作为 `--append-system-prompt` 打头注入会话——仓库没 install 过也照常生效；宿主基线检出的 `.assistant/review.md`（项目自有约定，PR 自带的版本不生效）附在其后，上限 32000 字符，超出截断。
 - **进度两路落点**：控制台实时显示会话 init 与编号的工具调用；完整明细实时写待办日志——stdout 按 stream-json 逐行解析，assistant 文本原样、工具调用记 `🔧 名称`。
 - **一请求一会话，head 漂移即作废**：同一 instance+仓库+PR/Issue 同时至多一个会话；每个请求只拉起一个会话，完成（reviewer 已提交 review / triage 标签已移除）后在标签被 sync 收敛前不再重复拉起——连续 `@ai`、`/review` 不会造成重复会话。验证未过则本轮放行，等待下一轮检测；head 已被作者推进则本轮评审作废，下一轮以新 head 重开。
 - **有界并发（`--concurrency` / `DISPATCH_CONCURRENCY`，缺省 8）**：一轮待办至多同时跑 N 个会话；轮与轮之间是天然 barrier——同一 PR/Issue 同一时刻至多一个会话。
@@ -376,11 +377,11 @@ status/triage     Issue ───────▶  triage issue #N               
 
 - **稳定 ID**：由站点 + 仓库 + 待办 + 锚点（PR 的 head / Issue 的标题）确定性派生 UUID。同一待办重试复用同一记录并自动 `claude -p --resume <id>` 续接（保留上一轮上下文）；head 推进即派生新 ID 开新记录。
 - **稳定位置**：会话进程环境注入 `CLAUDE_CONFIG_DIR` + `CLAUDE_CODE_PROJECT_DIR_NAME`（官方「自己命名项目目录」机制），记录固定落
-  `~/.claude/projects/<assistant-站点-仓库>/<session-id>.jsonl`，与启动目录/ worktree 路径解耦；Docker 评审形态会把该 `projects` 目录挂进容器，记录仍留在宿主。
+  `<配置目录>/claude/projects/<assistant-站点-仓库>/<session-id>.jsonl`，与启动目录/ worktree 路径解耦；Docker 评审形态会把该 `projects` 目录挂进容器，记录仍留在宿主。
 - **自定义标题**：`--name` 设为 `review <owner>/<repo>#12@<head7>`、`triage <owner>/<repo>#7`；微信对话会话为 `chat-<8 位哈希>`（同一微信用户跨轮稳定）。用 `claude --resume "<id 或标题>"` 随时人工查看；每轮日志会记录文本记录路径。
 - **保留期**：托管会话设置里 `cleanupPeriodDays=3650`（官方默认 30 天会被清理扫描删掉；provider `settings` 可覆盖）。
 - 不再传 `--no-session-persistence`：会话记录是审计与排障的一等数据。
-- 容器部署下 `CLAUDE_CONFIG_DIR=$HOME/.claude`（随挂载持久化，凭据 `.credentials.json` 在同一目录）；首次运行会自动创建 `$HOME/.claude/.claude.json` 配置，如需沿用宿主已有的 onboarding/信任状态，可把它复制到该位置。
+- 容器部署下 `CLAUDE_CONFIG_DIR=<配置目录>/claude`：它就是挂载进去的 assistant 配置目录里的 `claude/`，记录与 claude 全局配置一起持久化（首次运行自动创建）；**不挂载也不读写 `~/.claude`**，凭据由 provider 配置提供。
 
 ### daemon 模式：状态 API 与微信对话桥
 
@@ -395,7 +396,7 @@ assistant run --weixin                           # 启动微信对话桥（或 c
 
 - **状态 API（只读）**：`GET /healthz`（无鉴权）与 `/api/v1/{status,sessions,queue,results}`（`Authorization: Bearer <token>`）。启动时端点凭据写入 `<配置目录>/daemon.json`（0600），daemon 退出即删除。
 - **自举 MCP**：`assistant mcp daemon` 从 `daemon.json` 自动发现运行中的 daemon（`ASSISTANT_DAEMON_ENDPOINT` / `ASSISTANT_DAEMON_ADDR` 可覆盖），提供 `daemon_status`、`list_sessions`、`list_queue`、`recent_results` 四个只读工具——「当前有多少个 PR 在 review、状态如何」直接问即可。
-- **微信对话桥**：按 [openclaw-weixin ilink 协议](https://github.com/Tencent/openclaw-weixin/blob/main/docs/protocol_zh_CN.md) 长轮询收消息、typing 状态与分块回复。`assistant weixin login` 会把服务端返回的扫码内容直接在终端渲染成**可扫的二维码**（半块字符），并同时给出链接兜底；二维码过期自动刷新（上限 3 次）。每条会话（微信 session）对应一个**稳定的 claude 会话**：首轮 `claude -p --session-id <uuid>`，之后 `--resume <uuid>`，会话映射持久化在 `<配置目录>/chat/sessions.json`；会话只挂一个**自举的 daemon MCP**（工具面严格限定，见 `internal/daemon/chat.go`），不读写用户级 claude 配置。
+- **微信对话桥**：按 [openclaw-weixin ilink 协议](https://github.com/Tencent/openclaw-weixin/blob/main/docs/protocol_zh_CN.md) 长轮询收消息、typing 状态与分块回复。`assistant weixin login` 会把服务端返回的扫码内容直接在终端渲染成**可扫的二维码**（半块字符），并同时给出链接兜底；二维码过期自动刷新（上限 3 次）。每条会话（微信 session）对应一个**稳定的 claude 会话**：首轮 `claude -p --session-id <uuid>`，之后 `--resume <uuid>`，会话映射持久化在 `<配置目录>/chat/sessions.json`；会话只挂一个**自举的 daemon MCP**（工具面严格限定，见 `internal/daemon/chat.go`），上下文只有显式注入的 system 提示词与 settings，不读写任何用户级 claude 配置。claude 支持 `--bare` 时对话会话用它跑最小模式（跳过 hooks、插件同步、CLAUDE.md 自动发现与记忆），启动日志会写明 `bare=开/关`；`weixin.enabled=false` 或没有 `weixin` 配置时 daemon 明确打印桥未启用的原因。
 - **谁能对话**：`weixin.admin_users` 白名单；留空时只允许扫码登录的用户（`login_user_id`），两者都为空则忽略所有消息（fail-closed）。
 - 每条消息处理串行（同一会话的消息排队），不同会话最多 4 路并发；单轮对话超时默认 3 分钟（`weixin.session_timeout_ms`）。
 
@@ -411,7 +412,7 @@ assistant review 42 --docker-image ...     # 一次性调试同样支持
 ```
 
 - 镜像定义在 `images/review/Dockerfile`：gitea runner 基础镜像 + bun/skills CLI、Claude Code、Go 工具链与常用构建工具，缓存目录统一到 `/root`。
-- **路径一致挂载**：worktree 与宿主 `.mcp.json`、临时会话 `--settings` 所在目录按相同绝对路径挂进容器，claude 的 `--mcp-config`、`--settings`、`--plugin-dir` 等参数无需改写；`.claude/` 已由 dispatcher 以宿主基线覆盖进 worktree（PR 自带的评审规则不起作用）。
+- **路径一致挂载**：worktree、会话 `--settings`/`--mcp-config` 所在目录与 assistant 二进制按相同绝对路径挂进容器（MCP 就是 `assistant mcp gitea`，所以镜像不必自带 assistant），claude 的 `--mcp-config`、`--settings`、`--plugin-dir` 等参数无需改写；`.claude/` 已由 dispatcher 把 PR 自带的那份删掉、再以宿主基线覆盖（基线没有就留空，协议由 assistant 注入）。
 - **认证透传**：`ANTHROPIC_*` / `CLAUDE_*` 及代理变量按白名单 `-e KEY` 从宿主环境继承，其余环境不进容器。
 - **超时兜底**：SIGTERM docker 客户端不会停容器，dispatcher 额外按容器名执行 `docker kill`。
 - **网络**：容器默认 bridge；MCP 需要回连宿主机上的服务时用 `--docker-network host`（或自定义网络）。
@@ -464,21 +465,24 @@ export DISPATCH_SYNC_MIRROR=1     # 每轮把宿主检出强制对齐 origin/mai
 
 #### 容器化部署（docker compose）
 
-daemon 整体跑在容器里：**宿主构建的二进制直接挂载进去**（`make build` 的产物以只读方式覆盖 `/usr/local/bin/assistant`，镜像里不再内置副本，升级不必重建镜像），宿主机**用户目录原样挂载**（claude 登录态、config.json/credentials.json、受管克隆都在里面，容器内外路径一致），`/tmp` 用 **tmpfs**（评审 worktree 全在 `/tmp`，落内存、退出即清），状态 API 只发布到宿主 `127.0.0.1:8770`：
+daemon 整体跑在容器里：**宿主构建的二进制直接挂载进去**（`make build` 的产物以只读方式覆盖 `/usr/local/bin/assistant`，镜像里不再内置副本，升级不必重建镜像），assistant 的配置目录（config.json/credentials.json/会话记录）与受管克隆挂进容器（容器内外路径一致），`/tmp` 用 **tmpfs**（评审 worktree 全在 `/tmp`，落内存、退出即清），状态 API 只发布到宿主 `127.0.0.1:8770`：
 
 ```bash
 make compose-up         # 构建 ./assistant（linux/amd64 静态）→ 预建挂载点 → 启动/重建容器
 docker compose logs -f
-docker compose exec assistant assistant weixin login   # 首次扫码（终端直接渲染二维码）
+docker compose exec -it assistant assistant weixin login   # 首次扫码（-it 必需：二维码 + 验证码输入）
 
 make build && docker compose up -d --force-recreate    # 升级：重新构建二进制并让容器换上新的一份
 ```
 
 镜像只用 `images/review/Dockerfile` 的 `review` target（评审环境：claude / go / bun / uv / node，与评审会话镜像共用 `review-env` 层，无需从 registry 拉取预构建镜像）。容器入口固定指向挂载进来的二进制：**只替换文件不会重启进程**，所以升级要用 `docker compose up -d --force-recreate`（即 `make compose-up`）或 `docker compose restart assistant`。想让镜像自带二进制（离线分发、不走挂载）时用 `make daemon-image` 构建 `daemon` target。
 
+- **AI 凭据来自 assistant 配置**：容器**不挂载 `~/.claude`**，会话不读宿主的 OAuth 登录态。评审/分诊/对话会话的凭据取自 `config.json` 的 `providers`/`optimizations`（`api_key`/`auth_token` 简写，见上文「多 provider」），也在 `<配置目录>/providers/*.json` 里；进程环境里的 `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` 只是兜底（compose 内已注释示例）。启动日志会打印 claude 版本、会话配置根与凭据来源，没有凭据时直接告警。
+- **会话配置根**：`<配置目录>/claude`（`instances.ClaudeDir`，`CLAUDE_CONFIG_DIR` 可覆盖）——会话文本记录与 claude 的全局配置都在这里，随配置目录一起挂载/备份，与宿主上的 Claude 安装互不影响。
 - **二进制挂载**：`${ASSISTANT_BINARY:-./assistant}` → `/usr/local/bin/assistant:ro`（相对路径按 compose 文件所在目录解析，默认就是仓库根目录下 `make build` 的产物）。`make compose-up` 先构建再启动，因此不存在挂载点缺失；手工 `docker compose up` 前请确认该文件已存在——路径不存在时 docker 会把它建成**目录**，容器启动会报 `is a directory`。`make build` 用 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64` 构建，静态链接，不依赖容器基座的 C 库。
-- 挂载是**细粒度**的（不用整目录 `$HOME`）：`~/.claude`（登录态）、`~/.config/Cosmic-Developers-Union/assistant`（config.json / credentials.json（`assistant login` 派生的用途令牌）/ daemon.json / chat 会话）、`~/.local/share/Cosmic-Developers-Union/assistant`（受管克隆与状态）读写；git 身份与 `docker.sock` 按需（compose 内已注释示例）。
-- 挂载点需先在宿主存在（docker 对不存在的路径会建 root 属主目录）：用 `make compose-up` 会自动预建，或手动 `mkdir -p ~/.claude ~/.config/Cosmic-Developers-Union/assistant ~/.local/share/Cosmic-Developers-Union/assistant`（跑过一次 `assistant login`/`setup` 也会生成）。
+- 挂载是**细粒度**的（不用整目录 `$HOME`）：`~/.config/Cosmic-Developers-Union/assistant`（config.json / credentials.json（`assistant login` 派生的用途令牌）/ daemon.json / chat 会话 / claude 会话配置根）、`~/.local/share/Cosmic-Developers-Union/assistant`（受管克隆与状态）、`~/.cache`（MCP 与工具链缓存）读写；git 身份与 `docker.sock` 按需（compose 内已注释示例）。
+- 挂载点需先在宿主存在（docker 对不存在的路径会建 root 属主目录）：用 `make compose-up` 会自动预建，或手动 `mkdir -p ~/.config/Cosmic-Developers-Union/assistant ~/.local/share/Cosmic-Developers-Union/assistant`（跑过一次 `assistant login`/`setup` 也会生成）。
+- 微信桥要显式开启：`assistant weixin login`（容器里用 `docker compose exec -it ...`）会把 `weixin.enabled=true` 与 Bot 凭据写进 config.json；没有 `weixin` 配置或 `enabled=false` 时 daemon 会明确打印「微信桥未启用」及原因，不再静默跳过。对话会话走 claude 的 `--bare` 最小模式（探测到支持时；上下文只有显式注入的 system 提示词、settings 与自举 daemon MCP）。
 - UID/GID/HOME 由 compose 插值（缺省 `1000:1000` + 宿主 `$HOME`）；以宿主用户运行，写回挂载目录的文件属主不变。请在 `.env` 或环境里按需 `export ASSISTANT_UID=$(id -u) ASSISTANT_GID=$(id -g)`。
 - `/tmp` 为 `tmpfs`（`exec,mode=1777,size=16g`）：评审 worktree 全在内存盘、退出即清；16G 是上限，占用受宿主可用内存约束，可调。
 - 需要 `--docker-image` 把评审会话再放进容器时，打开 `docker.sock` 挂载（docker-out-of-docker）；宿主上的 Gitea 可通过 `extra_hosts: host.docker.internal:host-gateway` 访问（文件内已注释示例）。

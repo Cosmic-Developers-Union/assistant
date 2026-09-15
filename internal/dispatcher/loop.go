@@ -344,11 +344,14 @@ func planSteps(deps Deps, item WorkItem) []string {
 		settingsNote += " + provider " + config.ProviderName
 	}
 	settingsNote += ">"
-	mcpNote := filepath.Join(deps.RepoDir, ".mcp.json")
+	mcpNote := "<临时会话配置：assistant 注入的 gitea server"
 	if _, _, mcpServers := config.Provider.Counts(); mcpServers > 0 {
-		mcpNote = fmt.Sprintf("<临时合并配置：.mcp.json + provider %s 的 %d 个 server>",
-			config.ProviderName, mcpServers)
+		mcpNote += fmt.Sprintf(" + provider %s 的 %d 个 server", config.ProviderName, mcpServers)
 	}
+	if _, err := os.Stat(filepath.Join(deps.RepoDir, ".mcp.json")); err == nil {
+		mcpNote += " + 仓库 .mcp.json 的其它 server"
+	}
+	mcpNote += ">"
 	// 演练时 head 尚未取到（真实运行时以 head 为锚点派生 ID），这里用占位
 	sessionID := SessionID(config.Host, config.Repository.FullName(), item.Kind, item.Number, "<head>")
 	transcript := claudecfg.TranscriptPath(config.SessionDir, config.SessionProject, sessionID)
@@ -396,8 +399,9 @@ func planSteps(deps Deps, item WorkItem) []string {
 			"cd " + deps.RepoDir,
 			fmt.Sprintf("git fetch --quiet origin refs/pull/%d/head", item.Number),
 			fmt.Sprintf("git worktree add --quiet --detach %s \"$(git rev-parse FETCH_HEAD)\"", worktreeDir),
-			fmt.Sprintf("rm -rf %s/.claude && cp -r %s/.claude %s/.claude", worktreeDir, deps.RepoDir, worktreeDir) +
-				"   # 评审标准钉定基线（PR 自带版本不生效）",
+			fmt.Sprintf("rm -rf %s/.claude   # PR 自带的评审规则一律不生效", worktreeDir),
+			fmt.Sprintf("{ test -d %s/.claude && cp -r %s/.claude %s/.claude; } || true   # 基线标准（没有则跳过：settings/MCP/协议由 assistant 注入）",
+				deps.RepoDir, deps.RepoDir, worktreeDir),
 			"cd " + worktreeDir,
 			claude("cwd=worktree", strings.Split(
 				deps.BuildPrompt(KindPull, item.Number, PromptContext{Title: item.Title}), "\n")[0]),

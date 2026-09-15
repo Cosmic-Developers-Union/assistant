@@ -107,7 +107,7 @@ daemon-image: ## 构建自带二进制的独立 daemon 镜像（评审环境 + a
 .PHONY: compose-up
 compose-up: build ## 构建宿主二进制并启动 docker compose 部署（容器跑挂载进去的 ./assistant）
 	@echo "==> 预建挂载点..."
-	@mkdir -p "$(HOME)/.claude" "$(HOME)/.cache" \
+	@mkdir -p "$(HOME)/.cache" \
 		"$(HOME)/.config/Cosmic-Developers-Union/assistant" \
 		"$(HOME)/.local/share/Cosmic-Developers-Union/assistant"
 	@echo "==> 启动 docker compose（--force-recreate 让最新二进制生效）..."

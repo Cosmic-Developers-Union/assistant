@@ -15,8 +15,9 @@ import (
 // MCP server 合并进自举 MCP 配置（env 缺省注入）。
 func TestChatProviderOverrides(t *testing.T) {
 	chat, err := NewChat(ChatConfig{
-		ClaudeBin: "claude",
-		StateDir:  t.TempDir(),
+		ClaudeBin:  "claude",
+		StateDir:   t.TempDir(),
+		SessionDir: t.TempDir(),
 		Provider: claudecfg.Overrides{
 			Env:      map[string]string{"ANTHROPIC_BASE_URL": "https://gw.example.com"},
 			Settings: map[string]any{"model": "glm-4.6"},
@@ -86,6 +87,7 @@ func TestChatProviderSessionHeader(t *testing.T) {
 	chat, err := NewChat(ChatConfig{
 		ClaudeBin:    "claude",
 		StateDir:     t.TempDir(),
+		SessionDir:   t.TempDir(),
 		ProviderName: "opencode",
 	})
 	if err != nil {
