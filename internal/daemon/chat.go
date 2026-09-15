@@ -42,9 +42,6 @@ type ChatConfig struct {
 	StateDir string
 	// SessionDir 是 Claude Code 配置根（缺省 $CLAUDE_CONFIG_DIR 或 ~/.claude）
 	SessionDir string
-	// SessionProject 是对话会话稳定的项目目录名（缺省 assistant-chat），文本
-	// 记录固定落 <SessionDir>/projects/<SessionProject>/，与启动目录无关
-	SessionProject string
 	// Debug 为真时把 claude 的原始 stream 事件、会话命令与结束统计也写进日志
 	Debug bool
 	// Bare 为真时对话会话用 claude 的 --bare 最小模式：不加载 hooks、插件同步、
@@ -99,9 +96,6 @@ func NewChat(config ChatConfig) (*Chat, error) {
 	if err := os.MkdirAll(config.SessionDir, 0o755); err != nil {
 		return nil, fmt.Errorf("创建会话配置根 %s: %w", config.SessionDir, err)
 	}
-	if strings.TrimSpace(config.SessionProject) == "" {
-		config.SessionProject = claudecfg.ProjectDirName("assistant-chat")
-	}
 	chat := &Chat{
 		config:   config,
 		sessions: map[string]string{},
@@ -134,6 +128,10 @@ func (c *Chat) Handle(ctx context.Context, conversationID, text string) (string,
 	lock.Lock()
 	defer lock.Unlock()
 
+	workspace, err := c.workspaceDir(conversationID)
+	if err != nil {
+		return "", err
+	}
 	sessionID, fresh := c.session(conversationID)
 	if sessionID == "" {
 		generated := provider.NewSessionID()
@@ -142,7 +140,13 @@ func (c *Chat) Handle(ctx context.Context, conversationID, text string) (string,
 		}
 		sessionID, fresh = generated, true
 	}
-	args, err := c.sessionArgs(sessionID, chatSessionTitle(conversationID), fresh, text)
+	if fresh {
+		c.config.Log("对话[%s] 新建会话 %s（工作目录 %s，续聊用 cd 该目录后 claude --continue）",
+			shortSession(sessionID), sessionID, workspace)
+	} else if c.config.Debug {
+		c.config.Log("对话[%s] 续接既有会话（工作目录 %s）", shortSession(sessionID), workspace)
+	}
+	args, err := c.sessionArgs(sessionID, chatSessionTitle(conversationID), fresh, text, workspace)
 	if err != nil {
 		return "", err
 	}
@@ -152,7 +156,7 @@ func (c *Chat) Handle(ctx context.Context, conversationID, text string) (string,
 	if c.config.Debug {
 		c.config.Log("对话[%s] 启动：%s", shortSession(sessionID), truncate(strings.Join(args, " "), 600))
 	}
-	result, err := c.run(runCtx, args, progress)
+	result, err := c.run(runCtx, args, workspace, progress)
 	if err != nil {
 		return "", fmt.Errorf("对话会话失败: %w", err)
 	}
@@ -161,7 +165,7 @@ func (c *Chat) Handle(ctx context.Context, conversationID, text string) (string,
 			shortSession(sessionID), result.Subtype, result.IsError, result.NumTurns, result.CostUSD)
 	}
 	if fresh {
-		if err := c.remember(conversationID, sessionID); err != nil {
+		if err := c.remember(conversationID, sessionID, workspace, result.Model); err != nil {
 			c.config.Log("持久化会话映射失败：%v", err)
 		}
 	}
@@ -177,16 +181,18 @@ func (c *Chat) Handle(ctx context.Context, conversationID, text string) (string,
 // sessionArgs 组装 claude 调用参数：稳定会话 + 自定义标题 + 独立设置 + 自举
 // daemon MCP。供应商代码级特化（如 opencode 的会话请求头）在每轮对话启动前
 // 应用，复用该会话的稳定 UUID（同一会话多轮命中网关缓存）。
-func (c *Chat) sessionArgs(sessionID, title string, fresh bool, text string) ([]string, error) {
+func (c *Chat) sessionArgs(sessionID, title string, fresh bool, text, workspace string) ([]string, error) {
 	overrides, err := provider.Apply(c.config.ProviderName, "chat", sessionID, c.config.Provider)
 	if err != nil {
 		return nil, err
 	}
-	settingsPath, err := c.writeSettings(overrides)
+	// settings/mcp 落**该会话自己的工作目录**：并发会话（不同微信用户）各写各的，
+	// 会话级 provider 覆盖（如 opencode 的会话请求头）不会被彼此覆盖
+	settingsPath, err := c.writeSettings(overrides, workspace)
 	if err != nil {
 		return nil, err
 	}
-	mcpPath, err := c.writeMCPConfig(overrides)
+	mcpPath, err := c.writeMCPConfig(overrides, workspace)
 	if err != nil {
 		return nil, err
 	}
@@ -223,14 +229,14 @@ func (c *Chat) sessionArgs(sessionID, title string, fresh bool, text string) ([]
 
 // writeSettings 写入对话会话的独立设置（env + 权限放行 + provider 覆盖，含
 // daemon MCP 的放行）。
-func (c *Chat) writeSettings(overrides claudecfg.Overrides) (string, error) {
+func (c *Chat) writeSettings(overrides claudecfg.Overrides, dir string) (string, error) {
 	settings := claudecfg.SessionSettingsMap(overrides, "mcp__daemon", "mcp__daemon__*")
 	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return "", err
 	}
-	path := filepath.Join(c.config.StateDir, "settings.json")
-	if err := os.MkdirAll(c.config.StateDir, 0o755); err != nil {
+	path := filepath.Join(dir, "settings.json")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
 	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
@@ -242,7 +248,7 @@ func (c *Chat) writeSettings(overrides claudecfg.Overrides) (string, error) {
 // writeMCPConfig 写入自举的 daemon MCP 配置（assistant mcp daemon 自己发现
 // 运行中的 daemon，无需地址/令牌参数）；provider 定义的原生 MCP server 一并
 // 合并（同名由 provider 覆盖）。
-func (c *Chat) writeMCPConfig(overrides claudecfg.Overrides) (string, error) {
+func (c *Chat) writeMCPConfig(overrides claudecfg.Overrides, dir string) (string, error) {
 	config := map[string]any{
 		"mcpServers": map[string]any{
 			claudecfg.MCPServerDaemon: claudecfg.DaemonMCPServer(claudecfg.AssistantCommand()),
@@ -253,8 +259,8 @@ func (c *Chat) writeMCPConfig(overrides claudecfg.Overrides) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	path := filepath.Join(c.config.StateDir, "mcp.json")
-	if err := os.MkdirAll(c.config.StateDir, 0o755); err != nil {
+	path := filepath.Join(dir, "mcp.json")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
 	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
@@ -303,13 +309,87 @@ func (c *Chat) load() error {
 	return nil
 }
 
-func (c *Chat) remember(conversationID, sessionID string) error {
+func (c *Chat) remember(conversationID, sessionID, workspace, model string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.sessions[conversationID] = sessionID
 	if err := os.MkdirAll(c.config.StateDir, 0o755); err != nil {
 		return err
 	}
+	data, err := json.MarshalIndent(c.sessions, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(c.sessionsPath(), append(data, '\n'), 0o600); err != nil {
+		return err
+	}
+	// 工作目录里留一份可读的会话元数据：一眼看到「这个目录是哪个微信会话、
+	// 用的哪个 claude 会话 id、怎么续聊」
+	metadata := sessionMetadata{
+		ConversationID: conversationID,
+		SessionID:      sessionID,
+		Title:          chatSessionTitle(conversationID),
+		Model:          model,
+		Workdir:        workspace,
+		UpdatedAt:      time.Now().UTC().Format(time.RFC3339),
+	}
+	if existing, err := readSessionMetadata(workspace); err == nil && existing.CreatedAt != "" {
+		metadata.CreatedAt = existing.CreatedAt
+	} else {
+		metadata.CreatedAt = metadata.UpdatedAt
+	}
+	encoded, err := json.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(workspace, "session.json"), append(encoded, '\n'), 0o600)
+}
+
+// sessionMetadata 是会话工作目录里的元数据（诊断/续聊用）。
+type sessionMetadata struct {
+	ConversationID string `json:"conversation_id"`
+	SessionID      string `json:"session_id"`
+	Title          string `json:"title"`
+	Model          string `json:"model,omitempty"`
+	Workdir        string `json:"workdir"`
+	CreatedAt      string `json:"created_at,omitempty"`
+	UpdatedAt      string `json:"updated_at,omitempty"`
+}
+
+func readSessionMetadata(workspace string) (sessionMetadata, error) {
+	var metadata sessionMetadata
+	data, err := os.ReadFile(filepath.Join(workspace, "session.json"))
+	if err != nil {
+		return metadata, err
+	}
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return sessionMetadata{}, err
+	}
+	return metadata, nil
+}
+
+// workspaceDir 返回该微信会话的持久工作目录（<StateDir>/<chat-xxxxxxxx>/，按会话
+// 稳定派生）：claude 按 cwd 派生项目名，因此同一目录 = 同一项目 = 文本记录稳定，
+// 用户 cd 进去 `claude --continue` 就能接上最近的会话。
+func (c *Chat) workspaceDir(conversationID string) (string, error) {
+	dir := filepath.Join(c.config.StateDir, chatSessionTitle(conversationID))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("创建会话工作目录 %s: %w", dir, err)
+	}
+	return dir, nil
+}
+
+// WorkspaceDir 返回会话工作目录（外部诊断用；不存在时按需创建）。
+func (c *Chat) WorkspaceDir(conversationID string) (string, error) {
+	return c.workspaceDir(conversationID)
+}
+
+// Reset 丢弃该会话的映射：下一条消息新建 claude 会话（工作目录保留，用户显式
+// 「重新开始」时才发生）。
+func (c *Chat) Reset(conversationID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.sessions, conversationID)
 	data, err := json.MarshalIndent(c.sessions, "", "  ")
 	if err != nil {
 		return err
@@ -326,25 +406,24 @@ func chatSessionTitle(conversationID string) string {
 
 // run 执行一轮 claude 会话：默认逐行消费 stdout（实时进度进日志）；测试注入的
 // RunClaude 返回整段输出时按行折叠，两者归集结果一致。
-func (c *Chat) run(ctx context.Context, args []string, onProgress func(string)) (chatOutcome, error) {
+func (c *Chat) run(ctx context.Context, args []string, dir string, onProgress func(string)) (chatOutcome, error) {
 	if c.config.RunClaude != nil {
 		output, err := c.config.RunClaude(
-			ctx, c.config.ClaudeBin, args, c.config.StateDir,
-			claudecfg.SessionEnv(c.config.SessionDir, c.config.SessionProject))
+			ctx, c.config.ClaudeBin, args, dir, claudecfg.ConfigDirEnv(c.config.SessionDir))
 		if err != nil {
 			return chatOutcome{}, fmt.Errorf("%s: %s", c.config.ClaudeBin, truncate(err.Error(), 400))
 		}
 		return parseChatStream(output, onProgress)
 	}
-	return c.runStreaming(ctx, args, onProgress)
+	return c.runStreaming(ctx, args, dir, onProgress)
 }
 
 // runStreaming 启动 claude 并逐行解析 stream-json：assistant 文本、工具调用与
 // API 错误实时进日志（--debug 时连原始事件也写），最后返回归集结果。
-func (c *Chat) runStreaming(ctx context.Context, args []string, onProgress func(string)) (chatOutcome, error) {
+func (c *Chat) runStreaming(ctx context.Context, args []string, dir string, onProgress func(string)) (chatOutcome, error) {
 	command := exec.CommandContext(ctx, c.config.ClaudeBin, args...)
-	command.Dir = c.config.StateDir
-	if env := claudecfg.SessionEnv(c.config.SessionDir, c.config.SessionProject); len(env) > 0 {
+	command.Dir = dir
+	if env := claudecfg.ConfigDirEnv(c.config.SessionDir); len(env) > 0 {
 		command.Env = append(os.Environ(), env...)
 	}
 	stdout, err := command.StdoutPipe()

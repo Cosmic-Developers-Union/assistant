@@ -395,8 +395,10 @@ status/triage     Issue ───────▶  triage issue #N               
 每个待办的评审/分诊会话都有**稳定的会话记录位置与 ID**，不再随 `/tmp` worktree 消失：
 
 - **稳定 ID**：由站点 + 仓库 + 待办 + 锚点（PR 的 head / Issue 的标题）确定性派生 UUID。同一待办重试复用同一记录并自动 `claude -p --resume <id>` 续接（保留上一轮上下文）；head 推进即派生新 ID 开新记录。
-- **稳定位置**：会话进程环境注入 `CLAUDE_CONFIG_DIR` + `CLAUDE_CODE_PROJECT_DIR_NAME`（官方「自己命名项目目录」机制），记录固定落
-  `<配置目录>/claude/projects/<assistant-站点-仓库>/<session-id>.jsonl`，与启动目录/ worktree 路径解耦；Docker 评审形态会把该 `projects` 目录挂进容器，记录仍留在宿主。
+- **稳定位置（两类会话口径不同）**：
+  - 评审/分诊：注入 `CLAUDE_CONFIG_DIR` + `CLAUDE_CODE_PROJECT_DIR_NAME`（官方「自己命名项目目录」机制），记录固定落 `<配置目录>/claude/projects/<assistant-站点-仓库>/<session-id>.jsonl`——worktree 在 `/tmp` 用完即删，所以项目名必须由会话自己钉住；
+  - 微信对话：只注入 `CLAUDE_CONFIG_DIR`，项目名由**每个会话固定的工作目录**自然派生（见下文「会话目录」），于是 `cd <工作目录> && CLAUDE_CONFIG_DIR=<配置目录>/claude claude --continue` 就能接上最近的会话，`claude --resume <会话 id>` 同样可用。
+  Docker 形态会把该 `projects` 目录挂进容器，记录仍留在宿主。
 - **自定义标题**：`--name` 设为 `review <owner>/<repo>#12@<head7>`、`triage <owner>/<repo>#7`；微信对话会话为 `chat-<8 位哈希>`（同一微信用户跨轮稳定）。用 `claude --resume "<id 或标题>"` 随时人工查看；每轮日志会记录文本记录路径。
 - **保留期**：托管会话设置里 `cleanupPeriodDays=3650`（官方默认 30 天会被清理扫描删掉；provider `settings` 可覆盖）。
 - 不再传 `--no-session-persistence`：会话记录是审计与排障的一等数据。
@@ -450,7 +452,11 @@ assistant run --weixin                           # 启动微信对话桥（或 c
 
 - **状态 API（只读）**：`GET /healthz`（无鉴权）与 `/api/v1/{status,sessions,queue,results}`（`Authorization: Bearer <token>`）。启动时端点凭据写入 `<配置目录>/daemon.json`（0600），daemon 退出即删除。
 - **自举 MCP**：`assistant mcp daemon` 从 `daemon.json` 自动发现运行中的 daemon（`ASSISTANT_DAEMON_ENDPOINT` / `ASSISTANT_DAEMON_ADDR` 可覆盖），提供 `daemon_status`、`list_sessions`、`list_queue`、`recent_results` 四个只读工具——「当前有多少个 PR 在 review、状态如何」直接问即可。
-- **微信对话桥**：按 [openclaw-weixin ilink 协议](https://github.com/Tencent/openclaw-weixin/blob/main/docs/protocol_zh_CN.md) 长轮询收消息、typing 状态与分块回复。`assistant weixin login` 会把服务端返回的扫码内容直接在终端渲染成**可扫的二维码**（半块字符），并同时给出链接兜底；二维码过期自动刷新（上限 3 次）。每条会话（微信 session）对应一个**稳定的 claude 会话**：首轮 `claude -p --session-id <uuid>`，之后 `--resume <uuid>`，会话映射持久化在 `<配置目录>/chat/sessions.json`；会话只挂一个**自举的 daemon MCP**（工具面严格限定，见 `internal/daemon/chat.go`），上下文只有显式注入的 system 提示词与 settings，不读写任何用户级 claude 配置。claude 支持 `--bare` 时对话会话用它跑最小模式（跳过 hooks、插件同步、CLAUDE.md 自动发现与记忆），启动日志会写明 `bare=开/关`；`weixin.enabled=false` 或没有 `weixin` 配置时 daemon 明确打印桥未启用的原因。
+- **微信对话桥**：按 [openclaw-weixin ilink 协议](https://github.com/Tencent/openclaw-weixin/blob/main/docs/protocol_zh_CN.md) 长轮询收消息、typing 状态与分块回复。`assistant weixin login` 会把服务端返回的扫码内容直接在终端渲染成**可扫的二维码**（半块字符），并同时给出链接兜底；二维码过期自动刷新（上限 3 次）。每条会话（微信 session）对应一个**稳定的 claude 会话 + 稳定的工作目录**：
+  - 会话 id：首轮 `claude -p --session-id <uuid>`，之后 `--resume <uuid>`；映射持久化在 `<配置目录>/chat/sessions.json`，进程重启也接得上；
+  - 工作目录：`<配置目录>/chat/<chat-8位哈希>/`，同一微信会话恒用同一个目录（不同会话互不串，并发时 settings/MCP 也各写各的），目录里留一份 `session.json`（会话 id / 模型 / 标题 / 创建与更新时间 / 工作目录），续聊就是 `cd` 进去 `claude --continue`；
+  - 重新开始：发 `/new`（或 `/reset`、`/clear`、`重新开始`、`新会话`）会新建 claude 会话（工作目录与文件保留），其余情况一直是同一个会话；
+  - 会话只挂一个**自举的 daemon MCP**（工具面严格限定，见 `internal/daemon/chat.go`），上下文只有显式注入的 system 提示词与 settings，不读写任何用户级 claude 配置。claude 支持 `--bare` 时对话会话用它跑最小模式（跳过 hooks、插件同步、CLAUDE.md 自动发现与记忆），启动日志会写明 `bare=开/关`；`weixin.enabled=false` 或没有 `weixin` 配置时 daemon 明确打印桥未启用的原因。
 - **谁能对话**：`weixin.admin_users` 白名单；留空时只允许扫码登录的用户（`login_user_id`），两者都为空则忽略所有消息（fail-closed）。
 - 每条消息处理串行（同一会话的消息排队），不同会话最多 4 路并发；单轮对话超时默认 3 分钟（`weixin.session_timeout_ms`）。
 

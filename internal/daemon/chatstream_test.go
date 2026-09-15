@@ -71,3 +71,41 @@ func TestParseChatStreamSingleObject(t *testing.T) {
 		t.Error("没有 result 时应报错")
 	}
 }
+
+// thinking_tokens：字段名是 estimated_tokens/estimated_tokens_delta（session_id 为
+// 会话 id），按步长播报且首条即报；计数重置时重新开始播报；坏行（例如缺冒号的
+// JSON）静默忽略，不影响整轮会话。
+func TestFeedChatStreamThinkingTokens(t *testing.T) {
+	var progress []string
+	var outcome chatOutcome
+	report := func(text string) { progress = append(progress, text) }
+	lines := []string{
+		`{"type":"system","subtype":"thinking_tokens","estimated_tokens":109,"estimated_tokens_delta":27,"session_id":"7931f2be-66b6-4070-a86e-01e60124e3cc"}`,
+		`{"type":"system","subtype":"thinking_tokens","estimated_tokens":400,"estimated_tokens_delta":291}`,
+		`{"type":"system","subtype":"thinking_tokens","estimated_tokens":1200,"estimated_tokens_delta":800}`,
+		`{"type":"system","subtype":"thinking_tokens","session:"7931f2be-"}`,
+		`{"type":"result","subtype":"success","is_error":false,"result":"好了"}`,
+	}
+	for _, line := range lines {
+		feedChatStreamLine(&outcome, []byte(line), report)
+	}
+	joined := strings.Join(progress, "\n")
+	if !strings.Contains(joined, "思考中…（约 109 tokens，+27）") {
+		t.Errorf("首条 thinking_tokens 应播报：%s", joined)
+	}
+	if strings.Contains(joined, "约 400 tokens") {
+		t.Errorf("未到步长不该重复播报：%s", joined)
+	}
+	if !strings.Contains(joined, "思考中…（约 1200 tokens，+800）") {
+		t.Errorf("跨过步长应播报：%s", joined)
+	}
+	if outcome.ThinkingTokens != 1200 {
+		t.Errorf("ThinkingTokens = %d", outcome.ThinkingTokens)
+	}
+	if outcome.SessionID != "7931f2be-66b6-4070-a86e-01e60124e3cc" {
+		t.Errorf("应从 thinking 事件取到 session id：%q", outcome.SessionID)
+	}
+	if outcome.Result != "好了" {
+		t.Errorf("坏行不该影响后续解析：%+v", outcome)
+	}
+}

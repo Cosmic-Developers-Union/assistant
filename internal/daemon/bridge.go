@@ -147,10 +147,22 @@ func handleChatMessage(
 			defer func() { _ = client.SendTyping(ctx, message.FromUserID, ticket, weixin.TypingOff) }()
 		}
 	}
-	reply, err := config.Chat.Handle(ctx, conversationID, text)
-	if err != nil {
-		config.Log("对话失败（%s）：%v", conversationID, err)
-		reply = "处理失败：" + err.Error()
+	var reply string
+	if restartRequested(text) {
+		// 用户明确要求重新开始：只丢会话映射，工作目录保留（用户的文件与历史都还在）
+		if resetErr := config.Chat.Reset(conversationID); resetErr != nil {
+			config.Log("重置会话失败（%s）：%v", conversationID, resetErr)
+		}
+		workspace, _ := config.Chat.WorkspaceDir(conversationID)
+		config.Log("会话重置（%s）：用户要求重新开始，下一条消息新建 claude 会话", conversationID)
+		reply = "已开始新会话：下一条消息会新建 claude 会话（工作目录保留：" + workspace + "）"
+	} else {
+		var err error
+		reply, err = config.Chat.Handle(ctx, conversationID, text)
+		if err != nil {
+			config.Log("对话失败（%s）：%v", conversationID, err)
+			reply = "处理失败：" + err.Error()
+		}
 	}
 	if strings.TrimSpace(reply) == "" {
 		reply = "（无回复）"
@@ -162,6 +174,17 @@ func handleChatMessage(
 			return
 		}
 	}
+}
+
+// restartRequested 判断用户是否明确要求「重新开始」：命中则下一条消息新建会
+// 话（保留工作目录）。接受斜杠命令与直白说法，避免用户以为换了话题其实还在
+// 老会话里。
+func restartRequested(text string) bool {
+	switch strings.ToLower(strings.TrimSpace(text)) {
+	case "/new", "/reset", "/clear", "/restart", "重新开始", "新会话", "/新会话", "重置会话":
+		return true
+	}
+	return false
 }
 
 // typingCache 缓存每用户的 typing ticket（getConfig 不便宜）。

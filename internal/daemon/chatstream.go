@@ -18,6 +18,10 @@ type chatOutcome struct {
 	CostUSD   float64
 	NumTurns  int
 	Errors    []string
+	// ThinkingTokens 是本轮模型思考的估算 token 数（thinking_tokens 事件）
+	ThinkingTokens int
+	// thinkingReported 是上次播报的思考 token 步进（按 thinkingProgressStep 报）
+	thinkingReported int
 	// APIError 是 claude 上报的 API 层错误（如 401 invalid api key）：这是排查
 	// 「发消息没反应」最关键的一行，必须能透到日志与回复里。
 	APIError string
@@ -34,7 +38,10 @@ type chatStreamEvent struct {
 	NumTurns  int      `json:"num_turns"`
 	CostUSD   float64  `json:"total_cost_usd"`
 	Errors    []string `json:"errors"`
-	Error     struct {
+	// thinking_tokens 事件：模型思考的估算 token 数（高频，按步长播报）
+	EstimatedTokens      int `json:"estimated_tokens"`
+	EstimatedTokensDelta int `json:"estimated_tokens_delta"`
+	Error                struct {
 		Message string `json:"message"`
 		Status  int    `json:"status"`
 	} `json:"error"`
@@ -56,7 +63,11 @@ func feedChatStreamLine(outcome *chatOutcome, line []byte, onProgress func(strin
 	}
 	var event chatStreamEvent
 	if err := json.Unmarshal(trimmed, &event); err != nil {
+		// 单行坏 JSON 直接忽略（--debug 下原始行照旧落日志），不影响整轮会话
 		return false
+	}
+	if event.SessionID != "" && outcome.SessionID == "" {
+		outcome.SessionID = event.SessionID
 	}
 	switch event.Type {
 	case "system":
@@ -79,9 +90,10 @@ func feedChatStreamLine(outcome *chatOutcome, line []byte, onProgress func(strin
 			}
 			outcome.APIError = message
 			progress(onProgress, "API 错误："+message)
+		case "thinking_tokens":
+			feedThinkingTokens(outcome, event, onProgress)
 		default:
-			// 其余 system 事件（thinking_tokens 等）高频且无信息量：只进 --debug 的
-			// 原始事件行，不单独刷日志
+			// 其余 system 事件只进 --debug 的原始事件行
 		}
 	case "assistant":
 		for _, block := range event.Message.Content {
@@ -166,4 +178,36 @@ func progress(onProgress func(string), line string) {
 // singleLine 把多行文本压成一行（日志一行一条，便于 grep）。
 func singleLine(text string) string {
 	return strings.Join(strings.Fields(strings.ReplaceAll(text, "\n", " ")), " ")
+}
+
+// thinkingProgressStep 是「思考中」进度的播报步长：thinking_tokens 事件每几百毫秒
+// 就来一条，按 1000 token 报一次（外加第一次），既能看到模型在动，又不刷屏。
+const thinkingProgressStep = 1000
+
+// feedThinkingTokens 解析 thinking_tokens 事件（estimated_tokens/…_delta，键名是
+// session_id）：累积估算值并按步长播报。坏行/缺字段时静默忽略。
+func feedThinkingTokens(outcome *chatOutcome, event chatStreamEvent, onProgress func(string)) {
+	if event.EstimatedTokens <= 0 {
+		return
+	}
+	if event.EstimatedTokens < outcome.ThinkingTokens {
+		// 新一轮思考（计数重置）：重新开始播报
+		outcome.thinkingReported = 0
+	}
+	outcome.ThinkingTokens = event.EstimatedTokens
+	switch {
+	case outcome.thinkingReported == 0:
+		progress(onProgress, thinkingLine(event))
+		outcome.thinkingReported = event.EstimatedTokens
+	case event.EstimatedTokens-outcome.thinkingReported >= thinkingProgressStep:
+		progress(onProgress, thinkingLine(event))
+		outcome.thinkingReported = event.EstimatedTokens
+	}
+}
+
+func thinkingLine(event chatStreamEvent) string {
+	if event.EstimatedTokensDelta > 0 {
+		return fmt.Sprintf("思考中…（约 %d tokens，+%d）", event.EstimatedTokens, event.EstimatedTokensDelta)
+	}
+	return fmt.Sprintf("思考中…（约 %d tokens）", event.EstimatedTokens)
 }

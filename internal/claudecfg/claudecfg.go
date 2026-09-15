@@ -87,6 +87,16 @@ func TranscriptPath(configDir, projectDirName, sessionID string) string {
 	return filepath.Join(configDir, "projects", projectDirName, sessionID+".jsonl")
 }
 
+// ConfigDirEnv 只给 CLAUDE_CONFIG_DIR（会话配置根）：对话会话用「稳定的工作目录」
+// 作为项目锚点（claude 按 cwd 派生项目名），所以不钉 CLAUDE_CODE_PROJECT_DIR_NAME
+// ——这样用户在该目录里 `claude --continue` 就能直接接上最近的会话。
+func ConfigDirEnv(configDir string) []string {
+	if strings.TrimSpace(configDir) == "" {
+		return nil
+	}
+	return []string{"CLAUDE_CONFIG_DIR=" + configDir}
+}
+
 // SessionEnv 返回启动 claude 时必须写进**进程环境**的两项（settings.env 无法
 // 设置 CLAUDE_CODE_PROJECT_DIR_NAME，CLAUDE_CONFIG_DIR 同理）：让文本记录固定
 // 落在项目目录名下，而不是随 worktree 路径漂移或被删除。任一项缺失时返回空。

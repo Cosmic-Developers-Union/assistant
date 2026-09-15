@@ -256,8 +256,9 @@ func startDaemonServices(
 	if chat.Bare() {
 		bareLabel = "开（不读 hooks/插件/CLAUDE.md，只用显式 settings 与自举 MCP）"
 	}
-	logf("微信桥对话会话：claude=%s bare=%s 配置根=%s",
-		claudeBin, bareLabel, chat.SessionDir())
+	logf("微信桥对话会话：claude=%s bare=%s 配置根=%s", claudeBin, bareLabel, chat.SessionDir())
+	logf("微信桥会话目录：%s（每个微信会话一个稳定工作目录 <chat-xxxxxxxx>，含 session.json；"+
+		"续聊：cd 该目录后 claude --continue）", chat.StateDir())
 	warnf := func(format string, arguments ...any) {
 		fmt.Fprintf(command.ErrOrStderr(), "警告："+format+"\n", arguments...)
 	}

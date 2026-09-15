@@ -27,7 +27,7 @@ func TestChatProviderOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewChat: %v", err)
 	}
-	settingsPath, err := chat.writeSettings(chat.config.Provider)
+	settingsPath, err := chat.writeSettings(chat.config.Provider, t.TempDir())
 	if err != nil {
 		t.Fatalf("writeSettings: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestChatProviderOverrides(t *testing.T) {
 		t.Errorf("daemon MCP 放行丢失：%v", allow)
 	}
 
-	mcpPath, err := chat.writeMCPConfig(chat.config.Provider)
+	mcpPath, err := chat.writeMCPConfig(chat.config.Provider, t.TempDir())
 	if err != nil {
 		t.Fatalf("writeMCPConfig: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestChatProviderSessionHeader(t *testing.T) {
 		t.Fatalf("NewChat: %v", err)
 	}
 	sessionID := "11111111-2222-4333-8444-555555555555"
-	args, err := chat.sessionArgs(sessionID, "chat-test", true, "你好")
+	args, err := chat.sessionArgs(sessionID, "chat-test", true, "你好", t.TempDir())
 	if err != nil {
 		t.Fatalf("sessionArgs: %v", err)
 	}
@@ -132,10 +132,9 @@ func TestChatSessionTitleAndProjectEnv(t *testing.T) {
 	var gotArgs, gotEnv []string
 	turns := 0
 	chat, err := NewChat(ChatConfig{
-		ClaudeBin:      "claude",
-		StateDir:       stateDir,
-		SessionDir:     filepath.Join(stateDir, "claude"),
-		SessionProject: "assistant-chat",
+		ClaudeBin:  "claude",
+		StateDir:   stateDir,
+		SessionDir: filepath.Join(stateDir, "claude"),
 		RunClaude: func(_ context.Context, _ string, args []string, _ string, env []string) ([]byte, error) {
 			gotArgs, gotEnv = args, env
 			turns++
@@ -161,10 +160,21 @@ func TestChatSessionTitleAndProjectEnv(t *testing.T) {
 	if firstID == "" {
 		t.Fatalf("首轮缺 --session-id：%v", gotArgs)
 	}
+	// 对话会话只钉 CLAUDE_CONFIG_DIR（记录落 assistant 托管配置根）；项目名交给
+	// 稳定的会话工作目录自然派生，这样 cd 进去 `claude --continue` 能接上会话
 	envJoined := strings.Join(gotEnv, "\n")
-	if !strings.Contains(envJoined, "CLAUDE_CODE_PROJECT_DIR_NAME=assistant-chat") ||
-		!strings.Contains(envJoined, "CLAUDE_CONFIG_DIR="+filepath.Join(stateDir, "claude")) {
-		t.Errorf("文本记录位置未注入环境：%v", gotEnv)
+	if !strings.Contains(envJoined, "CLAUDE_CONFIG_DIR="+filepath.Join(stateDir, "claude")) {
+		t.Errorf("CLAUDE_CONFIG_DIR 未注入：%v", gotEnv)
+	}
+	if strings.Contains(envJoined, "CLAUDE_CODE_PROJECT_DIR_NAME") {
+		t.Errorf("对话会话不该钉 CLAUDE_CODE_PROJECT_DIR_NAME（会破坏 --continue）：%v", gotEnv)
+	}
+	workspace, err := chat.WorkspaceDir(conversation)
+	if err != nil {
+		t.Fatalf("WorkspaceDir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "session.json")); err != nil {
+		t.Errorf("会话工作目录缺少 session.json：%v", err)
 	}
 	// 第二轮复用同一会话 ID（--resume），标题稳定
 	if _, err := chat.Handle(context.Background(), conversation, "再问一句"); err != nil {
