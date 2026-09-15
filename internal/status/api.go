@@ -16,7 +16,46 @@ import (
 const (
 	pageSize          = 50
 	httpClientTimeout = 30 * time.Second
+	// versionProbeTimeout 是创建 SDK 客户端时探测 /api/v1/version 的超时
+	versionProbeTimeout = 20 * time.Second
 )
+
+// newSDK 创建 gitea SDK 客户端，并把服务器版本**钉死**为探测到的值（探测不到就
+// 关掉 SDK 的版本门禁）。
+//
+// 为什么必须自己探一次：gitea SDK v1.2.0 的 loadServerVersion 只把错误记在**首次**
+// 调用上（getVersionOnce 执行完就不再重试，而 serverVersion 仍是 nil），于是第二次
+// 调用会返回 nil error 并拿 nil 版本去比较——直接 nil 解引用 panic。常驻 daemon
+// 因此会崩在「令牌失效 / 网络不通 / 地址不是 Gitea」这类最常见的运维场景上，而不是
+// 报错。这里先探一次 /api/v1/version：
+//   - 探到 → SetGiteaVersion(版本)，SDK 不再自己拉取，版本门禁照常生效；
+//   - 探不到 → SetGiteaVersion("") 即忽略版本门禁，让真正的 API 调用去暴露认证/
+//     网络错误（而不是在构造客户端时就失败，那样一次网络抖动就能拖垮整个 daemon）。
+func newSDK(host, token string, httpClient *http.Client) (*gitea.Client, error) {
+	version := ""
+	if probe, err := gitea.NewClient(
+		host,
+		gitea.SetHTTPClient(httpClient),
+		gitea.SetUserAgent("assistant/1"),
+	); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), versionProbeTimeout)
+		if raw, _, err := probe.Meta.ServerVersion(ctx); err == nil {
+			version = strings.TrimSpace(raw)
+		}
+		cancel()
+	}
+	sdk, err := gitea.NewClient(
+		host,
+		gitea.SetToken(token),
+		gitea.SetUserAgent("assistant/1"),
+		gitea.SetHTTPClient(httpClient),
+		gitea.SetGiteaVersion(version),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create Gitea client: %w", err)
+	}
+	return sdk, nil
+}
 
 type ReviewState string
 
@@ -271,14 +310,9 @@ type Client struct {
 
 func NewClient(host, accessToken string) (*Client, error) {
 	httpClient := &http.Client{Timeout: httpClientTimeout}
-	sdk, err := gitea.NewClient(
-		host,
-		gitea.SetToken(accessToken),
-		gitea.SetUserAgent("assistant/1"),
-		gitea.SetHTTPClient(httpClient),
-	)
+	sdk, err := newSDK(host, accessToken, httpClient)
 	if err != nil {
-		return nil, fmt.Errorf("create Gitea client: %w", err)
+		return nil, err
 	}
 	return &Client{sdk: sdk, host: strings.TrimRight(host, "/"), accessToken: accessToken, httpClient: httpClient}, nil
 }
@@ -289,14 +323,9 @@ func (c *Client) UseBranchProtectionToken(token string) error {
 	if token == "" {
 		return nil
 	}
-	sdk, err := gitea.NewClient(
-		c.host,
-		gitea.SetToken(token),
-		gitea.SetUserAgent("assistant/1"),
-		gitea.SetHTTPClient(c.httpClient),
-	)
+	sdk, err := newSDK(c.host, token, c.httpClient)
 	if err != nil {
-		return fmt.Errorf("create branch-protection Gitea client: %w", err)
+		return err
 	}
 	c.branchProtectionSDK = sdk
 	return nil
@@ -309,14 +338,9 @@ func (c *Client) UseStateReviewerToken(token string) error {
 	if token == "" {
 		return nil
 	}
-	sdk, err := gitea.NewClient(
-		c.host,
-		gitea.SetToken(token),
-		gitea.SetUserAgent("assistant/1"),
-		gitea.SetHTTPClient(c.httpClient),
-	)
+	sdk, err := newSDK(c.host, token, c.httpClient)
 	if err != nil {
-		return fmt.Errorf("create state-reviewer Gitea client: %w", err)
+		return err
 	}
 	c.stateSDK = sdk
 	return nil

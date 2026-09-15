@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -485,5 +486,56 @@ func TestClientListBranchProtectionsUsesDedicatedToken(t *testing.T) {
 	}
 	if reposAuth != "token base-token" {
 		t.Errorf("user/repos Authorization = %q, want %q", reposAuth, "token base-token")
+	}
+}
+
+// 版本探测失败不能再 panic：gitea SDK v1.2.0 探测失败后 serverVersion 留 nil，
+// 第二次走版本门禁的调用会 nil 解引用（常驻 daemon 直接崩）。客户端改成自己探一次：
+// 探到就钉死版本（SDK 不再自拉），探不到就忽略版本门禁，让真实 API 错误浮出来。
+func TestClientVersionProbeDoesNotPanicOnRetry(t *testing.T) {
+	cases := []struct {
+		name         string
+		versionBody  string
+		versionCode  int
+		wantVersions int32
+	}{
+		{name: "探测成功", versionBody: `{"version":"1.26.0"}`, versionCode: http.StatusOK, wantVersions: 1},
+		{name: "探测失败", versionBody: "boom", versionCode: http.StatusInternalServerError, wantVersions: 1},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			var versionCalls int32
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if request.URL.Path == "/api/v1/version" {
+					atomic.AddInt32(&versionCalls, 1)
+					if testCase.versionCode == http.StatusOK {
+						_, _ = writer.Write([]byte(testCase.versionBody))
+						return
+					}
+					http.Error(writer, testCase.versionBody, testCase.versionCode)
+					return
+				}
+				if request.URL.Path == "/api/v1/repos/acme/video/issues" {
+					_, _ = writer.Write([]byte(`[]`))
+					return
+				}
+				http.NotFound(writer, request)
+			}))
+			defer server.Close()
+
+			client, err := NewClient(server.URL, "secret")
+			if err != nil {
+				t.Fatalf("NewClient() error = %v", err)
+			}
+			// 第一轮：探测不通时这一轮就是「检测失败，稍后重试」，错误由调度循环记下
+			// （修复前 SDK 正是在这里吃掉错误、把版本留成 nil）；第二轮必须不再 panic
+			_, _ = client.ListReviewPullRequests(t.Context(), Repository{Owner: "acme", Name: "video"})
+			if _, err := client.ListReviewPullRequests(t.Context(), Repository{Owner: "acme", Name: "video"}); err != nil {
+				t.Fatalf("第二轮调用 error = %v", err)
+			}
+			if got := atomic.LoadInt32(&versionCalls); got != testCase.wantVersions {
+				t.Errorf("版本探测次数 = %d, want %d（构造期探一次，SDK 不再自己探测）", got, testCase.wantVersions)
+			}
+		})
 	}
 }

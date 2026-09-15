@@ -34,6 +34,9 @@ type loginServer struct {
 func (s *loginServer) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/api/v1/version":
+			// 版本探测：status 客户端构造时先探一次（避免 SDK 的 nil 版本 panic 路径）
+			fmt.Fprint(w, `{"version":"1.26.0"}`)
 		case r.URL.Path == "/api/v1/user":
 			if r.Header.Get("Authorization") == "" {
 				s.t.Error("身份查询未携带令牌")
