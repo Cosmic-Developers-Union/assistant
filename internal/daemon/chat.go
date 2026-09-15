@@ -15,14 +15,17 @@ import (
 	"time"
 
 	"assistant/internal/claudecfg"
+	"assistant/internal/conversations"
 	"assistant/internal/instances"
 	"assistant/internal/provider"
+	"assistant/internal/sessionstore"
 )
 
 // chatSystemPrompt 是对话会话的附加 system 提示词：角色 + 工具边界。
 const chatSystemPrompt = `你是 assistant daemon 的运维对话助手（微信桥）。用户通过微信提问，你用简洁中文回答。
 能力边界：通过 daemon MCP 只读查询调度状态——目标仓库、待办队列、进行中的评审/分诊会话、最近会话结果。
 必须用工具查询后再回答，不要编造状态；查询不可用（daemon 未运行）时如实说明。
+上下文被压缩后，可用 sessions MCP（session_search/session_read）回查本次会话的完整聊天记录。
 回答保持简短（微信场景），要点用短列表；除非用户要求，不复述原始 JSON。`
 
 // ChatConfig 是对话会话的配置。
@@ -44,6 +47,12 @@ type ChatConfig struct {
 	SessionDir string
 	// Debug 为真时把 claude 的原始 stream 事件、会话命令与结束统计也写进日志
 	Debug bool
+	// Remote 是记录库服务端连接（assistant serve）：非空时每轮结束把该会话的最新
+	// 记录推上去，agent 在上下文压缩后能用 sessions MCP 回查完整历史
+	Remote sessionstore.RemoteConfig
+	// Transport 是这个对话实例的来源通道（缺省 weixin）：写入会话元数据，供记录库
+	// 按「会话实体 + 通道」归档
+	Transport string
 	// Bare 为真时对话会话用 claude 的 --bare 最小模式：不加载 hooks、插件同步、
 	// CLAUDE.md 自动发现与记忆，只认显式传入的 --settings/--mcp-config。对话
 	// 上下文本来就全靠显式参数（系统提示词 + 自举 daemon MCP），开关由 NewChat
@@ -61,9 +70,12 @@ type ChatConfig struct {
 type Chat struct {
 	config ChatConfig
 
-	mu       sync.Mutex
-	sessions map[string]string
-	locks    map[string]*sync.Mutex
+	mu            sync.Mutex
+	sessions      map[string]string
+	locks         map[string]*sync.Mutex
+	conversations *conversations.File
+	// pushed 记录每个 claude 会话最近一次推送的文件大小（避免每轮重复上传）
+	pushed map[string]int64
 }
 
 // NewChat 创建对话会话管理器（加载已持久化的会话映射）。
@@ -84,6 +96,9 @@ func NewChat(config ChatConfig) (*Chat, error) {
 		}
 		config.StateDir = filepath.Join(directory, "chat")
 	}
+	if strings.TrimSpace(config.Transport) == "" {
+		config.Transport = "weixin"
+	}
 	if strings.TrimSpace(config.SessionDir) == "" {
 		directory, err := instances.ClaudeDir()
 		if err != nil {
@@ -100,7 +115,13 @@ func NewChat(config ChatConfig) (*Chat, error) {
 		config:   config,
 		sessions: map[string]string{},
 		locks:    map[string]*sync.Mutex{},
+		pushed:   map[string]int64{},
 	}
+	conversationFile, err := conversations.Load(chat.conversationsPath())
+	if err != nil {
+		return nil, err
+	}
+	chat.conversations = conversationFile
 	if err := chat.load(); err != nil {
 		return nil, err
 	}
@@ -122,6 +143,39 @@ func (c *Chat) dropLegacySharedConfig() {
 		}
 		c.config.Log("已清理旧的共享会话配置：%s（现在每个会话写在自己的工作目录）", path)
 	}
+}
+
+// conversationsPath 是会话实体映射表的落点（与 chat 状态同目录）。
+func (c *Chat) conversationsPath() string {
+	return filepath.Join(c.config.StateDir, "conversations.json")
+}
+
+// ConversationFor 把「通道 + 通道内用户标识」映射到会话实体 id（必要时创建）。
+// 映射层是刻意的：聊天会话不由微信唯一决定——换通道、或把两个通道绑到同一会话，
+// 都只改这张表，记录与工作目录跟着会话实体走。
+// 旧版本直接用通道用户 id 当键，首次映射时把已有会话映射迁移过去（不丢上下文）。
+func (c *Chat) ConversationFor(transport, user string) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	conversation, created := c.conversations.Ensure(transport, user, "")
+	if created {
+		if sessionID, ok := c.sessions[user]; ok {
+			// 迁移旧键：把 <通道用户 id> 下的 claude 会话挂到新的会话实体上
+			delete(c.sessions, user)
+			c.sessions[conversation.ID] = sessionID
+			if err := c.saveSessionsLocked(); err != nil {
+				return "", err
+			}
+			c.config.Log("会话映射：%s:%s → %s（迁移旧键 %s 的会话 %s）",
+				transport, user, conversation.ID, user, sessionID)
+		} else {
+			c.config.Log("会话映射：%s:%s → %s", transport, user, conversation.ID)
+		}
+	}
+	if err := conversations.Save(c.conversationsPath(), c.conversations); err != nil {
+		return "", err
+	}
+	return conversation.ID, nil
 }
 
 // StateDir 返回会话状态目录。
@@ -182,10 +236,15 @@ func (c *Chat) Handle(ctx context.Context, conversationID, text string) (string,
 			shortSession(sessionID), result.Subtype, result.IsError, result.NumTurns, result.CostUSD)
 	}
 	if fresh {
-		if err := c.remember(conversationID, sessionID, workspace, result.Model); err != nil {
+		if err := c.remember(conversationID, sessionID); err != nil {
 			c.config.Log("持久化会话映射失败：%v", err)
 		}
 	}
+	c.attachSession(conversationID, sessionID)
+	if err := c.writeSessionMetadata(conversationID, sessionID, workspace, result.Model, c.config.Transport); err != nil {
+		c.config.Log("写入会话元数据失败：%v", err)
+	}
+	c.pushSession(sessionID)
 	if result.IsError {
 		if message := strings.TrimSpace(result.Result); message != "" {
 			return message, nil
@@ -277,7 +336,8 @@ func (c *Chat) logSessionConfig(sessionID string, overrides claudecfg.Overrides,
 func (c *Chat) mcpDocument(overrides claudecfg.Overrides) map[string]any {
 	document := map[string]any{
 		"mcpServers": map[string]any{
-			claudecfg.MCPServerDaemon: claudecfg.DaemonMCPServer(claudecfg.AssistantCommand()),
+			claudecfg.MCPServerDaemon:   claudecfg.DaemonMCPServer(claudecfg.AssistantCommand()),
+			claudecfg.MCPServerSessions: claudecfg.SessionsMCPServer(claudecfg.AssistantCommand()),
 		},
 	}
 	return claudecfg.MergeMCPServers(document, overrides)
@@ -286,7 +346,8 @@ func (c *Chat) mcpDocument(overrides claudecfg.Overrides) map[string]any {
 // writeSettings 写入对话会话的独立设置（env + 权限放行 + provider 覆盖，含
 // daemon MCP 的放行）。
 func (c *Chat) writeSettings(overrides claudecfg.Overrides, dir string) (string, error) {
-	settings := claudecfg.SessionSettingsMap(overrides, "mcp__daemon", "mcp__daemon__*")
+	settings := claudecfg.SessionSettingsMap(overrides,
+		"mcp__daemon", "mcp__daemon__*", "mcp__sessions", "mcp__sessions__*")
 	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return "", err
@@ -360,10 +421,8 @@ func (c *Chat) load() error {
 	return nil
 }
 
-func (c *Chat) remember(conversationID, sessionID, workspace, model string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.sessions[conversationID] = sessionID
+// saveSessionsLocked 写会话映射表（调用方已持锁）。
+func (c *Chat) saveSessionsLocked() error {
 	if err := os.MkdirAll(c.config.StateDir, 0o755); err != nil {
 		return err
 	}
@@ -371,13 +430,36 @@ func (c *Chat) remember(conversationID, sessionID, workspace, model string) erro
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(c.sessionsPath(), append(data, '\n'), 0o600); err != nil {
-		return err
+	return os.WriteFile(c.sessionsPath(), append(data, '\n'), 0o600)
+}
+
+func (c *Chat) remember(conversationID, sessionID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sessions[conversationID] = sessionID
+	return c.saveSessionsLocked()
+}
+
+// attachSession 把 claude 会话挂到会话实体下（幂等；续接/迁移的会话也要挂，
+// 记录库按会话实体归档时才对得上）。
+func (c *Chat) attachSession(conversationID, sessionID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.conversations.Attach(conversationID, sessionID); err != nil {
+		c.config.Log("挂载会话到会话实体失败（%s → %s）：%v", conversationID, sessionID, err)
+		return
 	}
-	// 工作目录里留一份可读的会话元数据：一眼看到「这个目录是哪个微信会话、
-	// 用的哪个 claude 会话 id、怎么续聊」
+	if err := conversations.Save(c.conversationsPath(), c.conversations); err != nil {
+		c.config.Log("持久化会话实体失败：%v", err)
+	}
+}
+
+// writeSessionMetadata 写会话工作目录里的 session.json：每轮都写（续接的会话也要有，
+// 记录库归档依赖这里的 conversation/transport/title），创建时间沿用首次的值。
+func (c *Chat) writeSessionMetadata(conversationID, sessionID, workspace, model, transport string) error {
 	metadata := sessionMetadata{
 		ConversationID: conversationID,
+		Transport:      transport,
 		SessionID:      sessionID,
 		Title:          chatSessionTitle(conversationID),
 		Model:          model,
@@ -399,6 +481,7 @@ func (c *Chat) remember(conversationID, sessionID, workspace, model string) erro
 // sessionMetadata 是会话工作目录里的元数据（诊断/续聊用）。
 type sessionMetadata struct {
 	ConversationID string `json:"conversation_id"`
+	Transport      string `json:"transport,omitempty"`
 	SessionID      string `json:"session_id"`
 	Title          string `json:"title"`
 	Model          string `json:"model,omitempty"`
@@ -510,6 +593,43 @@ func (c *Chat) runStreaming(ctx context.Context, args []string, dir string, onPr
 		return outcome, fmt.Errorf("会话没有返回结果（stderr：%s）", truncate(strings.TrimSpace(stderr.String()), 300))
 	}
 	return outcome, nil
+}
+
+// pushSession 把该会话的最新记录推给记录库（配置了才推）：让 agent 在同一轮对话里
+// 就能通过 sessions MCP 查到自己被压缩掉的历史。推送失败只记日志，不影响回复。
+func (c *Chat) pushSession(sessionID string) {
+	if strings.TrimSpace(c.config.Remote.URL) == "" || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	options := sessionstore.CollectOptions{
+		Root:    c.config.SessionDir,
+		ChatDir: c.config.StateDir,
+	}
+	session, ok, err := sessionstore.SessionFor(options, sessionID)
+	if err != nil || !ok {
+		if err != nil {
+			c.config.Log("归档会话失败（%s）：%v", shortSession(sessionID), err)
+		}
+		return
+	}
+	size := int64(session.Meta.Bytes)
+	c.mu.Lock()
+	previous := c.pushed[sessionID]
+	c.mu.Unlock()
+	if previous != 0 && previous == size {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	client := sessionstore.NewClient(c.config.Remote.URL, c.config.Remote.Token)
+	if _, err := client.Push(ctx, sessionstore.Batch{Sessions: []sessionstore.Session{session}}); err != nil {
+		c.config.Log("归档会话失败（%s）：%v", shortSession(sessionID), err)
+		return
+	}
+	c.mu.Lock()
+	c.pushed[sessionID] = int64(len(strings.Join(session.Lines, "\n")) + 1)
+	c.mu.Unlock()
+	c.config.Log("已归档会话 %s（%d 行，来源 %s）到 %s", session.Key.String(), len(session.Lines), session.Source, c.config.Remote.URL)
 }
 
 // progressLogger 把会话进度写进 daemon 日志：一行一条，便于 grep「用户在问什么、

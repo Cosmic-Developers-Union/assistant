@@ -138,9 +138,13 @@ func handleChatMessage(
 	message weixin.Message,
 	text string,
 ) {
-	conversationID := message.SessionID
-	if conversationID == "" {
-		conversationID = message.FromUserID
+	// 会话实体由映射层决定：通道（微信）+ 通道内用户标识 → conversation id。
+	// 换通道或把多个通道绑到同一会话时，只改映射表。
+	conversationID := message.FromUserID
+	if mapped, err := config.Chat.ConversationFor("weixin", message.FromUserID); err != nil {
+		config.Log("会话映射失败（%s），退回通道用户 id：%v", message.FromUserID, err)
+	} else if mapped != "" {
+		conversationID = mapped
 	}
 	if ticket, err := typing.ticket(ctx, client, message.FromUserID, message.ContextToken); err == nil && ticket != "" {
 		if err := client.SendTyping(ctx, message.FromUserID, ticket, weixin.TypingOn); err == nil {

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"assistant/internal/daemon"
 	"assistant/internal/instances"
 	"assistant/internal/provider"
+	"assistant/internal/sessionstore"
 	"assistant/internal/weixin"
 
 	"github.com/spf13/cobra"
@@ -238,10 +240,12 @@ func startDaemonServices(
 	// 最小模式顺带甩掉 hooks、插件同步、CLAUDE.md 自动发现与记忆。仅在 claude
 	// 真的支持该参数时打开，不支持就退回普通模式，不让整条桥起不来。
 	bare := claudecfg.SupportsBare(claudeBin)
+	remote := sessionstore.ResolveRemote(filepath.Dir(configPath))
 	chat, err := daemon.NewChat(daemon.ChatConfig{
 		ClaudeBin:    claudeBin,
 		Bare:         bare,
 		Debug:        options.Debug,
+		Remote:       remote,
 		Model:        firstNonEmpty(weixinConfig.Model, options.Model),
 		Provider:     providerOverrides,
 		ProviderName: providerName,
@@ -262,6 +266,11 @@ func startDaemonServices(
 	logf("  配置根   = %s", chat.SessionDir())
 	logf("  会话目录 = %s（每个微信会话一个稳定工作目录 <chat-xxxxxxxx>，含 session.json）", chat.StateDir())
 	logf("  续聊     = cd <会话目录> && claude --continue")
+	if remote.URL != "" {
+		logf("  记录库   = %s（每轮结束归档该会话，可用 sessions MCP 回查）", remote.URL)
+	} else {
+		logf("  记录库   = 未配置（assistant serve + session push 可远端留存记录）")
+	}
 	warnf := func(format string, arguments ...any) {
 		fmt.Fprintf(command.ErrOrStderr(), "警告："+format+"\n", arguments...)
 	}

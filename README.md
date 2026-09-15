@@ -33,6 +33,11 @@ Gitea 上的例行事务与评审自动化，两块能力：
 | `<配置目录>/claude/projects/<项目>/<session-id>.jsonl` | 一次会话的完整事件流（一行一事件） | claude | 保留期 `cleanupPeriodDays=3650` |
 | `<配置目录>/chat/sessions.json` | 微信会话 → claude 会话 id 映射 | 对话桥 | 跨重启复用同一会话 |
 | `<配置目录>/chat/<chat-8位哈希>/` | 该微信会话的工作目录：`session.json`（元数据）、`settings.json`、`mcp.json`、会话产物 | 对话桥 | 同一微信会话恒用同一目录 |
+| `<配置目录>/chat/conversations.json` | **会话实体映射表**：通道绑定（weixin:用户…）→ conversation id、该会话下的 claude 会话 | 对话桥 | 换通道/并会话只改这张表 |
+| `<配置目录>/serve.json` | 记录库服务端端点与令牌 | `serve` 启动时写、退出删 | 0600，同机客户端自举 |
+| `<配置目录>/sessions-remote.json` | 远端记录库地址与令牌（服务端在别的机器时手写） | 你 | 0600 |
+| `<配置目录>/session-push.json` | 增量推送状态（大小/修改时间） | `session push` | 可删（会重推一次） |
+| `<数据目录>/sessions/<host>/<项目>/<会话>.jsonl` | **记录库**：原样 jsonl + 同名 `.meta.json` | `serve`（收 push） | 可随会话记录一起备份 |
 | `<配置目录>/daemon.json` | 状态 API 端点与令牌 | `run` 启动时写、退出删 | 0600，`mcp daemon` 靠它自举 |
 | `<数据目录>/repos/<host>/<owner>/<name>/` | 受管克隆（评审数据源） | `run`（每轮 fetch 并强制对齐 `origin/<基线>`） | 可删除重建 |
 | `<数据目录>/state/<host>/<owner>/<name>/logs/` | 每个待办一个会话日志（进度、`[debug]`、结果、验证结论） | 调度器 | 排障第一现场 |
@@ -45,6 +50,7 @@ Gitea 上的例行事务与评审自动化，两块能力：
 
 | | 评审 / 分诊会话 | 微信对话会话 |
 | --- | --- | --- |
+| 会话标识 | 由「站点+仓库+待办+锚点」派生 | 通道绑定（如 `weixin:用户`）经映射表落到**会话实体** `conversation`（`c-xxxxxxxx`）：工作目录与记录都跟着会话实体走，换通道或把两个通道并到同一会话只改映射表 |
 | 工作目录 | `/tmp` 下的 worktree（会话结束删除）；基线 `.claude/` 覆盖进 worktree，PR 自带的那份先删掉 | `<配置目录>/chat/<chat-8位哈希>/`（长期保留） |
 | 会话 id | 由「站点+仓库+待办+锚点」确定性派生，同一待办重试 `--resume` 续接 | 首次生成 UUID 存 `sessions.json`；`/new`（或 `/reset`、`重新开始`）显式重开 |
 | 记录位置 | `<配置目录>/claude/projects/assistant-<host>-<repo>/<session-id>.jsonl` | `<配置目录>/claude/projects/<由工作目录派生>/<session-id>.jsonl` |
@@ -74,33 +80,41 @@ docker compose logs -f                                      # compose 默认带 
 - 密钥类字段（`*_TOKEN`/`*_KEY`/`*_SECRET`…）只显示前 6 与后 4 位（`sk-cp-…klmn`）；端点与模型名原样展示。原始 stream-json 不写日志，需要时读文本记录。
 - 启动自检：`claude` 版本、会话配置根、每个 provider 的凭据来源，并用一个 `max_tokens=1` 请求**实测端点**——401 立刻告警（典型：国内 MiniMax 账号配了国际端点）。
 
-## 会话记录的远程持久化
+## 会话记录服务（serve / session push / sessions MCP）
 
-要长期留存或异地保存，同步三类数据（路径见上文表格）：
+内置三件套：
+
+| 命令 | 角色 |
+| --- | --- |
+| `assistant serve` | 记录库服务端：收 `session push` 的记录，按 **(host, project, session)** 存成原样 jsonl + `.meta.json`；提供 list / read / search / conversations 接口 |
+| `assistant session push` | 客户端：扫 `<配置目录>/claude/projects/*/*.jsonl`，按大小+修改时间增量推送；聊天会话附带会话实体与通道 |
+| `assistant mcp sessions` | 给 agent 的 MCP：`session_search` / `session_list` / `session_read` / `conversation_list`——**上下文被压缩后回查完整历史** |
+
+```bash
+assistant serve &                      # 本机记录库：写 <配置目录>/serve.json（0600，退出即删）
+assistant session push                 # 同机自动发现端点，增量推送
+assistant session push --dry-run       # 先看会推什么
+# 远端：服务端机器跑 serve，客户端写 <配置目录>/sessions-remote.json {"url":"…","token":"…"}
+# 也可用 ASSISTANT_SESSIONS_URL / ASSISTANT_SESSIONS_TOKEN
+```
+
+- `host` 是宿主机标签（缺省主机名）：区分不同机器上的同名项目；记录库目录缺省 `<数据目录>/sessions`（`serve --root` 可改）。
+- 微信对话桥在配置了记录库时**每轮结束自动归档**该会话（日志 `已归档会话 …`），所以同一轮里 agent 就能查到自己被压缩掉的历史；聊天会话已自动注入 sessions MCP（`mcp__sessions__*` 已放行）。
+- 评审会话用 `assistant session push` 定时归档即可（增量，重复执行无副作用）；接口细节看 `--help`。
+
+**不想跑 serve** 时的等价做法（记录就是文件）：
 
 | 数据 | 路径 | 含密钥 |
 | --- | --- | --- |
-| 会话文本记录（一次会话一个 jsonl，完整事件流） | `<配置目录>/claude/`（`projects/`、`sessions/`、`.claude.json`） | 否 |
-| 微信会话工作目录（`session.json` 元数据、会话产物） | `<配置目录>/chat/` | **是**（`settings.json`/`mcp.json` 含 provider 密钥） |
-| 待办会话日志（进度、`[debug]`、验证结论） | `<数据目录>/state/*/*/*/logs/` | 否 |
+| 会话文本记录 | `<配置目录>/claude/` | 否 |
+| 微信会话工作目录 | `<配置目录>/chat/` | **是**（`settings.json`/`mcp.json`） |
+| 待办会话日志 | `<数据目录>/state/*/*/*/logs/` | 否 |
 
-三种做法，按侵入性排序：
+1. 把 `<配置目录>/claude` 做成 git 仓库并定时 commit+push（记录文件名是 session id，跨机不冲突）；
+2. `CLAUDE_CONFIG_DIR` 指向已同步目录（rclone/NFS/网盘），assistant 只透传；
+3. 定时 `tar`/`rsync` 到对象存储，或 `jq` 抽取 `projects/**/*.jsonl`（一行一事件）落检索系统。
 
-1. **把 `<配置目录>/claude` 做成 git 仓库并定时推送**（纯数据、无密钥，推荐）：
-   ```bash
-   cd ~/.config/Cosmic-Developers-Union/assistant/claude
-   git init && printf 'sessions/\nbackups/\n' > .gitignore
-   git add -A && git commit -m "sessions: $(date -Is)"
-   git remote add origin <你的远端> && git push -u origin main
-   # 之后用 systemd timer / cron 每 15 分钟 commit+push
-   ```
-   记录文件名是 session id，跨机器同步不冲突；assistant 不参与，随时可停。
-2. **把记录盘换成已同步目录**：`CLAUDE_CONFIG_DIR` 直接生效（assistant 只透传），例如指向 rclone/NFS/网盘挂载点，compose 里给 daemon 加同名环境变量。适合"记录本来就在远端"，代价是 claude 会往这个盘写会话状态，网络抖动直接影响会话。
-3. **只要归档**：定时 `tar`/`rsync` 上述目录到对象存储；或对 `projects/**/*.jsonl` 用 `jq` 抽取（一行一事件，`session_id`、`type`、时间戳都在行里）落到检索系统。
-
-注意：`chat/*/settings.json`、`chat/*/mcp.json` 含 provider 密钥，同步前排除或加密；`credentials.json` 与 `config.json` 也含密钥，单独保管（它们不是会话记录）。
-
-`assistant` 目前**没有**内置的远端推送命令，1/3 靠外部定时任务。若需要一等命令（如 `assistant sessions list|export|push`，按会话归档/查询/推送），说一声我来做。
+注意：`chat/*/settings.json`、`chat/*/mcp.json`、`config.json`、`credentials.json` 都含密钥，归档/同步前排除或加密。
 
 ## 开发
 

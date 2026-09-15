@@ -10,8 +10,9 @@ import (
 // assistant 自己提供、与仓库内容无关的 MCP server 名：gitea（读写 Issue/PR，
 // 凭据由会话环境或凭据库提供）与 daemon（自举的只读状态 MCP）。
 const (
-	MCPServerGitea  = "gitea"
-	MCPServerDaemon = "daemon"
+	MCPServerGitea    = "gitea"
+	MCPServerDaemon   = "daemon"
+	MCPServerSessions = "sessions"
 )
 
 // MCPServerDef 返回 stdio MCP server 定义（Claude Code 的 mcpServers 条目形态）。
@@ -33,6 +34,12 @@ func GiteaMCPServer(command string) map[string]any {
 // DaemonMCPServer 是自举的 daemon 状态 MCP（靠端点文件发现运行中的 daemon）。
 func DaemonMCPServer(command string) map[string]any {
 	return MCPServerDef(command, "mcp", "daemon")
+}
+
+// SessionsMCPServer 是会话记录查询 MCP：上下文被压缩后回查完整聊天/评审历史
+// （记录由 assistant session push 推到 assistant serve 的记录库）。
+func SessionsMCPServer(command string) map[string]any {
+	return MCPServerDef(command, "mcp", "sessions")
 }
 
 var (

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -289,5 +290,100 @@ func TestChatLogsEffectiveConfigWithMaskedSecrets(t *testing.T) {
 	}
 	if strings.Contains(joined, "sk-cp-abcdefghijklmn") {
 		t.Errorf("密钥未打码：\n%s", joined)
+	}
+}
+
+// 会话实体映射层：通道绑定 → conversation id；旧版本以通道用户 id 为键的映射会被
+// 迁移（不丢上下文）；会话元数据带上 conversation/transport；sessions MCP 注入并放行。
+func TestChatConversationMappingAndSessionsMCP(t *testing.T) {
+	stateDir := t.TempDir()
+	sessionDir := t.TempDir()
+	// 旧版本写法：sessions.json 直接以微信用户 id 为键
+	if err := os.WriteFile(filepath.Join(stateDir, "sessions.json"),
+		[]byte(`{"o9cq80-user":"s-legacy"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var lastArgs []string
+	chat, err := NewChat(ChatConfig{
+		StateDir:   stateDir,
+		SessionDir: sessionDir,
+		RunClaude: func(_ context.Context, _ string, runArgs []string, _ string, _ []string) ([]byte, error) {
+			lastArgs = args2copy(runArgs)
+			return []byte(`{"subtype":"success","is_error":false,"result":"好的"}`), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewChat: %v", err)
+	}
+
+	first, err := chat.ConversationFor("weixin", "o9cq80-user")
+	if err != nil || !strings.HasPrefix(first, "c-") {
+		t.Fatalf("ConversationFor = %q err=%v", first, err)
+	}
+	if again, _ := chat.ConversationFor("weixin", "o9cq80-user"); again != first {
+		t.Errorf("同一绑定应映射到同一会话：%q vs %q", again, first)
+	}
+	if other, _ := chat.ConversationFor("weixin", "another-user"); other == first {
+		t.Error("不同绑定应得到不同会话")
+	}
+	// 旧键迁移：映射表改以 conversation id 为键，值仍是原 claude 会话
+	data, err := os.ReadFile(filepath.Join(stateDir, "sessions.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sessions map[string]string
+	if err := json.Unmarshal(data, &sessions); err != nil {
+		t.Fatal(err)
+	}
+	if sessions[first] != "s-legacy" {
+		t.Errorf("旧键未迁移：%v", sessions)
+	}
+	if _, stale := sessions["o9cq80-user"]; stale {
+		t.Errorf("旧键应被移除：%v", sessions)
+	}
+
+	// 一轮对话：迁移后的会话被 --resume 接上，工作目录里的元数据带 conversation/transport
+	if _, err := chat.Handle(context.Background(), first, "在吗"); err != nil {
+		t.Fatal(err)
+	}
+	if argumentAfter(lastArgs, "--resume") != "s-legacy" {
+		t.Errorf("迁移后应续接旧会话：%v", lastArgs)
+	}
+	workspace, err := chat.WorkspaceDir(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := readSessionMetadata(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.ConversationID != first || metadata.Transport != "weixin" {
+		t.Errorf("会话元数据缺映射信息：%+v", metadata)
+	}
+	conversationFile, err := os.ReadFile(filepath.Join(stateDir, "conversations.json"))
+	if err != nil {
+		t.Fatalf("会话实体表未落盘：%v", err)
+	}
+	if !strings.Contains(string(conversationFile), first) || !strings.Contains(string(conversationFile), "s-legacy") {
+		t.Errorf("会话实体表内容不对：%s", conversationFile)
+	}
+
+	// sessions MCP 注入 + 放行
+	mcpData, err := os.ReadFile(filepath.Join(workspace, "mcp.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(mcpData, &document); err != nil {
+		t.Fatal(err)
+	}
+	servers, _ := document["mcpServers"].(map[string]any)
+	if _, ok := servers[claudecfg.MCPServerSessions]; !ok {
+		t.Errorf("应注入 sessions MCP：%v", servers)
+	}
+	settings, _ := claudecfg.SessionSettingsMap(claudecfg.Overrides{}, "mcp__daemon", "mcp__daemon__*", "mcp__sessions", "mcp__sessions__*")["permissions"].(map[string]any)
+	allow, _ := settings["allow"].([]string)
+	if !slices.Contains(allow, "mcp__sessions") {
+		t.Errorf("settings 应放行 sessions MCP：%v", allow)
 	}
 }
