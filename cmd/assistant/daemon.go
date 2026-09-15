@@ -256,9 +256,12 @@ func startDaemonServices(
 	if chat.Bare() {
 		bareLabel = "开（不读 hooks/插件/CLAUDE.md，只用显式 settings 与自举 MCP）"
 	}
-	logf("微信桥对话会话：claude=%s bare=%s 配置根=%s", claudeBin, bareLabel, chat.SessionDir())
-	logf("微信桥会话目录：%s（每个微信会话一个稳定工作目录 <chat-xxxxxxxx>，含 session.json；"+
-		"续聊：cd 该目录后 claude --continue）", chat.StateDir())
+	logf("微信桥对话会话：")
+	logf("  claude   = %s", claudeBin)
+	logf("  bare     = %s", bareLabel)
+	logf("  配置根   = %s", chat.SessionDir())
+	logf("  会话目录 = %s（每个微信会话一个稳定工作目录 <chat-xxxxxxxx>，含 session.json）", chat.StateDir())
+	logf("  续聊     = cd <会话目录> && claude --continue")
 	warnf := func(format string, arguments ...any) {
 		fmt.Fprintf(command.ErrOrStderr(), "警告："+format+"\n", arguments...)
 	}
@@ -269,7 +272,8 @@ func startDaemonServices(
 		// 让每条微信消息静默重试几分钟，这里启动就说清楚
 		check := provider.CheckCredential(command.Context(), providerOverrides)
 		if check.OK() {
-			logf("微信桥 AI 凭据：%s；%s", source, check.Describe())
+			logf("微信桥 AI 凭据：来源 = %s", source)
+			logf("  自检 = %s", check.Describe())
 		} else {
 			warnf("微信桥凭据自检失败：%s", check.Describe())
 			warnf("%s", provider.CredentialHint)

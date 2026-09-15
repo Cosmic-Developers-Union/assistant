@@ -77,6 +77,13 @@ type chatStreamEvent struct {
 	} `json:"message"`
 }
 
+// 事件展示的分行上限：日志一条一行，长结构按缩进 JSON 展开但要封顶。
+const (
+	toolInputLineLimit  = 12
+	toolResultLineLimit = 8
+	toolLineWidth       = 200
+)
+
 // chatClock / thinkingProgressInterval 控制「思考中」进度的播报节流：thinking_tokens
 // 事件每几十毫秒一条，按时间窗播报才既能看到模型在动又不刷屏（测试可替换时钟）。
 var (
@@ -138,7 +145,7 @@ func feedChatStreamLine(outcome *chatOutcome, line []byte, onProgress func(strin
 					progress(onProgress, "思考: "+truncate(singleLine(thinking), 200))
 				}
 			case "tool_use":
-				progress(onProgress, "🔧 "+block.Name+summarizeToolInput(block.Input))
+				progress(onProgress, toolUseLines(block.Name, block.Input))
 			}
 		}
 	case "user":
@@ -146,12 +153,16 @@ func feedChatStreamLine(outcome *chatOutcome, line []byte, onProgress func(strin
 			if block.Type != "tool_result" {
 				continue
 			}
-			body := singleLine(toolResultText(block.Content))
+			body := toolResultText(block.Content)
 			mark := ""
 			if block.IsError {
 				mark = "（错误）"
 			}
-			progress(onProgress, fmt.Sprintf("↩ 工具结果%s（%d 字）：%s", mark, len([]rune(body)), truncate(body, 200)))
+			lines := []string{fmt.Sprintf("↩ 工具结果%s（%d 字）", mark, len([]rune(strings.TrimSpace(body))))}
+			for _, line := range claudecfg.TextLines(body, toolResultLineLimit, toolLineWidth) {
+				lines = append(lines, "  "+line)
+			}
+			progress(onProgress, strings.Join(lines, "\n"))
 		}
 	case "result":
 		applyChatResult(outcome, event)
@@ -189,21 +200,20 @@ func applyChatInit(outcome *chatOutcome, event chatStreamEvent) {
 	}
 }
 
-// describeChatInit 把 init 事件整理成一行会话实况（版本/认证/权限/工具面/MCP）。
+// describeChatInit 把 init 事件整理成**逐行**会话实况：每行一个字段，日志里不出现
+// 长行（版本/认证/权限/工作目录/工具面/MCP 连通状态）。
 func describeChatInit(event chatStreamEvent) string {
-	parts := make([]string, 0, 6)
-	if event.Model != "" {
-		parts = append(parts, "model="+event.Model)
+	lines := []string{"会话已启动"}
+	add := func(label, value string) {
+		if strings.TrimSpace(value) != "" {
+			lines = append(lines, "  "+label+" = "+value)
+		}
 	}
-	if event.ClaudeCodeVersion != "" {
-		parts = append(parts, "claude="+event.ClaudeCodeVersion)
-	}
-	if event.APIKeySource != "" {
-		parts = append(parts, "认证="+event.APIKeySource)
-	}
-	if event.PermissionMode != "" {
-		parts = append(parts, "权限="+event.PermissionMode)
-	}
+	add("model", event.Model)
+	add("claude", event.ClaudeCodeVersion)
+	add("认证", event.APIKeySource)
+	add("权限", event.PermissionMode)
+	add("cwd", event.Cwd)
 	if len(event.Tools) > 0 {
 		mcpTools := 0
 		for _, tool := range event.Tools {
@@ -211,19 +221,15 @@ func describeChatInit(event chatStreamEvent) string {
 				mcpTools++
 			}
 		}
-		parts = append(parts, fmt.Sprintf("工具 %d 个（内建 %d，MCP %d）", len(event.Tools), len(event.Tools)-mcpTools, mcpTools))
-	}
-	if len(event.MCPServers) > 0 {
-		servers := make([]string, 0, len(event.MCPServers))
-		for _, server := range event.MCPServers {
-			servers = append(servers, server.Name+"="+server.Status)
-		}
-		parts = append(parts, "MCP 服务 "+strings.Join(servers, " "))
+		add("工具", fmt.Sprintf("%d 个（内建 %d，MCP %d）", len(event.Tools), len(event.Tools)-mcpTools, mcpTools))
 	}
 	if len(event.Skills) > 0 {
-		parts = append(parts, fmt.Sprintf("skills %d 个", len(event.Skills)))
+		add("skills", fmt.Sprintf("%d 个", len(event.Skills)))
 	}
-	return "会话已启动（" + strings.Join(parts, "；") + "）"
+	for _, server := range event.MCPServers {
+		add("MCP."+server.Name, server.Status)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // brokenMCPServers 汇总未连上的 MCP server（init 事件里的实际状态）。
@@ -241,20 +247,22 @@ func brokenMCPServers(outcome *chatOutcome) string {
 	return strings.Join(broken, " ")
 }
 
-// summarizeToolInput 摘要工具入参：紧凑 JSON（密钥类字段打码），截断。
-func summarizeToolInput(raw json.RawMessage) string {
+// toolUseLines 渲染一次工具调用：名称一行 + 入参的**缩进 JSON 多行**（密钥字段
+// 打码、行数受限）。JSON 原样分行展示，比压成一条长行可读得多。
+func toolUseLines(name string, raw json.RawMessage) string {
+	lines := []string{"🔧 " + name}
 	if len(bytes.TrimSpace(raw)) == 0 {
-		return ""
+		return lines[0]
 	}
 	var value any
 	if err := json.Unmarshal(raw, &value); err != nil {
-		return " " + truncate(singleLine(string(raw)), 160)
+		lines = append(lines, "  "+truncate(singleLine(string(raw)), toolLineWidth))
+		return strings.Join(lines, "\n")
 	}
-	sanitized, err := json.Marshal(claudecfg.MaskJSONValue(value))
-	if err != nil {
-		return ""
+	for _, line := range claudecfg.JSONLines(value, toolInputLineLimit) {
+		lines = append(lines, "  "+line)
 	}
-	return " " + truncate(string(sanitized), 200)
+	return strings.Join(lines, "\n")
 }
 
 // toolResultText 从 tool_result 的 content 里取文本（可能是字符串或内容块数组）。

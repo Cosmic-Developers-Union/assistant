@@ -669,8 +669,9 @@ func checkSessionRuntime(command *cobra.Command, targets []dispatchTarget, log f
 		log(fmt.Sprintf("claude：%s（读不出版本，可能不是 Claude Code CLI）", resolved))
 	}
 	if config.SessionDir != "" {
-		log(fmt.Sprintf("会话配置根：%s（assistant 托管：会话记录与 claude 全局配置都落这里，不读 ~/.claude）",
-			config.SessionDir))
+		// 一行一个事实：日志要能扫，不堆成长句
+		log("会话配置根：" + config.SessionDir)
+		log("  （assistant 托管：会话文本记录与 claude 全局配置都落这里；不读 ~/.claude）")
 	}
 	// 凭据按 provider 去重报告：会话不读 ~/.claude 登录态，没有 provider 凭据就必然失败
 	reported := map[string]bool{}
@@ -687,10 +688,12 @@ func checkSessionRuntime(command *cobra.Command, targets []dispatchTarget, log f
 		reported[name] = true
 		if source := claudecfg.CredentialSource(target.config.Provider); source != "" {
 			// 最小请求实测：凭据/端点不对时在这里就报出来，而不是等每条会话
-			// 重试几分钟（409/401 在日志里是看不见的）
+			// 重试几分钟（401 在日志里是看不见的）
 			check := provider.CheckCredential(command.Context(), target.config.Provider)
+			log("AI 凭据：" + name)
+			log("  来源 = " + source)
 			if check.OK() {
-				log(fmt.Sprintf("AI 凭据：%s（来源 %s）%s", name, source, check.Describe()))
+				log("  自检 = " + check.Describe())
 			} else {
 				warnf("provider %s 的凭据自检失败：%s", name, check.Describe())
 				fmt.Fprintf(command.ErrOrStderr(), "  %s\n", provider.CredentialHint)

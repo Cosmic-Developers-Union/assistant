@@ -231,15 +231,7 @@ func (c *Chat) sessionArgs(sessionID, title string, fresh bool, text, workspace 
 		args = append(args, "--bare")
 	}
 	if fresh || c.config.Debug {
-		// 把「这一轮到底用了什么」直接写进日志：env（密钥打码）、settings/MCP 路径、
-		// 声明的 MCP server 与命令；实际是否连上由 init 事件单独报
-		c.config.Log("对话[%s] 会话配置：%s；model=%s；权限=%s；settings=%s；mcp=%s",
-			shortSession(sessionID), overrides.Describe(),
-			firstNonEmptyString(c.config.Model, overrides.Env["ANTHROPIC_MODEL"], "账号默认"),
-			claudecfg.SettingSources,
-			settingsPath, mcpPath)
-		c.config.Log("对话[%s] MCP 声明：%s", shortSession(sessionID),
-			claudecfg.DescribeMCPServers(c.mcpDocument(overrides)))
+		c.logSessionConfig(sessionID, overrides, settingsPath, mcpPath)
 	}
 	if fresh {
 		args = append(args, "--session-id", sessionID)
@@ -253,6 +245,31 @@ func (c *Chat) sessionArgs(sessionID, title string, fresh bool, text, workspace 
 		args = append(args, "--model", c.config.Model)
 	}
 	return args, nil
+}
+
+// logSessionConfig 逐行打印这一轮的生效配置：每行一个键值，不压成一条长行。
+// env 的密钥打码、settings 只列键名；声明的 MCP server 与实际连通状态分别打印
+// （后者来自 init 事件）。
+func (c *Chat) logSessionConfig(sessionID string, overrides claudecfg.Overrides, settingsPath, mcpPath string) {
+	log := func(format string, arguments ...any) {
+		c.config.Log("对话[%s] "+format, append([]any{shortSession(sessionID)}, arguments...)...)
+	}
+	log("会话配置：model = %s", firstNonEmptyString(c.config.Model, overrides.Env["ANTHROPIC_MODEL"], "账号默认"))
+	log("  权限来源 = %s（--setting-sources）", claudecfg.SettingSources)
+	log("  settings = %s", settingsPath)
+	log("  mcp      = %s", mcpPath)
+	log("  env %d 项：", len(overrides.Env))
+	for _, line := range claudecfg.EnvLines(overrides.Env) {
+		log("    %s", line)
+	}
+	log("  settings %d 项（值不打印）：", len(overrides.Settings))
+	for _, key := range claudecfg.SettingKeys(overrides.Settings) {
+		log("    %s", key)
+	}
+	log("  MCP 声明：")
+	for _, line := range claudecfg.MCPServerLines(c.mcpDocument(overrides)) {
+		log("    %s", line)
+	}
 }
 
 // mcpDocument 组装对话会话的 MCP 文档：自举 daemon MCP + provider 定义的原生
@@ -498,8 +515,12 @@ func (c *Chat) runStreaming(ctx context.Context, args []string, dir string, onPr
 // progressLogger 把会话进度写进 daemon 日志：一行一条，便于 grep「用户在问什么、
 // claude 在做什么、为什么没有回复」。
 func (c *Chat) progressLogger(sessionID string) func(string) {
-	return func(line string) {
-		c.config.Log("对话[%s] %s", shortSession(sessionID), truncate(line, 300))
+	return func(text string) {
+		// 多行事件（初始化实况、工具入参 JSON、工具结果）按行输出，每行都带前缀：
+		// 日志里不出现几百字的长行
+		for _, line := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
+			c.config.Log("对话[%s] %s", shortSession(sessionID), truncate(line, 300))
+		}
 	}
 }
 

@@ -29,7 +29,7 @@ func TestFeedChatStreamLineProgressAndResult(t *testing.T) {
 	}
 	joined := strings.Join(progress, "\n")
 	for _, want := range []string{
-		"会话已启动（model=MiniMax-M3）",
+		"会话已启动\n  model = MiniMax-M3",
 		"claude: 我来查一下 队列状态",
 		"🔧 mcp__daemon__daemon_status",
 		"API 错误：HTTP 401 invalid api key",
@@ -133,16 +133,21 @@ func TestFeedChatStreamInitReportsConfigAndBrokenMCP(t *testing.T) {
 	var outcome chatOutcome
 	initLine := `{"type":"system","subtype":"init","session_id":"s-1","model":"MiniMax-M3[1m]",
 		"claude_code_version":"2.1.270","apiKeySource":"ANTHROPIC_AUTH_TOKEN","permissionMode":"auto",
+		"cwd":"/home/ge/.config/Cosmic-Developers-Union/assistant/chat/chat-940d3155",
 		"tools":["Bash","Edit","mcp__daemon__daemon_status","mcp__MiniMax__search"],
 		"mcp_servers":[{"name":"daemon","status":"connected"},{"name":"MiniMax","status":"failed"}]}`
 	feedChatStreamLine(&outcome, []byte(initLine), func(text string) { progress = append(progress, text) })
 	joined := strings.Join(progress, "\n")
 	for _, want := range []string{
-		"claude=2.1.270",
-		"认证=ANTHROPIC_AUTH_TOKEN",
-		"权限=auto",
-		"工具 4 个（内建 2，MCP 2）",
-		"MCP 服务 daemon=connected MiniMax=failed",
+		"会话已启动",
+		"  model = MiniMax-M3[1m]",
+		"  claude = 2.1.270",
+		"  认证 = ANTHROPIC_AUTH_TOKEN",
+		"  权限 = auto",
+		"  cwd = /home/ge/.config/Cosmic-Developers-Union/assistant/chat/chat-940d3155",
+		"  工具 = 4 个（内建 2，MCP 2）",
+		"  MCP.daemon = connected",
+		"  MCP.MiniMax = failed",
 		"⚠ MCP 服务未就绪：MiniMax=failed",
 	} {
 		if !strings.Contains(joined, want) {
@@ -170,8 +175,11 @@ func TestFeedChatStreamToolUseMasksSecrets(t *testing.T) {
 	if !strings.Contains(joined, "思考: 先看一下队列") {
 		t.Errorf("thinking 块应展示：%s", joined)
 	}
-	if !strings.Contains(joined, "🔧 mcp__gitea__create_issue") || !strings.Contains(joined, `"title":"x"`) {
-		t.Errorf("工具调用应带入参摘要：%s", joined)
+	if !strings.Contains(joined, "🔧 mcp__gitea__create_issue") || !strings.Contains(joined, `"title": "x"`) {
+		t.Errorf("工具调用应带缩进 JSON 入参：%s", joined)
+	}
+	if !strings.Contains(joined, "  {") && !strings.Contains(joined, "  \"title\"") {
+		t.Errorf("入参应按缩进 JSON 分行：%s", joined)
 	}
 	if strings.Contains(joined, "sk-cp-abcdefghijklmn") {
 		t.Errorf("入参里的密钥未打码：%s", joined)
@@ -179,7 +187,7 @@ func TestFeedChatStreamToolUseMasksSecrets(t *testing.T) {
 	if !strings.Contains(joined, "sk-cp-…klmn") {
 		t.Errorf("密钥应显示首尾便于核对：%s", joined)
 	}
-	if !strings.Contains(joined, "↩ 工具结果（7 字）：已创建 #12") {
-		t.Errorf("工具结果应展示：%s", joined)
+	if !strings.Contains(joined, "↩ 工具结果（7 字）") || !strings.Contains(joined, "  已创建 #12") {
+		t.Errorf("工具结果应分行展示：%s", joined)
 	}
 }

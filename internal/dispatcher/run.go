@@ -517,10 +517,20 @@ func RunSession(options SessionOptions) SessionOutcome {
 	if config.Debug {
 		debugProgress(options.OnProgress, "会话命令："+truncateRunes(strings.Join(append([]string{bin}, args...), " "), 800))
 		debugProgress(options.OnProgress, "文本记录："+outcome.TranscriptPath)
-		debugProgress(options.OnProgress, fmt.Sprintf("会话配置：%s", config.Provider.Describe()))
-		debugProgress(options.OnProgress, fmt.Sprintf("会话路径：settings=%s mcp=%s 配置根=%s",
-			options.SettingsPath, options.MCPConfigPath, config.SessionDir))
-		debugProgress(options.OnProgress, "MCP（声明）："+describeSessionMCP(options.MCPConfigPath))
+		debugProgress(options.OnProgress, "会话配置：")
+		for _, line := range claudecfg.EnvLines(config.Provider.Env) {
+			debugProgress(options.OnProgress, "  env."+line)
+		}
+		if keys := claudecfg.SettingKeys(config.Provider.Settings); len(keys) > 0 {
+			debugProgress(options.OnProgress, "  settings（值不打印）："+strings.Join(keys, " "))
+		}
+		debugProgress(options.OnProgress, fmt.Sprintf("  settings = %s", options.SettingsPath))
+		debugProgress(options.OnProgress, fmt.Sprintf("  mcp      = %s", options.MCPConfigPath))
+		debugProgress(options.OnProgress, fmt.Sprintf("  配置根   = %s", config.SessionDir))
+		debugProgress(options.OnProgress, "  MCP 声明：")
+		for _, line := range describeSessionMCP(options.MCPConfigPath) {
+			debugProgress(options.OnProgress, "    "+line)
+		}
 	}
 	command := exec.Command(bin, args...)
 	command.Dir = options.Cwd
@@ -680,20 +690,20 @@ func describeStreamEvent(line string) string {
 	return "（未标注类型）"
 }
 
-// describeSessionMCP 读取生成的会话 MCP 配置并摘要（debug 日志用；密钥打码）。
-func describeSessionMCP(path string) string {
+// describeSessionMCP 读取生成的会话 MCP 配置并展开成逐行说明（debug 日志用；密钥打码）。
+func describeSessionMCP(path string) []string {
 	if strings.TrimSpace(path) == "" {
-		return "（无）"
+		return []string{"（无）"}
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "（读取失败：" + err.Error() + "）"
+		return []string{"（读取失败：" + err.Error() + "）"}
 	}
 	var document map[string]any
 	if err := json.Unmarshal(data, &document); err != nil {
-		return "（解析失败：" + err.Error() + "）"
+		return []string{"（解析失败：" + err.Error() + "）"}
 	}
-	return claudecfg.DescribeMCPServers(document)
+	return claudecfg.MCPServerLines(document)
 }
 
 // truncateRunes 按字符截断（日志用）。

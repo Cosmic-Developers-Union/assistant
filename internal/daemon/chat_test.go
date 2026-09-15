@@ -270,16 +270,16 @@ func TestChatLogsEffectiveConfigWithMaskedSecrets(t *testing.T) {
 	}
 	joined := strings.Join(logs, "\n")
 	for _, want := range []string{
-		"会话配置：env 3 项",
-		"ANTHROPIC_AUTH_TOKEN=sk-cp-…klmn",
-		"ANTHROPIC_BASE_URL=https://api.minimaxi.com/anthropic",
-		"ANTHROPIC_MODEL=MiniMax-M3[1m]",
-		"model=MiniMax-M3[1m]",
-		"settings=",
-		"mcp=",
-		"MCP 声明：",
-		"MiniMax（uvx minimax-coding-plan-mcp [",
-		"MINIMAX_API_KEY=sk-cp-…klmn]",
+		"会话配置：model = MiniMax-M3[1m]",
+		"  env 3 项：",
+		"    ANTHROPIC_AUTH_TOKEN = sk-cp-…klmn",
+		"    ANTHROPIC_BASE_URL = https://api.minimaxi.com/anthropic",
+		"    ANTHROPIC_MODEL = MiniMax-M3[1m]",
+		"  settings = ",
+		"  mcp      = ",
+		"  MCP 声明：",
+		"    MiniMax：uvx minimax-coding-plan-mcp",
+		"      env.MINIMAX_API_KEY = sk-cp-…klmn",
 		"新建会话",
 		"工作目录",
 	} {
