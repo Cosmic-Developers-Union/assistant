@@ -517,8 +517,10 @@ func RunSession(options SessionOptions) SessionOutcome {
 	if config.Debug {
 		debugProgress(options.OnProgress, "会话命令："+truncateRunes(strings.Join(append([]string{bin}, args...), " "), 800))
 		debugProgress(options.OnProgress, "文本记录："+outcome.TranscriptPath)
-		debugProgress(options.OnProgress, fmt.Sprintf("会话配置：settings=%s mcp=%s 配置根=%s",
+		debugProgress(options.OnProgress, fmt.Sprintf("会话配置：%s", config.Provider.Describe()))
+		debugProgress(options.OnProgress, fmt.Sprintf("会话路径：settings=%s mcp=%s 配置根=%s",
 			options.SettingsPath, options.MCPConfigPath, config.SessionDir))
+		debugProgress(options.OnProgress, "MCP（声明）："+describeSessionMCP(options.MCPConfigPath))
 	}
 	command := exec.Command(bin, args...)
 	command.Dir = options.Cwd
@@ -645,7 +647,8 @@ func debugProgress(onProgress func(string), line string) {
 	onProgress("[debug] " + line)
 }
 
-// reportDebug 在 --debug 下把原始事件交出去（截断，避免日志被 base64/大 diff 淹没）。
+// reportDebug 在 --debug 下报一行事件时间线：只写 type/subtype，不堆原始 JSON
+// （base64 与长 diff 会把日志淹掉；原文在会话文本记录里）。
 func (w *streamWriter) reportDebug(line string) {
 	if !w.debug || w.onProgress == nil {
 		return
@@ -654,7 +657,43 @@ func (w *streamWriter) reportDebug(line string) {
 	if trimmed == "" {
 		return
 	}
-	w.onProgress("[debug] 事件 " + truncateRunes(trimmed, 400))
+	w.onProgress("[debug] 事件 " + describeStreamEvent(trimmed))
+}
+
+// describeStreamEvent 提炼 stream-json 单行的事件类型（解析失败只报长度）。
+func describeStreamEvent(line string) string {
+	var event struct {
+		Type    string `json:"type"`
+		Subtype string `json:"subtype"`
+	}
+	if err := json.Unmarshal([]byte(line), &event); err != nil {
+		return fmt.Sprintf("（非 JSON 行，%d 字）", len([]rune(line)))
+	}
+	switch {
+	case event.Type != "" && event.Subtype != "":
+		return event.Type + "/" + event.Subtype
+	case event.Type != "":
+		return event.Type
+	case event.Subtype != "":
+		return "subtype/" + event.Subtype
+	}
+	return "（未标注类型）"
+}
+
+// describeSessionMCP 读取生成的会话 MCP 配置并摘要（debug 日志用；密钥打码）。
+func describeSessionMCP(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return "（无）"
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "（读取失败：" + err.Error() + "）"
+	}
+	var document map[string]any
+	if err := json.Unmarshal(data, &document); err != nil {
+		return "（解析失败：" + err.Error() + "）"
+	}
+	return claudecfg.DescribeMCPServers(document)
 }
 
 // truncateRunes 按字符截断（日志用）。

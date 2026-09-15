@@ -230,6 +230,16 @@ func (c *Chat) sessionArgs(sessionID, title string, fresh bool, text, workspace 
 	if c.config.Bare {
 		args = append(args, "--bare")
 	}
+	if fresh || c.config.Debug {
+		// 把「这一轮到底用了什么」直接写进日志：env（密钥打码）、settings/MCP 路径、
+		// 声明的 MCP server 与命令；实际是否连上由 init 事件单独报
+		c.config.Log("对话[%s] 会话配置：%s；model=%s；权限=%s；settings=%s；mcp=%s",
+			shortSession(sessionID), overrides.Describe(),
+			firstNonEmptyString(c.config.Model, "账号默认"), claudecfg.SettingSources,
+			settingsPath, mcpPath)
+		c.config.Log("对话[%s] MCP 声明：%s", shortSession(sessionID),
+			claudecfg.DescribeMCPServers(c.mcpDocument(overrides)))
+	}
 	if fresh {
 		args = append(args, "--session-id", sessionID)
 	} else {
@@ -242,6 +252,17 @@ func (c *Chat) sessionArgs(sessionID, title string, fresh bool, text, workspace 
 		args = append(args, "--model", c.config.Model)
 	}
 	return args, nil
+}
+
+// mcpDocument 组装对话会话的 MCP 文档：自举 daemon MCP + provider 定义的原生
+// server（同名由 provider 覆盖）。写文件与日志摘要共用，避免两处漂移。
+func (c *Chat) mcpDocument(overrides claudecfg.Overrides) map[string]any {
+	document := map[string]any{
+		"mcpServers": map[string]any{
+			claudecfg.MCPServerDaemon: claudecfg.DaemonMCPServer(claudecfg.AssistantCommand()),
+		},
+	}
+	return claudecfg.MergeMCPServers(document, overrides)
 }
 
 // writeSettings 写入对话会话的独立设置（env + 权限放行 + provider 覆盖，含
@@ -266,12 +287,7 @@ func (c *Chat) writeSettings(overrides claudecfg.Overrides, dir string) (string,
 // 运行中的 daemon，无需地址/令牌参数）；provider 定义的原生 MCP server 一并
 // 合并（同名由 provider 覆盖）。
 func (c *Chat) writeMCPConfig(overrides claudecfg.Overrides, dir string) (string, error) {
-	config := map[string]any{
-		"mcpServers": map[string]any{
-			claudecfg.MCPServerDaemon: claudecfg.DaemonMCPServer(claudecfg.AssistantCommand()),
-		},
-	}
-	claudecfg.MergeMCPServers(config, overrides)
+	config := c.mcpDocument(overrides)
 	data, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
 		return "", err
@@ -456,11 +472,9 @@ func (c *Chat) runStreaming(ctx context.Context, args []string, dir string, onPr
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	for scanner.Scan() {
-		line := scanner.Bytes()
-		if c.config.Debug {
-			c.config.Log("对话[%s] 事件 %s", shortSession(outcome.SessionID), truncate(string(line), 500))
-		}
-		feedChatStreamLine(&outcome, line, onProgress)
+		// 只输出解析后的可读事件行（会话实况/思考/文本/工具/结果/API 错误）；
+		// 需要原始 stream-json 时看文本记录，不在日志里堆 JSON
+		feedChatStreamLine(&outcome, scanner.Bytes(), onProgress)
 	}
 	scanErr := scanner.Err()
 	waitErr := command.Wait()
@@ -527,4 +541,14 @@ func (b *tailBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return string(b.data)
+}
+
+// firstNonEmptyString 返回第一个非空串（日志展示用）。
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }

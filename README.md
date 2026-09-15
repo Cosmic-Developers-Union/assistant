@@ -410,9 +410,11 @@ status/triage     Issue ───────▶  triage issue #N               
 
 | 来源 | 不开 debug | 开 debug |
 | --- | --- | --- |
-| 微信对话 | 收到消息（用户/文本）、`claude: …` 实时文本、`🔧 工具名`、`API 错误：HTTP 401 …`、回复（字数+摘要） | 追加会话命令行、每条 claude 原始 stream 事件（截断）、结束统计（subtype/turns/cost） |
-| 评审/分诊会话 | 会话启动、assistant 文本、`🔧` 工具调用、结果与验证结论 | 追加 `[debug]` 事件行、settings/MCP/文本记录路径、stderr 尾部 |
+| 微信对话 | 收到消息（用户/文本）、`会话已启动（model/认证/权限/工具面/MCP 状态）`、`思考: …`、`claude: …` 实时文本、`🔧 工具名 入参摘要`、`↩ 工具结果`、`API 错误：HTTP 401 …`、回复（字数+摘要）；MCP 未连上单独 `⚠` 告警 | 追加生效配置（env 逐项、settings/MCP 路径、声明的 MCP server 与命令）、新建会话的 session id 与工作目录、结束统计（subtype/turns/cost） |
+| 评审/分诊会话 | 会话启动、assistant 文本、`🔧` 工具调用、结果与验证结论 | 追加生效配置（同上，密钥打码）、`[debug] 事件 type/subtype` 时间线、settings/MCP/文本记录路径、stderr 尾部 |
 | 启动自检 | claude 版本、会话配置根、每个 provider 的凭据来源 + 端点实测结果 | 同上（自检始终实测端点，与 debug 无关） |
+
+日志一律**解析后**输出，不堆原始 stream-json：未知事件只写 `事件 type/subtype`，需要原文时看会话文本记录。密钥类字段（`*_TOKEN`/`*_KEY`/`*_SECRET`…`）只留前 6 与后 4 位（`sk-cp-…klmn`），端点、模型名这类调试必需的值原样展示。
 
 对话会话用 `--output-format stream-json --verbose`：claude 的每条消息（文本、工具调用、API 报错）都会**实时**落到 daemon 日志，所以「发了消息没反应」时直接 `docker compose logs -f` 就能看到卡在哪一步（模型拒绝、认证失败、还是工具在跑）。
 
@@ -472,6 +474,7 @@ assistant review 42 --docker-image ...     # 一次性调试同样支持
 ```
 
 - 镜像定义在 `images/review/Dockerfile`：gitea runner 基础镜像 + bun/skills CLI、Claude Code、Go 工具链与常用构建工具，缓存目录统一到 `/root`。
+- **uv/uvx 目录必须指到挂载目录**：容器里 `$HOME` 只挂了部分子目录，uv 默认的 `~/.local/share/uv` 不可写（`uvx` 直接 EACCES，基于 uv 的 MCP 会以 `MCP 服务 X=failed` 的形式失败）。compose 已设 `UV_TOOL_DIR`/`UV_TOOL_BIN_DIR`/`UV_PYTHON_INSTALL_DIR`；换基座镜像时别忘了这几个。
 - **路径一致挂载**：worktree、会话 `--settings`/`--mcp-config` 所在目录与 assistant 二进制按相同绝对路径挂进容器（MCP 就是 `assistant mcp gitea`，所以镜像不必自带 assistant），claude 的 `--mcp-config`、`--settings`、`--plugin-dir` 等参数无需改写；`.claude/` 已由 dispatcher 把 PR 自带的那份删掉、再以宿主基线覆盖（基线没有就留空，协议由 assistant 注入）。
 - **认证透传**：`ANTHROPIC_*` / `CLAUDE_*` 及代理变量按白名单 `-e KEY` 从宿主环境继承，其余环境不进容器。
 - **超时兜底**：SIGTERM docker 客户端不会停容器，dispatcher 额外按容器名执行 `docker kill`。

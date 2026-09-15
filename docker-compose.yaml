@@ -54,6 +54,12 @@ services:
       npm_config_cache: ${HOME}/.cache/npm
       PIP_CACHE_DIR: ${HOME}/.cache/pip
       UV_CACHE_DIR: ${HOME}/.cache/uv
+      # uv/uvx 的工具与解释器目录：容器里 $HOME 只挂了部分子目录，默认的
+      # ~/.local/share/uv 不可写（uvx 直接 EACCES，MCP 起不来且只表现为
+      # init 事件里的 "MCP 服务 X=failed"），必须指到挂载目录内
+      UV_TOOL_DIR: ${HOME}/.local/share/Cosmic-Developers-Union/assistant/uv/tools
+      UV_TOOL_BIN_DIR: ${HOME}/.local/share/Cosmic-Developers-Union/assistant/uv/bin
+      UV_PYTHON_INSTALL_DIR: ${HOME}/.cache/uv/python
       CARGO_HOME: ${HOME}/.cargo
       RUSTUP_HOME: ${HOME}/.rustup
       PATH: /usr/local/go/bin:${HOME}/go/bin:${HOME}/.bun/bin:/usr/local/bin:/usr/bin:/bin
