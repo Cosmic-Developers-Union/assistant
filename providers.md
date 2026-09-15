@@ -16,11 +16,7 @@
 }
 ```
 
-或**一个 provider 一个文件** `<配置目录>/providers/zhipu.json`：
-
-```json
-{ "api_key": "your-zai-api-key" }
-```
+provider 只有 `config.json` 这一个落点（`<配置目录>/providers/*.json` 已不再读取）。
 
 内置预设一览（别名同样可用；`api_key`/`auth_token` 写哪个都行）：
 

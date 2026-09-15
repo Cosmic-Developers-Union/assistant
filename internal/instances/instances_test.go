@@ -360,91 +360,37 @@ func TestEffectiveOverridesComposition(t *testing.T) {
 	}
 }
 
-// 一个 provider 一个文件：<配置目录>/providers/<name>.json；与内联合并、
-// 重名报错、Save 不把文件供应商内联回 config.json。
-func TestProviderFiles(t *testing.T) {
+// provider 只有一个落点：config.json 的 providers。遗留的 <配置目录>/providers/
+// 目录不再被读取，也不影响加载（迁移提示由 assistant validate 给出）。
+func TestProviderFileDirectoryIsIgnored(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "providers"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	configPath := filepath.Join(dir, "config.json")
-	config := `{"default_provider": "opencode",
-		"instances": [{"host": "https://gitea.example.com", "repos": [{"name": "owner/repo", "provider": "opencode"}]}]}`
+	config := `{"providers": {"opencode": {"api_key": "sk-zen"}},
+		"instances": [{"host": "https://gitea.example.com", "repos": [{"name": "owner/repo"}]}]}`
 	if err := os.WriteFile(configPath, []byte(config), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	providerFile := `{
-		"env": {"ANTHROPIC_BASE_URL": "https://opencode.ai/zen", "ANTHROPIC_AUTH_TOKEN": "sk-zen"},
-		"settings": {"model": "claude-sonnet-5"},
-		"mcp": {"search": {"command": "search-mcp"}}
-	}`
-	if err := os.WriteFile(filepath.Join(dir, "providers", "opencode.json"), []byte(providerFile), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "providers", "opencode.json"), []byte("{"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// 非 json 文件与隐藏文件忽略
-	if err := os.WriteFile(filepath.Join(dir, "providers", "notes.md"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
 	file, err := Load(configPath)
 	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if names := file.ProviderFileNames(); len(names) != 1 || names[0] != "opencode" {
-		t.Fatalf("ProviderFileNames() = %v", names)
+		t.Fatalf("遗留 providers/ 目录不该影响加载：%v", err)
 	}
 	provider, ok := file.LookupProvider("opencode")
-	if !ok || provider.Env["ANTHROPIC_BASE_URL"] != "https://opencode.ai/zen" {
-		t.Fatalf("文件 provider 未生效：%+v ok=%v", provider.Env, ok)
+	if !ok || provider.Token() != "sk-zen" {
+		t.Fatalf("config.json 内联 provider 未生效：%+v ok=%v", provider, ok)
 	}
-	overrides, err := file.EffectiveOverrides("opencode")
-	if err != nil {
-		t.Fatalf("EffectiveOverrides: %v", err)
-	}
-	if overrides.Env["ANTHROPIC_AUTH_TOKEN"] != "sk-zen" || overrides.Env["ANTHROPIC_BASE_URL"] != "https://opencode.ai/zen" {
-		t.Errorf("EffectiveOverrides = %+v", overrides.Env)
-	}
-	// 保存后不把文件供应商内联，重新加载仍然工作（不会重名冲突）
-	if err := Save(configPath, file); err != nil {
+	// providers/ 里的名字不会被当成已定义（否则会静默用错来源）
+	if err := os.WriteFile(configPath, []byte(`{"default_provider": "only-in-file",
+		"instances": [{"host": "https://gitea.example.com", "repos": []}]}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(raw), "sk-zen") {
-		t.Errorf("文件 provider 被写回 config.json：\n%s", raw)
-	}
-	if _, err := Load(configPath); err != nil {
-		t.Fatalf("保存后重新加载失败：%v", err)
-	}
-
-	// 内联重名报错
-	duplicate := `{"providers": {"opencode": {"env": {"A": "b"}}},
-		"instances": [{"host": "https://gitea.example.com", "repos": []}]}`
-	if err := os.WriteFile(configPath, []byte(duplicate), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Load(configPath); err == nil || !strings.Contains(err.Error(), "重名") {
-		t.Fatalf("重名应报错，got %v", err)
-	}
-
-	// 空文件 / 坏 JSON 报错并给出路径
-	if err := os.WriteFile(configPath, []byte(`{"instances": [{"host": "https://gitea.example.com", "repos": []}]}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	providerPath := filepath.Join(dir, "providers", "opencode.json")
-	if err := os.WriteFile(providerPath, []byte("  \n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Load(configPath); err == nil || !strings.Contains(err.Error(), "opencode.json") {
-		t.Fatalf("空文件应报错并含路径，got %v", err)
-	}
-	if err := os.WriteFile(providerPath, []byte("{"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Load(configPath); err == nil || !strings.Contains(err.Error(), "opencode.json") {
-		t.Fatalf("坏 JSON 应报错并含路径，got %v", err)
+	if _, err := Load(configPath); err == nil || !strings.Contains(err.Error(), "未在 providers 中定义") {
+		t.Fatalf("文件里的 provider 不该被认出，got %v", err)
 	}
 }
 

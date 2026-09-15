@@ -54,6 +54,8 @@ assistant completion fish > ~/.config/fish/completions/assistant.fish
 
 ## 多实例配置（config.json）
 
+落点只有两个文件：**`config.json` 是用户配置**（平台、仓库、provider、微信桥——你手写），**`credentials.json` 由 assistant 管理**（`login`/`setup` 派生的身份与用途令牌，别手改）。
+
 不指定配置文件时，所有命令维持环境变量单实例模式（`GITEA_HOST` / `GITEA_ACCESS_TOKEN` / `GITEA_REPOSITORY`）。要同时管理多台 Gitea、多个仓库，写一份 `config.json`。查找顺序：`--config` > `ASSISTANT_CONFIG` > 平台标准配置目录 `<UserConfigDir>/Cosmic-Developers-Union/assistant/config.json`（Linux `~/.config`、macOS `~/Library/Application Support`、Windows `%AppData%`）；**不读当前目录 `config.json`**（避免检出里的同名文件被误当运行配置），示例见 `config.example.json`。机器人命令与调度命令都会按 instance × repo 迭代：
 
 凭据**不在** `config.json` 里：本地身份与用途令牌写在同目录的 `credentials.json`（0600，位置可用 `ASSISTANT_CREDENTIALS` 覆盖；`assistant login list` 查看），`config.json` 只描述管理哪些实例与仓库。
@@ -74,7 +76,7 @@ assistant completion fish > ~/.config/fish/completions/assistant.fish
 }
 ```
 
-`config.json` **不含任何令牌**（登录与 setup 写入的凭据都在 `credentials.json`）：
+`config.json` **不含 Gitea 令牌**（登录与 setup 派生的凭据都在 `credentials.json`）；AI 供应商的 `api_key` 属于用户配置，就写在 `providers` 里：
 
 - `reviewer`（`ai`）：内容评审者账号名。
 - `merger`（`merge`）：状态评审者（会签/合并）账号名。
@@ -82,7 +84,7 @@ assistant completion fish > ~/.config/fish/completions/assistant.fish
 - `provider`（可选）：生效的供应商名，逐级回退 `repo.provider` > `instance.provider` > `default_provider`；定义与用法见下文「多 provider（供应商）」。
 - 路径默认值按仓库隔离：日志 `<检出>/logs`、锁 `<检出>/dispatcher.lock`、worktree `<临时目录>/agent-dispatcher/<owner>-<repo>/worktrees`。
 - 机器人账号的令牌在凭据库里按 `(host, 账号, purpose=review|merge)` 唯一存放（一个站点一个账号一条令牌）。
-- 文件含令牌，`setup` 以 0600 写入；请勿提交到版本库（`.gitignore` 已忽略常见位置，建议自行确认）。
+- `config.json` 含 provider 的 `api_key`、`credentials.json` 含 Gitea 令牌，都以 0600 写入，请勿提交到版本库（`.gitignore` 已忽略常见位置，建议自行确认）。
 
 ### 多 provider（供应商）
 
@@ -111,7 +113,7 @@ assistant completion fish > ~/.config/fish/completions/assistant.fish
 
 选择粒度逐级回退：`repo.provider` > `instance.provider` > `default_provider`；微信对话桥用 `weixin.provider`（缺省回退 `default_provider`）。引用了未定义的名字直接报错，不会静默用错供应商。改完配置先跑 `assistant validate`：它会指出没被任何地方引用的 provider（配了但没生效）、缺 `api_key` 的 provider、缺身份或用途令牌的平台。
 
-供应商定义也可以一个 provider 一个文件放在 `<配置目录>/providers/<名字>.json`（内容即 provider 对象，适合不想把密钥写进 `config.json` 的场合；两处重名报错，文件供应商不会被写回 `config.json`）。
+**provider 只有 `config.json` 一个落点**（它就是用户配置）；`<配置目录>/providers/` 目录不再被读取，遗留文件会在 `assistant validate` 里报出来。
 
 `optimizations` 是跨供应商通用的全局优化点（同 `env`/`settings`/`mcp` 三段）：对所有会话打底生效，选中 provider 的同名取值覆盖其上（`repo.provider` 亦不例外）。适合放时长、上下文窗口、遥测开关、子 agent 模型等横向调优：
 
@@ -128,7 +130,7 @@ assistant completion fish > ~/.config/fish/completions/assistant.fish
 
 **只作用于运行时会话**：provider 覆盖进评审/分诊/对话会话的临时 `--settings` 与 `--mcp-config`，绝不写入仓库 `.claude/settings.json`/`.mcp.json`——密钥不进 git，仓库保持供应商无关。`run --dry-run` 会打印每个目标生效的 provider 与覆盖项数（值不落日志）。
 
-供应商定义也可以**一个 provider 一个文件**放在 `<配置目录>/providers/<名字>.json`（内容即 provider 对象，适合不想把密钥写进 `config.json` 的场合；两处重名报错；文件供应商不会被写回 `config.json`）。少数供应商需要在会话启动时做动态调整（例如 opencode 网关要求的 `x-opencode-session` 会话请求头，经 `ANTHROPIC_CUSTOM_HEADERS` 注入）：这由代码级特化处理——`internal/provider/` 下一个供应商一个文件，实现 `Handler` 并在 `init` 注册，即可在会话启动前读写 `env`/`settings`/`mcp`；没有注册 handler 的 provider 原样通过。
+少数供应商需要在会话启动时做动态调整（例如 opencode 网关要求的 `x-opencode-session` 会话请求头，经 `ANTHROPIC_CUSTOM_HEADERS` 注入）：这由代码级特化处理——`internal/provider/` 下一个供应商一个文件，实现 `Handler` 并在 `init` 注册，即可在会话启动前读写 `env`/`settings`/`mcp`；没有注册 handler 的 provider 原样通过。
 
 ### 平台管理：assistant login
 

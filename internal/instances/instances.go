@@ -1,9 +1,7 @@
-// Package instances 管理多实例配置文件（config.json）。
-//
-// 一个 instance 对应一台 Gitea 站点；每个 instance 登记仓库清单与三类凭据：
-// admin（高权限，读分支保护 + setup 操作用）、reviewer（内容评审机器人）、
-// merger（状态评审/合并机器人）。setup 命令负责创建后两类账号与令牌，并把
-// 结果回写本文件；其余命令按 instance × repo 迭代执行。
+// Package instances 管理用户配置文件 config.json：平台（instance）、仓库清单、
+// AI 供应商（providers/optimizations）、微信桥与默认 provider——全部由用户手写。
+// 凭据不在这里：本地身份与用途令牌由 assistant 管理在 credentials.json
+// （internal/credentials，login/setup 派生）。其余命令按 instance × repo 迭代执行。
 package instances
 
 import (
@@ -44,9 +42,6 @@ type File struct {
 	// 会话生效，选中 provider 的同名覆盖其上；适合放跨供应商通用的调优
 	// （时长、上下文窗口、遥测开关等）。
 	Optimizations Provider `json:"optimizations,omitempty"`
-	// fileProviders 是 <配置目录>/providers/*.json 加载的供应商（一个文件一个
-	// provider，文件名即名字）：不写回 config.json，避免任何保存动作把它们内联。
-	fileProviders map[string]Provider
 }
 
 // Weixin 是微信对话桥（Tencent/openclaw-weixin 兼容 ilink 协议）的配置。
@@ -304,8 +299,8 @@ func (i Instance) FindRepo(name string) (Repo, bool) {
 	return Repo{}, false
 }
 
-// Load 读取并校验配置文件：内联 providers 与 <配置目录>/providers/*.json
-// （一个文件一个 provider，文件名即名字）合并，重名视为配置错误。
+// Load 读取并校验配置文件。provider 定义就在 config.json 的 providers 里——
+// 用户配置只有这一个落点（凭据在 credentials.json，由 assistant 管理）。
 func Load(path string) (*File, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -317,55 +312,11 @@ func Load(path string) (*File, error) {
 	if err := decoder.Decode(&file); err != nil {
 		return nil, fmt.Errorf("解析配置 %s: %w", path, err)
 	}
-	if err := file.loadProviderFiles(filepath.Dir(path)); err != nil {
-		return nil, err
-	}
 	file.Normalize()
 	if err := file.Validate(); err != nil {
 		return nil, fmt.Errorf("配置 %s 无效: %w", path, err)
 	}
 	return &file, nil
-}
-
-// loadProviderFiles 读取 <dir>/providers/*.json：每个文件是一个 provider 定义
-// （与内联 providers 同形态），文件名去 .json 即 provider 名；目录不存在表示
-// 没有文件供应商。文件供应商与内联重名时报错，避免两份定义悄悄打架。
-func (f *File) loadProviderFiles(dir string) error {
-	providersDir := filepath.Join(dir, "providers")
-	entries, err := os.ReadDir(providersDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("读取 %s: %w", providersDir, err)
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".json") {
-			continue
-		}
-		providerName := strings.TrimSuffix(name, ".json")
-		filePath := filepath.Join(providersDir, name)
-		content, err := os.ReadFile(filePath)
-		if err != nil {
-			return fmt.Errorf("读取 %s: %w", filePath, err)
-		}
-		if strings.TrimSpace(string(content)) == "" {
-			return fmt.Errorf("%s 为空：一个文件一个 provider 定义（env/settings/mcp）", filePath)
-		}
-		var provider Provider
-		if err := json.Unmarshal(content, &provider); err != nil {
-			return fmt.Errorf("解析 %s: %w", filePath, err)
-		}
-		if _, inline := f.Providers[providerName]; inline {
-			return fmt.Errorf("providers/%s 与 config.json 的 providers.%s 重名：两处只保留一处", name, providerName)
-		}
-		if f.fileProviders == nil {
-			f.fileProviders = map[string]Provider{}
-		}
-		f.fileProviders[providerName] = provider
-	}
-	return nil
 }
 
 // Save 原子写入配置文件（0600）；先写同目录临时文件再改名，避免半截文件。
@@ -405,13 +356,6 @@ func (f *File) Normalize() {
 			normalized[strings.TrimSpace(name)] = provider.normalized()
 		}
 		f.Providers = normalized
-	}
-	if len(f.fileProviders) > 0 {
-		normalized := make(map[string]Provider, len(f.fileProviders))
-		for name, provider := range f.fileProviders {
-			normalized[strings.TrimSpace(name)] = provider.normalized()
-		}
-		f.fileProviders = normalized
 	}
 	for index := range f.Instances {
 		f.Instances[index].Normalize()
@@ -530,11 +474,6 @@ func (f *File) validateProviders() error {
 			return err
 		}
 	}
-	for name, provider := range f.fileProviders {
-		if err := provider.Validate("providers/" + name + ".json"); err != nil {
-			return err
-		}
-	}
 	reference := func(label, name string) error {
 		if name == "" {
 			return nil
@@ -574,13 +513,10 @@ func (f *File) validateProviders() error {
 	return nil
 }
 
-// providerNames 返回已定义的 provider 名（含文件供应商，排序，报错信息用）。
+// providerNames 返回已定义的 provider 名（排序，报错信息用）。
 func (f *File) providerNames() []string {
-	names := make([]string, 0, len(f.Providers)+len(f.fileProviders))
+	names := make([]string, 0, len(f.Providers))
 	for name := range f.Providers {
-		names = append(names, name)
-	}
-	for name := range f.fileProviders {
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -608,16 +544,12 @@ func (f *File) WeixinProviderName() string {
 	return f.DefaultProvider
 }
 
-// LookupProvider 按名取 provider（内联优先，其次 <配置目录>/providers/ 文件）；
-// 返回是否找到。
+// LookupProvider 按名取 config.json 里定义的 provider；返回是否找到。
 func (f *File) LookupProvider(name string) (Provider, bool) {
 	if name == "" {
 		return Provider{}, false
 	}
-	if provider, ok := f.Providers[name]; ok {
-		return provider, true
-	}
-	provider, ok := f.fileProviders[name]
+	provider, ok := f.Providers[name]
 	return provider, ok
 }
 
@@ -636,16 +568,6 @@ func (f *File) ProviderNameOf(name string) Provider {
 func (f *File) EffectiveOverrides(providerName string) (claudecfg.Overrides, error) {
 	user := f.ProviderNameOf(providerName)
 	return provider.Resolve(providerName, f.Optimizations.Overrides(), user.Overrides(), user.Token())
-}
-
-// ProviderFileNames 返回文件供应商的名字（测试/诊断用）。
-func (f *File) ProviderFileNames() []string {
-	names := make([]string, 0, len(f.fileProviders))
-	for name := range f.fileProviders {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
 }
 
 // Validate 校验单个 instance。必须在 Normalize 之后调用。

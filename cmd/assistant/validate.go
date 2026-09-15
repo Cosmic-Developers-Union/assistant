@@ -197,7 +197,33 @@ func validateConfigFile(path string, file *instances.File) []validateFinding {
 		}
 	}
 
+	findings = append(findings, validateProviderDirectory(path)...)
 	return append(findings, validateCredentials(path, file)...)
+}
+
+// validateProviderDirectory 指出遗留的 <配置目录>/providers/*.json：provider 现在
+// 只有 config.json 一个落点，这些文件不再被读取——必须把定义搬进去，否则会被忽略。
+func validateProviderDirectory(configPath string) []validateFinding {
+	directory := filepath.Join(filepath.Dir(configPath), "providers")
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		names = append(names, strings.TrimSuffix(name, ".json"))
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+	return []validateFinding{{"ERROR", directory, fmt.Sprintf(
+		"%s 已不再被读取：把定义挪进 config.json 的 providers（provider 只有 config.json 这一个落点）",
+		strings.Join(names, "、"))}}
 }
 
 // validateCredentials 检查每个平台的登录身份与用途令牌（只看有无，不打印令牌）。
@@ -286,17 +312,10 @@ func providerReferenceHint() string {
 	return "default_provider / instance.provider / repo.provider / weixin.provider"
 }
 
-// definedProviders 返回所有被定义过的 provider 名（内联 + providers/<名字>.json），排序。
+// definedProviders 返回 config.json 里定义过的 provider 名，排序。
 func definedProviders(file *instances.File) []string {
-	seen := map[string]bool{}
+	names := make([]string, 0, len(file.Providers))
 	for name := range file.Providers {
-		seen[name] = true
-	}
-	for _, name := range file.ProviderFileNames() {
-		seen[name] = true
-	}
-	names := make([]string, 0, len(seen))
-	for name := range seen {
 		names = append(names, name)
 	}
 	sort.Strings(names)

@@ -155,3 +155,24 @@ func TestValidateSurfacesLoadError(t *testing.T) {
 		t.Fatalf("error = %v, want 文件路径", err)
 	}
 }
+
+// 遗留的 <配置目录>/providers/*.json 不再被读取：必须报出来，别让定义被静默忽略。
+func TestValidateReportsLegacyProviderDirectory(t *testing.T) {
+	path := validateFixture(t, validValidateConfig(), []string{"review", "merge", "admin", "mcp"})
+	directory := filepath.Join(filepath.Dir(path), "providers")
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "minimax.json"), []byte(`{"api_key":"x"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout := &bytes.Buffer{}
+	if err := runValidate(stdout, path); err == nil {
+		t.Fatalf("遗留 providers/ 目录应当报错：\n%s", stdout)
+	}
+	output := stdout.String()
+	if !strings.Contains(output, "ERROR     "+directory) ||
+		!strings.Contains(output, "已不再被读取") {
+		t.Errorf("缺少迁移提示：\n%s", output)
+	}
+}
