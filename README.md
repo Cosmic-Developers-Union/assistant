@@ -494,23 +494,6 @@ WantedBy=multi-user.target
 
 每个待办一个归档：`logs/<kind>-<number>-<时间戳>.log`——起始提示词、worktree/head、会话 init、实时进度（assistant 文本与 `🔧` 工具调用）、结果 JSON（turns、cost、permission denials）、验证结论。
 
-## AI 网关（`cmd/ai-gateway`）
-
-套件内的自托管 Anthropic Messages 网关（同仓库、独立进程/镜像）：统一上游厂商
-接入、按路由链故障转移，核心是**跨客户端的会话识别与厂商化注入**（Claude Code 的
-`metadata.user_id`、opencode 的 `x-opencode-session`、Fireworks/Cloudflare 的
-`x-session-affinity`、OpenAI 兼容的 `prompt_cache_key`，以及无客户端配合时的内容
-确定性派生）——这是 LiteLLM/new-api 等通用网关不具备的能力。
-
-```bash
-make gateway                                  # 构建 ./ai-gateway
-cp ai-gateway.example.json ~/.config/Cosmic-Developers-Union/assistant/ai-gateway.json
-./ai-gateway                                  # 缺省监听 127.0.0.1:8780
-```
-
-assistant 侧只加一个 provider（`api_key` + `ANTHROPIC_BASE_URL` 指向网关）即可全量
-走网关。配置参考、会话机制细节、路由与安全说明见 [`ai-gateway.md`](ai-gateway.md)。
-
 ## 形式化规格
 
 - `formal/Dispatcher.lean`：调度语义的 Lean 4 形式化规格（时间线建模、完成判定谓词）。机器检验的性质包括：作者 push 不同代码时完成判定不可能通过（A1）、更新 PR 说明对完成判定无影响（A2）、head 漂移本轮作废、同一待办每次入队至多一个会话、入队受 pending 与并发上限双重守卫。
