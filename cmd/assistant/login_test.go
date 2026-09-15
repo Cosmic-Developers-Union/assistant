@@ -83,6 +83,59 @@ func savePlatform(t *testing.T, path string, instance instances.Instance) {
 	}
 }
 
+// 旧的 tea/OAuth 登记路径只记录身份、不派生 mcp 令牌：必须当场说明，否则用户下次
+// 跑 assistant mcp gitea 会看到"没有匹配的登录凭据"，看起来像工具坏了。
+func TestLegacyLoginAnnouncesMissingMCPCredential(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/user" {
+			t.Errorf("unexpected request: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		fmt.Fprint(w, `{"login":"Ge","is_admin":true}`)
+	}))
+	defer server.Close()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	t.Setenv("ASSISTANT_CREDENTIALS", "")
+
+	var out bytes.Buffer
+	command := newLoginCommand(&path)
+	command.SetOut(&out)
+	command.SetErr(&out)
+	command.SetArgs([]string{server.URL, "--token", "admin-token"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"MCP 工具面还没有凭据", "assistant login " + server.URL + " --user Ge", "--token-file"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("输出缺少 %q：\n%s", want, out.String())
+		}
+	}
+	store, err := credentials.Load(filepath.Join(dir, "credentials.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity, ok := store.IdentityFor(server.URL); !ok || identity.User != "Ge" || !identity.IsAdmin {
+		t.Fatalf("identity = %+v ok=%v", identity, ok)
+	}
+	if _, ok := store.CredentialForUser(server.URL, "Ge", credentials.PurposeMCP); ok {
+		t.Fatal("这条路径不应生成 mcp 令牌")
+	}
+
+	// login list 把「有身份、没 mcp」标成 none(仅身份)，而不是与完全没配过的站点混同
+	out.Reset()
+	savePlatform(t, path, instances.Instance{Host: server.URL, AdminToken: "admin-token"})
+	list := newLoginListCommand(&path)
+	list.SetOut(&out)
+	if err := list.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "mcp=none(仅身份)") || !strings.Contains(out.String(), "identity=@Ge(admin)") {
+		t.Fatalf("login list 输出 = %q", out.String())
+	}
+}
+
 func TestLoginListAndRemove(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")

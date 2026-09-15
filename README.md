@@ -160,6 +160,8 @@ assistant auth remove https://gitea.example.com                # 清除本地凭
 assistant login https://gitea.example.com     # 优先复用 tea CLI 登录（--token 可显式指定），否则 OAuth 写入/刷新 admin_oauth
 ```
 
+这条路径**只登记平台与身份，不派生 mcp 令牌**：Gitea 的建令牌端点 `POST /api/v1/users/{user}/tokens` 只接受账号自己的密码（Basic Auth），OAuth/tea 令牌调用会被拒。此时 `login list` 显示 `mcp=none(仅身份)`，`assistant mcp gitea` 会提示补登录——运行 `assistant login <host> --user <账号>` 即可，之后 `assistant auth status` 会列出 `purpose=mcp`。
+
 host 可省略：取配置中唯一实例，否则在带 Gitea remote 的检出内探测（`/api/v1/version`，多 remote 逐个尝试）。**登录优先复用本机 tea CLI 在该站点的登录令牌**（读 `~/.config/tea/config.yml`，可用 `TEA_CONFIG` 覆盖；只读，不做网络探测），没有时走 OAuth。OAuth 默认复用 Gitea 内置 `tea` 公共客户端（回调 `http://127.0.0.1:<随机端口>`，公共客户端允许任意 loopback 端口）；`--oauth-client-id/--oauth-client-secret` 可换成自建应用（confidential 应用需提供密钥），`--oauth-scope` 指定授权 scope（缺省不带）。Gitea 会拒绝与已有授权记录 scope 不一致的请求（`a grant exists with different scope`）：到 `<host>/user/settings/applications` 撤销旧授权，或用 `--oauth-scope` 与旧记录对齐。
 
 ### 仓库初始化：assistant init

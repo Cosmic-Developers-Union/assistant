@@ -189,6 +189,14 @@ func recordIdentity(host, configPath, user string, isAdmin bool, logf func(strin
 	if !isAdmin {
 		logf("账号 @%s 不是实例管理员：setup/init/actions 与机器人凭据不可用（仅 MCP 工具面）", user)
 	}
+	// 这条登记路径（tea/OAuth）只能记录身份，无法派生 mcp 令牌：Gitea 的建令牌端点
+	// 只接受账号密码的 Basic Auth。不说明的话，MCP 会在下一次使用时以「没有匹配的
+	// 登录凭据」失败，看起来像工具坏了。
+	if _, ok := file.CredentialForUser(host, user, credentials.PurposeMCP); !ok {
+		logf("提示：MCP 工具面还没有凭据（本次只登记了身份）。运行 "+
+			"assistant login %s --user %s 派生 mcp 长期令牌，或用 --user %s --token-file <文件> 录入已有令牌",
+			host, user, user)
+	}
 }
 
 // resolveLoginToken 解析登录令牌：显式 --token 优先，否则复用 tea CLI 配置中
@@ -321,6 +329,10 @@ func describeMCPCredential(store *credentials.File, instance instances.Instance)
 			return "token@" + instance.MCPUser + "(legacy)"
 		}
 		return "token(legacy)"
+	}
+	// 有身份、没 mcp 令牌：旧的 tea/OAuth 登记路径留下的状态，明确标出来
+	if _, ok := store.IdentityFor(instance.Host); ok {
+		return "none(仅身份)"
 	}
 	return "none"
 }
