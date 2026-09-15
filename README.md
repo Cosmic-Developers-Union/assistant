@@ -12,7 +12,8 @@
 | 命令 | 角色 | 说明 |
 | --- | --- | --- |
 | `assistant setup` | 初始化 | 建机器人账号/令牌、配协作者与分支保护、补齐标签，并写入 `config.json` |
-| `assistant login` | 初始化 | OAuth 登录登记/刷新平台（写入 `admin_oauth`）；`login list`/`login remove` 管理平台 |
+| `assistant login` | 初始化 | `--user` 身份登录：校验账号（含是否管理员）并自动创建/复用 `(host, user, mcp)` 长期令牌；不带身份参数时保持 tea / OAuth 登记 |
+| `assistant auth` | 初始化 | 本地凭据库（`credentials.json`）管理：`status` 查看身份与用途令牌、`rotate` 轮换 mcp 令牌、`remove` 清除记录 |
 | `assistant repos` | 初始化 | 管理 `config.json` 中登记的仓库：`list` / `add --dir` / `remove`（只改本地，不触碰服务端） |
 | `assistant init` | 初始化 | 只初始化当前仓库：复用平台凭据与 ai/merge 账号，配保护/标签/secret，并自动登记进 `config.json` |
 | `assistant deinit` | 初始化 | init 的反命令：从 `config.json` 移除当前仓库；`--purge` 同清理服务端（保护/协作者/secret） |
@@ -54,6 +55,8 @@ assistant completion fish > ~/.config/fish/completions/assistant.fish
 ## 多实例配置（config.json）
 
 不指定配置文件时，所有命令维持环境变量单实例模式（`GITEA_HOST` / `GITEA_ACCESS_TOKEN` / `GITEA_REPOSITORY`）。要同时管理多台 Gitea、多个仓库，写一份 `config.json`。查找顺序：`--config` > `ASSISTANT_CONFIG` > 平台标准配置目录 `<UserConfigDir>/Cosmic-Developers-Union/assistant/config.json`（Linux `~/.config`、macOS `~/Library/Application Support`、Windows `%AppData%`）；**不读当前目录 `config.json`**（避免检出里的同名文件被误当运行配置），示例见 `config.example.json`。机器人命令与调度命令都会按 instance × repo 迭代：
+
+凭据**不在** `config.json` 里：本地身份与用途令牌写在同目录的 `credentials.json`（0600，位置可用 `ASSISTANT_CREDENTIALS` 覆盖；`assistant auth status` 查看），`config.json` 只描述管理哪些实例与仓库。
 
 ```json
 {
@@ -132,12 +135,29 @@ assistant completion fish > ~/.config/fish/completions/assistant.fish
 
 ### 平台管理：assistant login
 
-`login` 只负责平台条目与 OAuth 凭据，不做账号/仓库初始化（那是 `setup`）：
+`login` 只负责身份/平台条目与凭据，不做账号/仓库初始化（那是 `setup`）。**主要入口是身份登录**：
+
+```bash
+# 身份登录（推荐）：校验账号 + 管理员身份，自动创建/复用该身份的 mcp 长期令牌
+assistant login https://gitea.example.com --user alice
+assistant login https://gitea.example.com --user alice --token-file ~/mcp-token   # 录入已有专用令牌
+assistant login https://gitea.example.com --user alice --password-stdin --totp 123456  # 非交互/双因素
+
+assistant login list                          # 列出平台：凭据类型（oauth/token/none）、仓库数、ai/merge 账号、身份、mcp
+assistant login remove https://gitea.example.com   # 移除平台条目（不触碰 Gitea 侧账号/仓库）
+assistant auth status                         # 查看本地身份（是否管理员）与各用途令牌（末 8 位）
+assistant auth rotate https://gitea.example.com --user alice   # 轮换 mcp 令牌（同名旧令牌在站点上删除）
+assistant auth remove https://gitea.example.com                # 清除本地凭据记录（不动远端令牌）
+```
+
+身份登录确定两件事：**这台站点以谁登录**（写入凭据库的 `identity`，含 `is_admin`），以及**派生哪些用途令牌**。当前派生 `purpose=mcp`：名称按 `assistant-mcp-<host>-<账号>` 确定性生成，重复登录只要旧令牌仍然有效就原样复用（不新建、不需要密码），失效时才轮换重建，因此不会越登越多。scope 为 `read:repository`、`write:repository`、`read:issue`、`write:issue`、`read:user`（不含 organization/package）。
+
+**能力边界**：非管理员账号同样可以登录并使用 MCP 工具面，但 `setup`/`init`/`actions` 等管理操作会直接拒绝——登录时记录的是身份事实，授权判定仍以服务端为准（`setup.NewAdmin` 在线核对 `is_admin`）。review/merge 能力属于 `setup` 创建的 `ai`/`merge` 机器人账号（协作者权限、`MERGE_TOKEN` secret、分支保护与合并白名单），因此同样只由管理员开通。需要管理能力就用管理员账号登录，或显式提供 `--admin-token` / `--admin-user` / `--oauth`。
+
+不带身份参数时保持旧的平台登记流程：
 
 ```bash
 assistant login https://gitea.example.com     # 优先复用 tea CLI 登录（--token 可显式指定），否则 OAuth 写入/刷新 admin_oauth
-assistant login list                          # 列出平台：凭据类型（oauth/token/none）、仓库数、ai/merge 账号
-assistant login remove https://gitea.example.com   # 移除平台条目（不触碰 Gitea 侧账号/仓库）
 ```
 
 host 可省略：取配置中唯一实例，否则在带 Gitea remote 的检出内探测（`/api/v1/version`，多 remote 逐个尝试）。**登录优先复用本机 tea CLI 在该站点的登录令牌**（读 `~/.config/tea/config.yml`，可用 `TEA_CONFIG` 覆盖；只读，不做网络探测），没有时走 OAuth。OAuth 默认复用 Gitea 内置 `tea` 公共客户端（回调 `http://127.0.0.1:<随机端口>`，公共客户端允许任意 loopback 端口）；`--oauth-client-id/--oauth-client-secret` 可换成自建应用（confidential 应用需提供密钥），`--oauth-scope` 指定授权 scope（缺省不带）。Gitea 会拒绝与已有授权记录 scope 不一致的请求（`a grant exists with different scope`）：到 `<host>/user/settings/applications` 撤销旧授权，或用 `--oauth-scope` 与旧记录对齐。
@@ -329,23 +349,23 @@ Claude 的项目级 `.claude/settings.json` 是**增量托管**：只写下面�
 所有 MCP 配置都指向 `assistant mcp gitea`（不写死 token）：
 
 - host：`--host` > `GITEA_HOST` > 多 remote 探测（origin 优先，`/api/v1/version` 判定 Gitea）；
-- token：`--token` > `GITEA_ACCESS_TOKEN` > `GITEA_ACCESS_TOKEN_FILE` > 当前实例的 `mcp_token`。显式 token 文件缺失或为空时直接报错。
-- 实例配置：`--config` > `ASSISTANT_CONFIG` > `~/.config/Cosmic-Developers-Union/assistant/config.json`。MCP 凭据独立于管理、reviewer、merge 和 tea 凭据。评审会话由 dispatcher 显式注入 `GITEA_HOST` / `GITEA_ACCESS_TOKEN` / `ASSISTANT_CONFIG`，不走上表的 `mcp_token` 回退。
+- token：`--token` > `GITEA_ACCESS_TOKEN` > `GITEA_ACCESS_TOKEN_FILE` > 凭据库中该站点的 `mcp` 令牌 > `config.json` 的 `mcp_token`（旧版字段，兼容读取）。显式 token 文件缺失或为空时直接报错。
+- 实例配置：`--config` > `ASSISTANT_CONFIG` > `~/.config/Cosmic-Developers-Union/assistant/config.json`；凭据库默认与其同目录（`ASSISTANT_CREDENTIALS` 可覆盖）。MCP 凭据独立于管理、reviewer、merge 和 tea 凭据。评审会话由 dispatcher 显式注入 `GITEA_HOST` / `GITEA_ACCESS_TOKEN` / `ASSISTANT_CONFIG`，不走上表的 `mcp` 回退。
 
-每个实例登录一次，assistant 用密码认证创建专用长期令牌（隐藏输入密码，不保存密码）：
+每个实例以开发者自己的账号登录一次，assistant 自动创建/复用专用长期令牌（密码只用于本次认证，不落盘）：
 
 ```sh
-assistant login https://gitea-a.example.com --mcp --user alice
-assistant login https://gitea-b.example.com --mcp --user bob
-# 已有专用个人令牌也可从文件录入
-assistant login https://gitea-a.example.com --mcp --token-file /path/to/mcp-token
+assistant login https://gitea-a.example.com --user alice
+assistant login https://gitea-b.example.com --user bob
+# 已有专用个人令牌也可录入（--user 是身份断言）
+assistant login https://gitea-a.example.com --user alice --token-file /path/to/mcp-token
 ```
 
-`--user` 缺省可取同站点 tea 登录里的用户名；不安装 tea 时直接指定即可。非交互环境支持 `--password-stdin`，双因素认证使用 `--totp`。也支持 `--token` / `--token-file` 手动录入（与 `--password-stdin`、`--totp`、`--token-name` 互斥）。登录后用令牌调用 `/api/v1/user` 校验身份并落盘为 `mcp_token` + `mcp_user`：录入时给出 `--user` 即身份断言，令牌属于别的账号会报错且不写配置；只更新目标实例的这两个字段。
+`--user` 缺省可取同站点 tea 登录里的用户名；不安装 tea 时直接指定即可。非交互环境支持 `--password-stdin`，双因素认证使用 `--totp`。令牌名按 `assistant-mcp-<host>-<账号>` 确定性派生（`--token-name` 可覆盖），scope 为 `read:repository`、`write:repository`、`read:issue`、`write:issue`、`read:user`。旧令牌仍然有效时原样复用；失效或 `assistant auth rotate` 时先删除站点上的同名旧令牌再新建，因此每个 (站点, 账号, 用途) 始终只有一条。身份与令牌写在 `credentials.json`：`assistant auth status` 可查看（只显示末 8 位）。
 
-新建令牌名默认为 `assistant-mcp-<随机后缀>`（`--token-name` 可覆盖），权限为 `write:repository`、`write:issue`、`write:organization`、`write:package`、`read:user`，覆盖默认 MCP 工具。不删除账号已有令牌；重新创建后旧令牌需要自行在 Gitea Applications 页面撤销。创建成功但本地保存失败会提示新令牌名称。
+旧版写在 `config.json` 实例条目里的 `mcp_token` / `mcp_user` 仍可读；下次身份登录会把它们迁移进凭据库并清掉，避免两处副本。
 
-普通 `assistant login` 保持兼容 tea / OAuth 的平台登记流程；MCP 只使用自己的长期个人令牌，不复制 tea、管理员、reviewer 或 merge 凭据。MCP 未配置专用令牌时提示登录命令，stdio 启动不交互式等待密码或浏览器。Gitea 密码认证不支持的账号（例如部分 SSO 配置）可在 Applications 页面创建专用令牌后录入。
+Gitea 密码认证不支持的账号（例如部分 SSO 配置）可在 Applications 页面创建专用令牌后用 `--token`/`--token-file` 录入。MCP 未配置专用令牌时提示登录命令，stdio 启动不交互式等待密码或浏览器。
 
 历史全局文件 `~/.config/Cosmic-Developers-Union/assistant/token` 和 `~/.config/mmc/gitea-token` 不再自动读取。迁移时分别登录每个实例；临时兼容可显式指定 `GITEA_ACCESS_TOKEN_FILE`。环境变量/命令行覆盖需由调用者确保与目标站点匹配。
 
@@ -450,7 +470,7 @@ assistant triage <n>      立即分诊单个 Issue
 1. **dispatcher 自身**：按标签检测待办、完成判定验证（读 review 与标签），只需读权限。
 2. **评审会话**：启动会话时 dispatcher 把 `GITEA_HOST`、`GITEA_ACCESS_TOKEN`（reviewer 令牌）与 `ASSISTANT_CONFIG`（当前 `config.json` 路径；环境变量单实例模式为空）显式写入会话进程环境。会话内 `assistant mcp gitea` 因此始终以 reviewer 账号（默认 `ai`）提交 review——完成判定只承认 `--reviewer` 名下的 review。docker 形态按 `-e` 键把这三项透传进容器（值由宿主进程环境继承）。
 
-这条绑定不能靠环境继承：`config.json` 模式下 daemon 进程环境通常没有 Gitea 变量，会话 MCP 会退回开发者的 `mcp_token`（`assistant login --mcp` 写入），评审就不再以 reviewer 身份落库，PR 会被反复重开会话。`mcp_token` 只服务本地交互会话（开发者自己在编辑器/CLI 里读写 Issue/PR）。
+这条绑定不能靠环境继承：`config.json` 模式下 daemon 进程环境通常没有 Gitea 变量，会话 MCP 会退回开发者自己的 `mcp` 令牌（`assistant login --user` 写入），评审就不再以 reviewer 身份落库，PR 会被反复重开会话。开发者的 `mcp` 令牌只服务本地交互会话（自己在编辑器/CLI 里读写 Issue/PR）。
 
 因此 reviewer 令牌必须是 reviewer 账号的令牌：换成其他账号，检测与验证照常工作，但提交的 review 不再匹配 `--reviewer`。令牌由 `assistant setup` 自动生成；环境变量单实例模式下由 `--token` / `GITEA_ACCESS_TOKEN` 提供。
 

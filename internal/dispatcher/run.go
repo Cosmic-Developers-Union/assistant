@@ -371,7 +371,7 @@ func sessionCommand(options SessionOptions) (bin string, args []string, containe
 //   - ASSISTANT_CONFIG 让会话内 MCP/daemon 解析与 dispatcher 相同的 config.json。
 //
 // 必须显式注入而非依赖继承：config.json 模式下 daemon 进程环境通常没有 Gitea
-// 变量，会话 MCP 会回退到个人 mcp_token，评审身份随之漂移。
+// 变量，会话 MCP 会回退到开发者个人的 mcp 令牌，评审身份随之漂移。
 func sessionCredentialEnv(config Config) []string {
 	pairs := make([]string, 0, 3)
 	if config.Host != "" {

@@ -62,6 +62,10 @@ func runActions(command *cobra.Command, configPath string, options *actionsOptio
 			runErrors = append(runErrors, fmt.Errorf("%s: 缺少 merger 令牌（先运行 setup）", instance.Host))
 			continue
 		}
+		if err := requireAdminIdentity(configPath, instance.Host); err != nil {
+			runErrors = append(runErrors, err)
+			continue
+		}
 		if options.DryRun {
 			if err := setup.ConfigureActions(command.Context(), nil, instance, true, logf); err != nil {
 				runErrors = append(runErrors, err)

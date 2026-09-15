@@ -772,6 +772,19 @@ func (c *Client) AuthenticatedUser(ctx context.Context) (string, error) {
 	return user.UserName, nil
 }
 
+// AuthenticatedIdentity 返回当前令牌的账号名与实例管理员身份：登录时用它把
+// 「以谁的身份、有没有管理员权限」落盘（凭据库的身份事实）。
+func (c *Client) AuthenticatedIdentity(ctx context.Context) (string, bool, error) {
+	user, _, err := c.sdk.GetMyUserInfo(ctx)
+	if err != nil {
+		return "", false, fmt.Errorf("get authenticated user: %w", err)
+	}
+	if user == nil || user.UserName == "" {
+		return "", false, fmt.Errorf("authenticated user has no username")
+	}
+	return user.UserName, user.IsAdmin, nil
+}
+
 func pullRequestFromSDK(pullRequest *gitea.PullRequest) PullRequest {
 	result := PullRequest{
 		Index:                   pullRequest.Index,

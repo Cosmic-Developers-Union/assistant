@@ -134,6 +134,13 @@ func runSetup(command *cobra.Command, configPath string, options *setupOptions) 
 	if host == "" {
 		return fmt.Errorf("缺少站点：--host 或配置文件中的 instance.host")
 	}
+	// 能力门禁：调用者没给显式管理员凭据时，记录在案的非管理员身份直接拒绝
+	if options.AdminToken == "" && options.AdminTokenFile == "" && options.AdminUser == "" &&
+		!options.OAuth && !options.Relogin {
+		if err := requireAdminIdentity(configPath, host); err != nil {
+			return err
+		}
+	}
 
 	repos := cleanStrings(options.Repos)
 	if len(repos) == 0 && existing != nil {

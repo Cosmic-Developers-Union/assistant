@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"assistant/internal/credentials"
 	"assistant/internal/dispatcher"
 	"assistant/internal/instances"
 	"assistant/internal/repoinstall"
@@ -16,34 +17,42 @@ import (
 )
 
 type loginOptions struct {
+	// MCP 是旧版的显式开关：等价于「只处理身份与 mcp 用途令牌」，保留兼容。
 	MCP           bool
 	User          string
+	Password      string
 	PasswordStdin bool
 	TokenFile     string
 	TOTP          string
 	TokenName     string
 	Host          string
 	Token         string
+	// Rotate 为真时忽略已存令牌，强制按当前账号重建 mcp 令牌（assistant auth rotate）。
+	Rotate        bool
 	OAuthClientID string
 	OAuthSecret   string
 	OAuthScope    string
 	OAuthPort     int
 }
 
-// newLoginCommand 管理平台登记：默认走 OAuth 登录并把 admin_oauth 凭据写入
-// config.json（可只加平台，不必立刻 setup）；list/remove 管理已登记平台。
+// newLoginCommand 管理平台登记：`--user`（配合密码或令牌）走身份登录并派生 MCP
+// 长期令牌；不带身份参数时保持 tea / OAuth 的平台登记流程。
 func newLoginCommand(configFlag *string) *cobra.Command {
 	options := &loginOptions{}
 	command := &cobra.Command{
 		Use:   "login [host]",
-		Short: "登录并登记平台（优先复用 tea CLI 登录，其次 OAuth）；list/remove 管理平台",
+		Short: "登录并登记平台（--user 身份登录并派生 MCP 令牌；否则复用 tea / OAuth）",
 		Long: "平台登记与管理：\n" +
-			"  assistant login <host> --mcp  独立 MCP 长期令牌（--user 密码认证，或 --token / --token-file 录入）\n" +
-			"  assistant login <host>       优先复用 tea CLI 的登录令牌（--token 可显式指定），\n" +
-			"                               否则 OAuth 登录并把 refresh 凭据写入 config.json\n" +
-			"  assistant login list         列出已登记平台（凭据类型/仓库数/账号名）\n" +
-			"  assistant login remove <host> 移除平台（不触碰 Gitea 侧账号/仓库）\n\n" +
+			"  assistant login <host> --user alice          身份登录：校验账号（含是否管理员）并自动\n" +
+			"                                               创建/复用该身份在 (host, user, mcp) 上的长期令牌\n" +
+			"  assistant login <host> --user alice --token-file <f>  录入已有专用令牌（--user 为身份断言）\n" +
+			"  assistant login <host>                       不带身份参数：优先复用 tea CLI 登录令牌，\n" +
+			"                                               否则 OAuth 登录并把 refresh 凭据写入 config.json\n" +
+			"  assistant login list                         列出已登记平台（凭据类型/账号/仓库数）\n" +
+			"  assistant login remove <host>                移除平台（不触碰 Gitea 侧账号/仓库）\n" +
+			"  assistant auth status                        查看本地身份与各用途令牌（凭据库）\n\n" +
 			"配置落点：--config / ASSISTANT_CONFIG，否则平台标准配置目录；不写当前目录。\n" +
+			"凭据落点：与 config.json 同目录的 credentials.json（0600）。\n" +
 			"host 缺省取配置中唯一实例，其次在带 Gitea remote 的检出内探测。",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(command *cobra.Command, args []string) error {
@@ -55,14 +64,15 @@ func newLoginCommand(configFlag *string) *cobra.Command {
 		},
 	}
 	flags := command.Flags()
-	flags.BoolVar(&options.MCP, "mcp", false, "独立 MCP 长期令牌：密码认证创建或手动录入，不复用 tea/管理令牌")
-	flags.StringVar(&options.User, "user", "", "MCP 个人账号用户名（密码认证缺省取同站点 tea 登录 user；录入令牌时作为身份断言）")
-	flags.BoolVar(&options.PasswordStdin, "password-stdin", false, "从标准输入读取 MCP 登录密码；否则在终端中隐藏输入")
-	flags.StringVar(&options.TokenFile, "token-file", "", "从文件录入 MCP 专用长期令牌")
+	flags.BoolVar(&options.MCP, "mcp", false, "（兼容）等价于 --user：只处理身份与 mcp 用途令牌")
+	flags.StringVar(&options.User, "user", "", "登录账号（缺省取同站点 tea 登录 user；录入令牌时作为身份断言）")
+	flags.StringVar(&options.Password, "password", "", "账号密码（仅用于换取/派生令牌，不落盘；建议改用 --password-stdin）")
+	flags.BoolVar(&options.PasswordStdin, "password-stdin", false, "从标准输入读取密码；否则在终端中隐藏输入")
+	flags.StringVar(&options.TokenFile, "token-file", "", "录入已有专用令牌（与密码参数互斥）")
 	flags.StringVar(&options.TOTP, "totp", "", "密码认证需要的双因素验证码")
-	flags.StringVar(&options.TokenName, "token-name", "", "创建的 MCP 令牌名（缺省自动生成唯一名称）")
+	flags.StringVar(&options.TokenName, "token-name", "", "创建的令牌名（缺省按 host+账号+用途确定性派生）")
 	flags.StringVar(&options.Host, "host", "", "平台地址（与位置参数二选一）")
-	flags.StringVar(&options.Token, "token", "", "访问令牌（跳过 OAuth；缺省先尝试复用 tea CLI 在站点的登录）")
+	flags.StringVar(&options.Token, "token", "", "访问令牌：配 --user/--mcp 时录入 MCP 专用令牌，否则登记为平台令牌")
 	flags.StringVar(&options.OAuthClientID, "oauth-client-id", "",
 		"OAuth2 Client ID（缺省用 Gitea 内置 tea 公共客户端）")
 	flags.StringVar(&options.OAuthSecret, "oauth-client-secret", "", "OAuth2 客户端密钥（confidential 客户端才需要）")
@@ -91,10 +101,12 @@ func runLogin(command *cobra.Command, configPath, argHost string, options *login
 	}
 
 	if options.MCP {
-		return runMCPLogin(command, host, writePath, file, options)
+		return runIdentityLogin(command, host, writePath, file, options)
 	}
-	if options.User != "" || options.PasswordStdin || options.TokenFile != "" || options.TOTP != "" || options.TokenName != "" {
-		return fmt.Errorf("--user / --password-stdin / --token-file / --totp / --token-name 仅用于 --mcp")
+	// 身份登录：显式 --user，或任何只对身份/用途令牌有意义的参数
+	if options.User != "" || options.Password != "" || options.PasswordStdin ||
+		options.TokenFile != "" || options.TOTP != "" || options.TokenName != "" {
+		return runIdentityLogin(command, host, writePath, file, options)
 	}
 
 	// 令牌登录：显式 --token，或复用 tea CLI 在本站点的登录（本地配置，只读）
@@ -107,7 +119,7 @@ func runLogin(command *cobra.Command, configPath, argHost string, options *login
 		if err != nil {
 			return err
 		}
-		login, authErr := client.AuthenticatedUser(ctx)
+		login, isAdmin, authErr := client.AuthenticatedIdentity(ctx)
 		if authErr != nil && strings.TrimSpace(options.Token) != "" {
 			return fmt.Errorf("--token 不可用（%s）: %w", source, authErr)
 		}
@@ -118,6 +130,7 @@ func runLogin(command *cobra.Command, configPath, argHost string, options *login
 			if err := saveLoginFile(file, writePath); err != nil {
 				return err
 			}
+			recordIdentity(host, writePath, login, isAdmin, logf)
 			logf("平台 %s 已登录 @%s（令牌来源：%s），写入 %s", host, login, source, writePath)
 			return nil
 		}
@@ -146,8 +159,36 @@ func runLogin(command *cobra.Command, configPath, argHost string, options *login
 	if err := saveLoginFile(file, writePath); err != nil {
 		return err
 	}
+	recordIdentity(host, writePath, result.Login, result.IsAdmin, logf)
 	logf("平台 %s 已登录 @%s（凭据写入 %s）", host, result.Login, writePath)
 	return nil
+}
+
+// recordIdentity 把「以谁的身份、是不是实例管理员」写入凭据库。它不写令牌：
+// admin 令牌仍由 config.json 承载（迁移到凭据库是下一步），这里只落身份事实，
+// 供 setup/init/actions 做管理员门禁。凭据库不可写时只告警，不推翻已完成的平台登记。
+func recordIdentity(host, configPath, user string, isAdmin bool, logf func(string, ...any)) {
+	if strings.TrimSpace(user) == "" {
+		return
+	}
+	path, err := credentials.PathFor(configPath)
+	if err != nil {
+		logf("警告：无法定位凭据库（%v），本次未记录身份", err)
+		return
+	}
+	file, err := credentials.Load(path)
+	if err != nil {
+		logf("警告：读取凭据库失败（%v），本次未记录身份", err)
+		return
+	}
+	file.SetIdentity(credentials.Identity{Host: host, User: user, IsAdmin: isAdmin})
+	if err := credentials.Save(path, file); err != nil {
+		logf("警告：写入凭据库失败（%v），本次未记录身份", err)
+		return
+	}
+	if !isAdmin {
+		logf("账号 @%s 不是实例管理员：setup/init/actions 与机器人凭据不可用（仅 MCP 工具面）", user)
+	}
 }
 
 // resolveLoginToken 解析登录令牌：显式 --token 优先，否则复用 tea CLI 配置中
@@ -219,7 +260,7 @@ func newLoginListCommand(configFlag *string) *cobra.Command {
 		Short: "列出已登记的平台",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			_, file, err := resolveInstanceFile(commandOptions{ConfigPath: *configFlag})
+			path, file, err := resolveInstanceFile(commandOptions{ConfigPath: *configFlag})
 			if err != nil {
 				return err
 			}
@@ -228,6 +269,7 @@ func newLoginListCommand(configFlag *string) *cobra.Command {
 				fmt.Fprintln(stdout, "未登记任何平台（assistant setup 初始化，或 assistant login <host> 添加）")
 				return nil
 			}
+			store, credentialPath := loadCredentialStore(command, path)
 			for _, instance := range file.Instances {
 				admin := "none"
 				switch {
@@ -236,19 +278,63 @@ func newLoginListCommand(configFlag *string) *cobra.Command {
 				case instance.AdminToken != "":
 					admin = "token"
 				}
-				mcp := "none"
-				switch {
-				case instance.MCPToken != "" && instance.MCPUser != "":
-					mcp = "token@" + instance.MCPUser
-				case instance.MCPToken != "":
-					mcp = "token"
-				}
-				fmt.Fprintf(stdout, "%s\trepos=%d\tadmin=%s\treviewer=%s\tmerger=%s\tmcp=%s\n",
-					instance.Host, len(instance.Repos), admin, instance.Reviewer.Name, instance.Merger.Name, mcp)
+				fmt.Fprintf(stdout, "%s\trepos=%d\tadmin=%s\treviewer=%s\tmerger=%s\tmcp=%s\tidentity=%s\n",
+					instance.Host, len(instance.Repos), admin, instance.Reviewer.Name, instance.Merger.Name,
+					describeMCPCredential(store, instance), describeIdentity(store, instance.Host))
+			}
+			if credentialPath != "" {
+				fmt.Fprintf(stdout, "凭据库：%s（assistant auth status 查看详情）\n", credentialPath)
 			}
 			return nil
 		},
 	}
+}
+
+// loadCredentialStore 读取凭据库；不存在或不可读时返回空库（list 只需展示现状，
+// 不因凭据库缺失而失败）。
+func loadCredentialStore(command *cobra.Command, configPath string) (*credentials.File, string) {
+	path, err := credentials.PathFor(configPath)
+	if err != nil {
+		return &credentials.File{}, ""
+	}
+	store, err := credentials.Load(path)
+	if err != nil {
+		fmt.Fprintf(command.ErrOrStderr(), "警告：读取凭据库失败（%v）\n", err)
+		return &credentials.File{}, path
+	}
+	return store, path
+}
+
+// describeMCPCredential 描述实例的 mcp 凭据：凭据库优先，兼容旧 config.json 字段。
+func describeMCPCredential(store *credentials.File, instance instances.Instance) string {
+	if store != nil {
+		credential, ok, err := store.CredentialForIdentity(instance.Host, credentials.PurposeMCP)
+		switch {
+		case err != nil:
+			return "multiple"
+		case ok:
+			return "token@" + credential.User
+		}
+	}
+	if instance.MCPToken != "" {
+		if instance.MCPUser != "" {
+			return "token@" + instance.MCPUser + "(legacy)"
+		}
+		return "token(legacy)"
+	}
+	return "none"
+}
+
+// describeIdentity 描述站点当前登录身份（含管理员标记）。
+func describeIdentity(store *credentials.File, host string) string {
+	identity, ok := store.IdentityFor(host)
+	if !ok {
+		return "none"
+	}
+	if identity.IsAdmin {
+		return "@" + identity.User + "(admin)"
+	}
+	return "@" + identity.User
 }
 
 func newLoginRemoveCommand(configFlag *string) *cobra.Command {

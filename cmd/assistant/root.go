@@ -113,7 +113,7 @@ func newRootCommand(stdout, stderr io.Writer, checker, syncer, merger managerRun
 	}
 	command.AddCommand(checkCommand, syncCommand, autoMergeCommand)
 	command.AddCommand(newDispatcherCommands(&options.Repository, &options.ConfigPath)...)
-	command.AddCommand(newLoginCommand(&options.ConfigPath))
+	command.AddCommand(newLoginCommand(&options.ConfigPath), newAuthCommand(&options.ConfigPath))
 	command.AddCommand(newReposCommand(&options.ConfigPath))
 	command.AddCommand(newWeixinCommand(&options.ConfigPath))
 	command.AddCommand(newInitCommand(&options.ConfigPath), newDeinitCommand(&options.ConfigPath))

@@ -52,7 +52,7 @@ type MCPSpec struct {
 //
 // host：--host > GITEA_HOST > Gitea remote 推导；
 // token：--token > GITEA_ACCESS_TOKEN > GITEA_ACCESS_TOKEN_FILE >
-// assistant login --mcp 同站点独立凭据。
+// credentials.json 中该站点的 mcp 用途令牌 > config.json 的 mcp_token（旧版）。
 // 不自动读取未绑定站点的历史全局 token 文件。
 func ResolveMCP(ctx context.Context, options MCPOptions) (MCPSpec, error) {
 	getenv := options.Getenv
@@ -94,7 +94,8 @@ func ResolveMCP(ctx context.Context, options MCPOptions) (MCPSpec, error) {
 		}
 	}
 	if spec.Token == "" {
-		return MCPSpec{}, fmt.Errorf("站点 %s 没有匹配的登录凭据：请运行 assistant login %s --mcp；也可显式设置 GITEA_ACCESS_TOKEN / GITEA_ACCESS_TOKEN_FILE（不再自动读取历史全局 token 文件）", spec.Host, spec.Host)
+		return MCPSpec{}, fmt.Errorf("站点 %s 没有匹配的登录凭据：请运行 assistant login %s --user <账号>；"+
+			"也可显式设置 GITEA_ACCESS_TOKEN / GITEA_ACCESS_TOKEN_FILE（不再自动读取历史全局 token 文件）", spec.Host, spec.Host)
 	}
 	return spec, nil
 }

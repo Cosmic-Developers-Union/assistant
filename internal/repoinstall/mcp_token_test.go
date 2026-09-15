@@ -7,8 +7,53 @@ import (
 	"strings"
 	"testing"
 
+	"assistant/internal/credentials"
 	"assistant/internal/instances"
 )
+
+// 凭据库优先于旧 config.json 字段：同站点两条来源都在时用凭据库那条，凭据库没有
+// 时才回退旧字段（迁移期兼容）。
+func TestMCPTokenPrefersCredentialsStore(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	if err := instances.Save(configPath, &instances.File{Instances: []instances.Instance{
+		{Host: "https://a.example.com", MCPToken: "legacy-a"},
+		{Host: "https://b.example.com", MCPToken: "legacy-b"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	store := &credentials.File{}
+	store.SetCredential(credentials.Credential{
+		Host: "https://a.example.com", User: "alice", Purpose: credentials.PurposeMCP, Token: "store-a",
+	})
+	credentialPath := filepath.Join(dir, "credentials.json")
+	if err := credentials.Save(credentialPath, store); err != nil {
+		t.Fatal(err)
+	}
+	getenv := func(key string) string {
+		if key == "ASSISTANT_CONFIG" {
+			return configPath
+		}
+		return ""
+	}
+	token, source, err := resolveMCPToken("https://a.example.com", "", getenv)
+	if err != nil || token != "store-a" || !strings.Contains(source, "@alice") {
+		t.Fatalf("应优先用凭据库：token=%q source=%q err=%v", token, source, err)
+	}
+	token, source, err = resolveMCPToken("https://b.example.com", "", getenv)
+	if err != nil || token != "legacy-b" || !strings.Contains(source, "旧版字段") {
+		t.Fatalf("凭据库缺失时应回退旧字段：token=%q source=%q err=%v", token, source, err)
+	}
+	// ASSISTANT_CREDENTIALS 显式指定凭据库位置
+	if token, _, err := resolveMCPToken("https://a.example.com", "", func(key string) string {
+		if key == "ASSISTANT_CREDENTIALS" {
+			return credentialPath
+		}
+		return ""
+	}); err != nil || token != "store-a" {
+		t.Fatalf("ASSISTANT_CREDENTIALS 覆盖失败：token=%q err=%v", token, err)
+	}
+}
 
 func TestMCPTokenIsolation(t *testing.T) {
 	dir := t.TempDir()

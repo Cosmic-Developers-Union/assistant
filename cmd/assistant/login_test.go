@@ -10,10 +10,13 @@ import (
 	"strings"
 	"testing"
 
+	"assistant/internal/credentials"
 	"assistant/internal/instances"
 	"assistant/internal/repoinstall"
 )
 
+// 身份登录只写自己那条 (host, user, purpose=mcp) 凭据：管理、机器人凭据与其他
+// 实例都不受影响，MCP 解析也用凭据库里的令牌。
 func TestLoginMCPCredentialIsolation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/user" || !strings.Contains(r.Header.Get("Authorization"), "mcp-private-token") {
@@ -21,30 +24,46 @@ func TestLoginMCPCredentialIsolation(t *testing.T) {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		fmt.Fprint(w, `{"login":"developer"}`)
+		fmt.Fprint(w, `{"login":"developer","is_admin":true}`)
 	}))
 	defer server.Close()
 	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("ASSISTANT_CREDENTIALS", "")
 	savePlatform(t, path, instances.Instance{
 		Host: server.URL, AdminToken: "admin-token",
 		Reviewer: instances.Account{Name: "ai", Token: "reviewer-token"},
 		Merger:   instances.Account{Name: "merge", Token: "merger-token"},
 	})
-	var out bytes.Buffer
-	command := newLoginCommand(&path)
-	command.SetOut(&out)
-	command.SetArgs([]string{server.URL, "--mcp", "--token", "mcp-private-token"})
-	if err := command.Execute(); err != nil {
-		t.Fatal(err)
-	}
-	file, err := instances.Load(path)
+	before, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	i := file.Instances[0]
-	if i.MCPToken != "mcp-private-token" || i.MCPUser != "developer" || i.AdminToken != "admin-token" ||
-		i.Reviewer.Token != "reviewer-token" || i.Merger.Token != "merger-token" {
-		t.Fatal("MCP login changed an unrelated credential or retained stale OAuth")
+	var out bytes.Buffer
+	command := newLoginCommand(&path)
+	command.SetOut(&out)
+	command.SetArgs([]string{server.URL, "--user", "developer", "--token", "mcp-private-token"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := credentials.Load(filepath.Join(filepath.Dir(path), "credentials.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential, ok := store.CredentialForUser(server.URL, "developer", credentials.PurposeMCP)
+	if !ok || credential.Token != "mcp-private-token" {
+		t.Fatalf("凭据 = %+v ok=%v", credential, ok)
+	}
+	if identity, ok := store.IdentityFor(server.URL); !ok || identity.User != "developer" || !identity.IsAdmin {
+		t.Fatalf("identity = %+v ok=%v", identity, ok)
+	}
+	// 没有旧字段可迁移时，config.json 原样不动
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("身份登录不应改动 config.json：\n%s", after)
 	}
 	if strings.Contains(out.String(), "mcp-private-token") {
 		t.Fatal("login output leaked token")

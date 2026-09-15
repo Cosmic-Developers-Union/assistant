@@ -108,7 +108,7 @@ func newMCPCommand(configFlag *string) *cobra.Command {
 			"指已安装的二进制）。检测顺序：\n" +
 			"  host：--host > GITEA_HOST > origin remote 推导；\n" +
 			"  token：--token > GITEA_ACCESS_TOKEN > GITEA_ACCESS_TOKEN_FILE >\n" +
-			"         assistant login --mcp 同站点独立凭据。\n" +
+			"         assistant login <host> --user <账号> 的上站点凭据（凭据库）。\n" +
 			"使用 --config / ASSISTANT_CONFIG 选择登录配置；不自动读取历史全局 token 文件。",
 		Args: cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {

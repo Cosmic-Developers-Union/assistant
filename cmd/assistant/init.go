@@ -91,6 +91,9 @@ func runInit(command *cobra.Command, configPath string, args []string, options *
 	if err != nil {
 		return err
 	}
+	if err := requireAdminIdentity(configPath, target.Host); err != nil {
+		return err
+	}
 	adminToken, adminErr := adminTokenForInstance(ctx, target.Instance, logf)
 	if adminErr != nil {
 		return fmt.Errorf("缺少管理员凭据（先 assistant login %s）: %w", target.Host, adminErr)
@@ -152,6 +155,9 @@ func runDeinit(command *cobra.Command, configPath string, args []string, purge, 
 	}
 
 	if purge {
+		if err := requireAdminIdentity(configPath, target.Host); err != nil {
+			return err
+		}
 		adminToken, adminErr := adminTokenForInstance(ctx, target.Instance, logf)
 		if adminErr != nil {
 			return fmt.Errorf("--purge 需要管理员凭据（先 assistant login %s）: %w", target.Host, adminErr)
