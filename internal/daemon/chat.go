@@ -104,7 +104,24 @@ func NewChat(config ChatConfig) (*Chat, error) {
 	if err := chat.load(); err != nil {
 		return nil, err
 	}
+	chat.dropLegacySharedConfig()
 	return chat, nil
+}
+
+// dropLegacySharedConfig 清理早期把所有会话共用的 settings.json / mcp.json（现在
+// 每个会话写进自己的工作目录）。一次性迁移，文件不存在时是空操作。
+func (c *Chat) dropLegacySharedConfig() {
+	for _, name := range []string{"settings.json", "mcp.json"} {
+		path := filepath.Join(c.config.StateDir, name)
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		if err := os.Remove(path); err != nil {
+			c.config.Log("清理旧的共享会话配置失败（%s）：%v", path, err)
+			continue
+		}
+		c.config.Log("已清理旧的共享会话配置：%s（现在每个会话写在自己的工作目录）", path)
+	}
 }
 
 // StateDir 返回会话状态目录。

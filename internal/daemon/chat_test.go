@@ -215,3 +215,25 @@ func TestRestartRequested(t *testing.T) {
 		}
 	}
 }
+
+// 早期版本把所有会话共用的 settings.json / mcp.json 放在 StateDir 根：新布局下
+// 它们已无人读取，启动时清掉，避免和会话工作目录里的同名文件混淆。
+func TestChatDropsLegacySharedConfig(t *testing.T) {
+	stateDir := t.TempDir()
+	for _, name := range []string{"settings.json", "mcp.json", "sessions.json"} {
+		if err := os.WriteFile(filepath.Join(stateDir, name), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := NewChat(ChatConfig{StateDir: stateDir, SessionDir: t.TempDir()}); err != nil {
+		t.Fatalf("NewChat: %v", err)
+	}
+	for _, name := range []string{"settings.json", "mcp.json"} {
+		if _, err := os.Stat(filepath.Join(stateDir, name)); !os.IsNotExist(err) {
+			t.Errorf("%s 应被清理：%v", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "sessions.json")); err != nil {
+		t.Errorf("会话映射不该被动：%v", err)
+	}
+}
