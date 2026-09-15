@@ -23,6 +23,8 @@ type BridgeConfig struct {
 	LoginUserID string
 	Chat        *Chat
 	Log         func(string, ...any)
+	// Debug 为真时额外记录 typing 票据、消息路由等细节
+	Debug bool
 	// Concurrency 是同时处理的对话数（缺省 4）
 	Concurrency int
 }
@@ -87,6 +89,7 @@ func RunBridge(ctx context.Context, config BridgeConfig) error {
 			if text == "" {
 				continue
 			}
+			config.Log("收到消息（%s）：%s", message.FromUserID, truncate(singleLine(text), 200))
 			waitGroup.Add(1)
 			semaphore <- struct{}{}
 			go func(message weixin.Message, text string) {
@@ -152,6 +155,7 @@ func handleChatMessage(
 	if strings.TrimSpace(reply) == "" {
 		reply = "（无回复）"
 	}
+	config.Log("回复（%s，%d 字）：%s", conversationID, len([]rune(reply)), truncate(singleLine(reply), 200))
 	for _, chunk := range weixin.SplitText(reply, 1800) {
 		if err := client.SendText(ctx, message.FromUserID, message.ContextToken, chunk); err != nil {
 			config.Log("发送回复失败：%v", err)

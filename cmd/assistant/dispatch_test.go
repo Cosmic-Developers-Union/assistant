@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -292,6 +294,7 @@ func TestCheckSessionRuntimeReportsPrerequisites(t *testing.T) {
 	sessionDir := filepath.Join(dir, "claude-config")
 
 	command := &cobra.Command{}
+	command.SetContext(t.Context())
 	command.SetOut(&bytes.Buffer{})
 	stderr := &bytes.Buffer{}
 	command.SetErr(stderr)
@@ -309,7 +312,15 @@ func TestCheckSessionRuntimeReportsPrerequisites(t *testing.T) {
 		t.Errorf("缺少凭据告警：%s", stderr.String())
 	}
 
-	// provider 提供凭据后转为正常日志
+	// provider 提供凭据后会真的探一次端点：这里用假端点，避免测试联网
+	var lastRequest string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		lastRequest = request.URL.Path
+		_, _ = writer.Write([]byte(`{"type":"message","content":[{"type":"text","text":"ok"}]}`))
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("ANTHROPIC_BASE_URL", server.URL)
+
 	logged = nil
 	stderr.Reset()
 	checkSessionRuntime(command, []dispatchTarget{{
@@ -317,14 +328,45 @@ func TestCheckSessionRuntimeReportsPrerequisites(t *testing.T) {
 			ClaudeBin:    bin,
 			SessionDir:   sessionDir,
 			ProviderName: "opencode",
-			Provider:     claudecfg.Overrides{Env: map[string]string{"ANTHROPIC_AUTH_TOKEN": "tok"}},
+			Provider: claudecfg.Overrides{
+				Env: map[string]string{"ANTHROPIC_AUTH_TOKEN": "tok", "ANTHROPIC_BASE_URL": server.URL},
+			},
 		},
 	}}, log)
 	if stderr.Len() != 0 {
-		t.Errorf("有凭据时不该告警：%s", stderr.String())
+		t.Errorf("有凭据且端点连通时不该告警：%s", stderr.String())
 	}
-	if !strings.Contains(strings.Join(logged, "\n"), "provider env ANTHROPIC_AUTH_TOKEN") {
-		t.Errorf("缺少凭据来源日志：%v", logged)
+	joined = strings.Join(logged, "\n")
+	if !strings.Contains(joined, "provider env ANTHROPIC_AUTH_TOKEN") || !strings.Contains(joined, "端点连通") {
+		t.Errorf("缺少凭据来源/端点日志：%v", logged)
+	}
+	if lastRequest != "/v1/messages" {
+		t.Errorf("自检请求路径 = %q", lastRequest)
+	}
+
+	// 端点拒绝凭据（401）：启动就告警，并给出端点/密钥配套的提示
+	rejecting := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusUnauthorized)
+		_, _ = writer.Write([]byte(`{"type":"error","error":{"type":"authentication_error","message":"invalid api key"}}`))
+	}))
+	t.Cleanup(rejecting.Close)
+	logged = nil
+	stderr.Reset()
+	checkSessionRuntime(command, []dispatchTarget{{
+		config: dispatcher.Config{
+			ClaudeBin:    bin,
+			SessionDir:   sessionDir,
+			ProviderName: "opencode",
+			Provider: claudecfg.Overrides{
+				Env: map[string]string{"ANTHROPIC_AUTH_TOKEN": "bad", "ANTHROPIC_BASE_URL": rejecting.URL},
+			},
+		},
+	}}, log)
+	if !strings.Contains(stderr.String(), "凭据自检失败") || !strings.Contains(stderr.String(), "HTTP 401") {
+		t.Errorf("缺少自检失败告警：%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "api.minimaxi.com") {
+		t.Errorf("缺少端点/密钥配套提示：%s", stderr.String())
 	}
 
 	// claude 不存在：给出可诊断的警告而不是等会话失败

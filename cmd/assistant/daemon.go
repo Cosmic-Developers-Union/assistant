@@ -241,6 +241,7 @@ func startDaemonServices(
 	chat, err := daemon.NewChat(daemon.ChatConfig{
 		ClaudeBin:    claudeBin,
 		Bare:         bare,
+		Debug:        options.Debug,
 		Model:        firstNonEmpty(weixinConfig.Model, options.Model),
 		Provider:     providerOverrides,
 		ProviderName: providerName,
@@ -257,13 +258,21 @@ func startDaemonServices(
 	}
 	logf("微信桥对话会话：claude=%s bare=%s 配置根=%s",
 		claudeBin, bareLabel, chat.SessionDir())
+	warnf := func(format string, arguments ...any) {
+		fmt.Fprintf(command.ErrOrStderr(), "警告："+format+"\n", arguments...)
+	}
 	if source := claudecfg.CredentialSource(providerOverrides); source == "" {
-		warnf := func(format string, arguments ...any) {
-			fmt.Fprintf(command.ErrOrStderr(), "警告："+format+"\n", arguments...)
-		}
 		warnf("微信桥 provider 没有可用的 AI 凭据：对话会认证失败；%s", claudecfg.MissingCredentialHint)
 	} else {
-		logf("微信桥 AI 凭据：%s", source)
+		// 最小请求实测：密钥/端点不配套（如国内 MiniMax 账号配了国际端点）会
+		// 让每条微信消息静默重试几分钟，这里启动就说清楚
+		check := provider.CheckCredential(command.Context(), providerOverrides)
+		if check.OK() {
+			logf("微信桥 AI 凭据：%s；%s", source, check.Describe())
+		} else {
+			warnf("微信桥凭据自检失败：%s", check.Describe())
+			warnf("%s", provider.CredentialHint)
+		}
 	}
 	bridgeConfig := daemon.BridgeConfig{
 		Weixin: weixin.Config{
@@ -277,6 +286,7 @@ func startDaemonServices(
 		LoginUserID: weixinConfig.LoginUserID,
 		Chat:        chat,
 		Log:         logf,
+		Debug:       options.Debug,
 	}
 	go func() {
 		if err := daemon.RunBridge(command.Context(), bridgeConfig); err != nil {

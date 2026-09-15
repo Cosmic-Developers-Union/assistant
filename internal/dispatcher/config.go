@@ -56,6 +56,8 @@ type Config struct {
 	Reviewer string
 	// ClaudeBin 是 claude 可执行文件（PATH 名或绝对路径）
 	ClaudeBin string
+	// Debug 为真时把会话命令行、claude 原始 stream 事件与 stderr 尾部写进待办日志
+	Debug bool
 	// Provider 是生效的供应商运行时覆盖（env/settings/mcp 原样透传；零值表示
 	// 内置缺省）。只作用于会话临时配置，不写入仓库文件。已经叠加全局优化点。
 	Provider claudecfg.Overrides
@@ -88,6 +90,7 @@ type Flags struct {
 	Model         string
 	Reviewer      string
 	ClaudeBin     string
+	Debug         bool
 	LogDir        string
 	WorktreeRoot  string
 	LockFile      string
@@ -257,6 +260,7 @@ func ResolveConfig(
 		Model:         firstNonEmpty(flags.Model, env("DISPATCH_MODEL")),
 		Reviewer:      firstNonEmpty(flags.Reviewer, env("DISPATCH_REVIEWER"), "ai"),
 		ClaudeBin:     firstNonEmpty(flags.ClaudeBin, env("DISPATCH_CLAUDE_BIN"), "claude"),
+		Debug:         flags.Debug || strings.EqualFold(env("DISPATCH_DEBUG"), "1") || strings.EqualFold(env("DISPATCH_DEBUG"), "true"),
 		DockerImage:   firstNonEmpty(flags.DockerImage, env("DISPATCH_DOCKER_IMAGE")),
 		DockerNetwork: firstNonEmpty(flags.DockerNetwork, env("DISPATCH_DOCKER_NETWORK")),
 	}, nil

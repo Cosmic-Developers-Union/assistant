@@ -24,7 +24,7 @@
 #   make compose-up        # 构建 ./assistant（linux/amd64 静态）→ 启动/重建容器（推荐）
 #   make build && docker compose up -d --force-recreate    # 等价手工流程
 #   make daemon-image      # 可选：构建内置二进制的独立 daemon 镜像（BASE_IMAGE=... 可换基座）
-#   docker compose logs -f
+#   docker compose logs -f        # 已带 --debug：能看到 claude 的实时消息与工具调用
 #   docker compose exec -it assistant assistant weixin login   # 首次扫码（终端渲染二维码，-it 必需）
 #
 # 以宿主用户身份运行：写回挂载目录的文件属主不变；UID/GID 与 HOME 由 compose
@@ -87,4 +87,6 @@ services:
     tmpfs:
       # 评审 worktree 全在 /tmp：内存盘，上限 16G（受宿主可用内存约束，可调）
       - /tmp:exec,mode=1777,size=16g
-    command: ["run", "--api-listen", "0.0.0.0:8770"]
+    # --debug：详细日志（会话命令行、claude 原始 stream 事件、对话消息与回复、
+    # 凭据自检详情）——想安静时去掉该参数即可
+    command: ["run", "--api-listen", "0.0.0.0:8770", "--debug"]

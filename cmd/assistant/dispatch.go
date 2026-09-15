@@ -33,6 +33,7 @@ type dispatcherOptions struct {
 	Reviewer      string
 	Model         string
 	ClaudeBin     string
+	Debug         bool
 	LogDir        string
 	WorktreeRoot  string
 	LockFile      string
@@ -175,6 +176,8 @@ func addDispatcherConnectionFlags(command *cobra.Command, options *dispatcherOpt
 	flags.StringVar(&options.Reviewer, "reviewer", "", "完成判定匹配的 reviewer 账号（缺省 ai）")
 	flags.StringVar(&options.Model, "model", "", "会话模型（缺省用账号默认）")
 	flags.StringVar(&options.ClaudeBin, "claude-bin", "", "claude 可执行文件（缺省 PATH 上的 claude）")
+	flags.BoolVar(&options.Debug, "debug", false,
+		"详细日志：会话命令行、claude 原始 stream 事件、stderr 尾部、对话消息与回复（DISPATCH_DEBUG=1 等效）")
 	flags.StringVar(&options.DockerImage, "docker-image", "",
 		"评审会话镜像：非空时会话跑在 docker 容器里（如 ghcr.io/cosmic-developers-union/assistant-review:latest）")
 	flags.StringVar(&options.DockerNetwork, "docker-network", "",
@@ -265,6 +268,7 @@ func dispatcherFlags(command *cobra.Command, repoFlag string, options *dispatche
 		Model:         options.Model,
 		Reviewer:      options.Reviewer,
 		ClaudeBin:     options.ClaudeBin,
+		Debug:         options.Debug,
 		LogDir:        options.LogDir,
 		WorktreeRoot:  options.WorktreeRoot,
 		LockFile:      options.LockFile,
@@ -682,7 +686,15 @@ func checkSessionRuntime(command *cobra.Command, targets []dispatchTarget, log f
 		}
 		reported[name] = true
 		if source := claudecfg.CredentialSource(target.config.Provider); source != "" {
-			log(fmt.Sprintf("AI 凭据：%s（来源 %s）", name, source))
+			// 最小请求实测：凭据/端点不对时在这里就报出来，而不是等每条会话
+			// 重试几分钟（409/401 在日志里是看不见的）
+			check := provider.CheckCredential(command.Context(), target.config.Provider)
+			if check.OK() {
+				log(fmt.Sprintf("AI 凭据：%s（来源 %s）%s", name, source, check.Describe()))
+			} else {
+				warnf("provider %s 的凭据自检失败：%s", name, check.Describe())
+				fmt.Fprintf(command.ErrOrStderr(), "  %s\n", provider.CredentialHint)
+			}
 			continue
 		}
 		warnf("provider %s 没有可用的 AI 凭据：会话会认证失败；%s", name, claudecfg.MissingCredentialHint)

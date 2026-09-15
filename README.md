@@ -381,7 +381,7 @@ status/triage     Issue ───────▶  triage issue #N               
 - **镜像同步（显式 `dir` 的共享检出）**：`--sync-mirror` / `DISPATCH_SYNC_MIRROR=1` 开启后同样每轮强制对齐基线；受管克隆恒为开。共享开发检出勿开启。
 - **会话驱动**：`claude -p` 子进程，命令面与手工运维一致（`--permission-mode auto`、`--autocompact auto`、stream-json 输出）。无人值守必需项：`--strict-mcp-config --mcp-config` 注入 **assistant 自己指定的 gitea MCP**（`assistant mcp gitea`，绝对路径启动，与仓库里有没有 `.mcp.json` 无关；仓库其它 MCP server 保留，provider 原生 server 合并进来），外加 `--max-turns` / abort 超时兜底 runaway 会话。
 - **独立会话配置**：每次会话在临时目录生成 `--settings`（同一份 env/权限放行，见上文 install 的托管键）与 `--mcp-config`，并加 `--setting-sources project`（只加载项目级设置）；**不读取也不写入任何用户级配置**。会话配置根是 assistant 托管的 `<配置目录>/claude`（`instances.ClaudeDir`，`CLAUDE_CONFIG_DIR` 可覆盖）——不是用户的 `~/.claude`，会话记录与 claude 全局配置都落在这里，跟宿主上的 Claude 安装互不影响。需要 Claude Code 2.1+（`claude --help` 能看到这些参数；评审镜像安装的是 latest）。
-- **AI 凭据由配置提供**：会话不读 `~/.claude` 的 OAuth 登录态，凭据来自 config.json 的 `providers`/`optimizations`（`api_key`/`auth_token` 简写落到 `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY`，见上文「多 provider」），或进程环境里的同名变量。daemon 启动时自检并打印来源：`claude` 可执行文件与版本、会话配置根、每个 provider 的凭据来源；没有凭据时直接给出告警与修复提示（而不是等每个会话认证失败）。
+- **AI 凭据由配置提供**：会话不读 `~/.claude` 的 OAuth 登录态，凭据来自 config.json 的 `providers`/`optimizations`（`api_key`/`auth_token` 简写落到 `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY`，见上文「多 provider」），或进程环境里的同名变量。daemon 启动时自检：`claude` 可执行文件与版本、会话配置根、每个 provider 的凭据来源，并用一个 `max_tokens=1` 的最小请求**实测端点**——密钥与端点不配套（典型：MiniMax 国内账号配了国际端点）会当场报 `HTTP 401` 并给出排查提示，而不是等每条会话静默重试几分钟。
 - **项目评审约定与协议**：assistant 内置的 review 协议（`skills/review/SKILL.md`：PR 审查协议、Issue 分诊协议、标签体系）作为 `--append-system-prompt` 打头注入会话——仓库没 install 过也照常生效；宿主基线检出的 `.assistant/review.md`（项目自有约定，PR 自带的版本不生效）附在其后，上限 32000 字符，超出截断。
 - **进度两路落点**：控制台实时显示会话 init 与编号的工具调用；完整明细实时写待办日志——stdout 按 stream-json 逐行解析，assistant 文本原样、工具调用记 `🔧 名称`。
 - **一请求一会话，head 漂移即作废**：同一 instance+仓库+PR/Issue 同时至多一个会话；每个请求只拉起一个会话，完成（reviewer 已提交 review / triage 标签已移除）后在标签被 sync 收敛前不再重复拉起——连续 `@ai`、`/review` 不会造成重复会话。验证未过则本轮放行，等待下一轮检测；head 已被作者推进则本轮评审作废，下一轮以新 head 重开。
@@ -401,6 +401,18 @@ status/triage     Issue ───────▶  triage issue #N               
 - **保留期**：托管会话设置里 `cleanupPeriodDays=3650`（官方默认 30 天会被清理扫描删掉；provider `settings` 可覆盖）。
 - 不再传 `--no-session-persistence`：会话记录是审计与排障的一等数据。
 - 容器部署下 `CLAUDE_CONFIG_DIR=<配置目录>/claude`：它就是挂载进去的 assistant 配置目录里的 `claude/`，记录与 claude 全局配置一起持久化（首次运行自动创建）；**不挂载也不读写 `~/.claude`**，凭据由 provider 配置提供。
+
+### 观测：--debug 与实时会话日志
+
+`assistant run --debug`（或 `DISPATCH_DEBUG=1`）打开详细日志；docker compose 的 daemon 默认已经带上该参数。不开也能看到关键线索，开了之后连原始事件都进日志：
+
+| 来源 | 不开 debug | 开 debug |
+| --- | --- | --- |
+| 微信对话 | 收到消息（用户/文本）、`claude: …` 实时文本、`🔧 工具名`、`API 错误：HTTP 401 …`、回复（字数+摘要） | 追加会话命令行、每条 claude 原始 stream 事件（截断）、结束统计（subtype/turns/cost） |
+| 评审/分诊会话 | 会话启动、assistant 文本、`🔧` 工具调用、结果与验证结论 | 追加 `[debug]` 事件行、settings/MCP/文本记录路径、stderr 尾部 |
+| 启动自检 | claude 版本、会话配置根、每个 provider 的凭据来源 + 端点实测结果 | 同上（自检始终实测端点，与 debug 无关） |
+
+对话会话用 `--output-format stream-json --verbose`：claude 的每条消息（文本、工具调用、API 报错）都会**实时**落到 daemon 日志，所以「发了消息没反应」时直接 `docker compose logs -f` 就能看到卡在哪一步（模型拒绝、认证失败、还是工具在跑）。
 
 ### 校验配置：assistant validate
 

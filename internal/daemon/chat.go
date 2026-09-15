@@ -1,7 +1,7 @@
 package daemon
 
 import (
-	"bytes"
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -45,6 +45,8 @@ type ChatConfig struct {
 	// SessionProject 是对话会话稳定的项目目录名（缺省 assistant-chat），文本
 	// 记录固定落 <SessionDir>/projects/<SessionProject>/，与启动目录无关
 	SessionProject string
+	// Debug 为真时把 claude 的原始 stream 事件、会话命令与结束统计也写进日志
+	Debug bool
 	// Bare 为真时对话会话用 claude 的 --bare 最小模式：不加载 hooks、插件同步、
 	// CLAUDE.md 自动发现与记忆，只认显式传入的 --settings/--mcp-config。对话
 	// 上下文本来就全靠显式参数（系统提示词 + 自举 daemon MCP），开关由 NewChat
@@ -100,9 +102,6 @@ func NewChat(config ChatConfig) (*Chat, error) {
 	if strings.TrimSpace(config.SessionProject) == "" {
 		config.SessionProject = claudecfg.ProjectDirName("assistant-chat")
 	}
-	if config.RunClaude == nil {
-		config.RunClaude = runClaude
-	}
 	chat := &Chat{
 		config:   config,
 		sessions: map[string]string{},
@@ -149,15 +148,17 @@ func (c *Chat) Handle(ctx context.Context, conversationID, text string) (string,
 	}
 	runCtx, cancel := context.WithTimeout(ctx, c.config.Timeout)
 	defer cancel()
-	output, err := c.config.RunClaude(
-		runCtx, c.config.ClaudeBin, args, c.config.StateDir,
-		claudecfg.SessionEnv(c.config.SessionDir, c.config.SessionProject))
+	progress := c.progressLogger(sessionID)
+	if c.config.Debug {
+		c.config.Log("对话[%s] 启动：%s", shortSession(sessionID), truncate(strings.Join(args, " "), 600))
+	}
+	result, err := c.run(runCtx, args, progress)
 	if err != nil {
 		return "", fmt.Errorf("对话会话失败: %w", err)
 	}
-	result, err := parseClaudeResult(output)
-	if err != nil {
-		return "", err
+	if c.config.Debug {
+		c.config.Log("对话[%s] 结束：subtype=%s is_error=%t turns=%d cost=$%.4f",
+			shortSession(sessionID), result.Subtype, result.IsError, result.NumTurns, result.CostUSD)
 	}
 	if fresh {
 		if err := c.remember(conversationID, sessionID); err != nil {
@@ -165,14 +166,10 @@ func (c *Chat) Handle(ctx context.Context, conversationID, text string) (string,
 		}
 	}
 	if result.IsError {
-		message := strings.TrimSpace(result.Result)
-		if message == "" && len(result.Errors) > 0 {
-			message = strings.Join(result.Errors, "；")
+		if message := strings.TrimSpace(result.Result); message != "" {
+			return message, nil
 		}
-		if message == "" {
-			message = "会话执行失败（" + result.Subtype + "）"
-		}
-		return message, nil
+		return result.FailureMessage(), nil
 	}
 	return strings.TrimSpace(result.Result), nil
 }
@@ -195,7 +192,8 @@ func (c *Chat) sessionArgs(sessionID, title string, fresh bool, text string) ([]
 	}
 	args := []string{
 		"-p", text,
-		"--output-format", "json",
+		"--output-format", "stream-json",
+		"--verbose",
 		"--permission-mode", "auto",
 		"--strict-mcp-config",
 		"--mcp-config", mcpPath,
@@ -326,20 +324,82 @@ func chatSessionTitle(conversationID string) string {
 	return "chat-" + hex.EncodeToString(sum[:4])
 }
 
-// claudeResult 是 claude -p --output-format json 的结果子集。
-type claudeResult struct {
-	Subtype string   `json:"subtype"`
-	IsError bool     `json:"is_error"`
-	Result  string   `json:"result"`
-	Errors  []string `json:"errors"`
+// run 执行一轮 claude 会话：默认逐行消费 stdout（实时进度进日志）；测试注入的
+// RunClaude 返回整段输出时按行折叠，两者归集结果一致。
+func (c *Chat) run(ctx context.Context, args []string, onProgress func(string)) (chatOutcome, error) {
+	if c.config.RunClaude != nil {
+		output, err := c.config.RunClaude(
+			ctx, c.config.ClaudeBin, args, c.config.StateDir,
+			claudecfg.SessionEnv(c.config.SessionDir, c.config.SessionProject))
+		if err != nil {
+			return chatOutcome{}, fmt.Errorf("%s: %s", c.config.ClaudeBin, truncate(err.Error(), 400))
+		}
+		return parseChatStream(output, onProgress)
+	}
+	return c.runStreaming(ctx, args, onProgress)
 }
 
-func parseClaudeResult(output []byte) (claudeResult, error) {
-	var result claudeResult
-	if err := json.Unmarshal(bytes.TrimSpace(output), &result); err != nil {
-		return result, fmt.Errorf("解析会话输出: %w（输出前 200 字节：%s）", err, truncate(string(output), 200))
+// runStreaming 启动 claude 并逐行解析 stream-json：assistant 文本、工具调用与
+// API 错误实时进日志（--debug 时连原始事件也写），最后返回归集结果。
+func (c *Chat) runStreaming(ctx context.Context, args []string, onProgress func(string)) (chatOutcome, error) {
+	command := exec.CommandContext(ctx, c.config.ClaudeBin, args...)
+	command.Dir = c.config.StateDir
+	if env := claudecfg.SessionEnv(c.config.SessionDir, c.config.SessionProject); len(env) > 0 {
+		command.Env = append(os.Environ(), env...)
 	}
-	return result, nil
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		return chatOutcome{}, err
+	}
+	stderr := &tailBuffer{limit: 4096}
+	command.Stderr = stderr
+	if err := command.Start(); err != nil {
+		return chatOutcome{}, fmt.Errorf("启动 %s: %w", c.config.ClaudeBin, err)
+	}
+	var outcome chatOutcome
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if c.config.Debug {
+			c.config.Log("对话[%s] 事件 %s", shortSession(outcome.SessionID), truncate(string(line), 500))
+		}
+		feedChatStreamLine(&outcome, line, onProgress)
+	}
+	scanErr := scanner.Err()
+	waitErr := command.Wait()
+	if waitErr != nil && outcome.Subtype == "" && outcome.Result == "" && outcome.APIError == "" {
+		message := strings.TrimSpace(stderr.String())
+		if message == "" {
+			message = waitErr.Error()
+		}
+		return outcome, fmt.Errorf("%s: %s", c.config.ClaudeBin, truncate(message, 400))
+	}
+	if scanErr != nil {
+		return outcome, fmt.Errorf("读取会话输出: %w", scanErr)
+	}
+	if outcome.Subtype == "" && outcome.Result == "" && outcome.APIError == "" {
+		return outcome, fmt.Errorf("会话没有返回结果（stderr：%s）", truncate(strings.TrimSpace(stderr.String()), 300))
+	}
+	return outcome, nil
+}
+
+// progressLogger 把会话进度写进 daemon 日志：一行一条，便于 grep「用户在问什么、
+// claude 在做什么、为什么没有回复」。
+func (c *Chat) progressLogger(sessionID string) func(string) {
+	return func(line string) {
+		c.config.Log("对话[%s] %s", shortSession(sessionID), truncate(line, 300))
+	}
+}
+
+func shortSession(sessionID string) string {
+	if len(sessionID) >= 8 {
+		return sessionID[:8]
+	}
+	if sessionID == "" {
+		return "-"
+	}
+	return sessionID
 }
 
 func truncate(text string, limit int) string {
@@ -350,21 +410,25 @@ func truncate(text string, limit int) string {
 	return string(runes[:limit]) + "…"
 }
 
-func runClaude(ctx context.Context, bin string, args []string, dir string, env []string) ([]byte, error) {
-	command := exec.CommandContext(ctx, bin, args...)
-	command.Dir = dir
-	if len(env) > 0 {
-		command.Env = append(os.Environ(), env...)
+// tailBuffer 只保留最后 limit 字节（失败时报 stderr 尾部，不刷屏）。
+type tailBuffer struct {
+	mu    sync.Mutex
+	limit int
+	data  []byte
+}
+
+func (b *tailBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.data = append(b.data, p...)
+	if b.limit > 0 && len(b.data) > b.limit {
+		b.data = b.data[len(b.data)-b.limit:]
 	}
-	var stdout, stderr bytes.Buffer
-	command.Stdout = &stdout
-	command.Stderr = &stderr
-	if err := command.Run(); err != nil {
-		message := strings.TrimSpace(stderr.String())
-		if message == "" {
-			message = err.Error()
-		}
-		return nil, fmt.Errorf("%s: %s", bin, truncate(message, 400))
-	}
-	return stdout.Bytes(), nil
+	return len(p), nil
+}
+
+func (b *tailBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return string(b.data)
 }

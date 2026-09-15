@@ -514,6 +514,12 @@ func RunSession(options SessionOptions) SessionOutcome {
 	options.MCPConfigPath = mergedMCPPath
 
 	bin, args, container := sessionCommand(options)
+	if config.Debug {
+		debugProgress(options.OnProgress, "会话命令："+truncateRunes(strings.Join(append([]string{bin}, args...), " "), 800))
+		debugProgress(options.OnProgress, "文本记录："+outcome.TranscriptPath)
+		debugProgress(options.OnProgress, fmt.Sprintf("会话配置：settings=%s mcp=%s 配置根=%s",
+			options.SettingsPath, options.MCPConfigPath, config.SessionDir))
+	}
 	command := exec.Command(bin, args...)
 	command.Dir = options.Cwd
 	// 文本记录的固定项目目录名必须在进程环境里（settings.env 无效）；同时把
@@ -523,7 +529,7 @@ func RunSession(options SessionOptions) SessionOutcome {
 	if len(env) > 0 {
 		command.Env = append(os.Environ(), env...)
 	}
-	stream := &streamWriter{outcome: &outcome, onProgress: options.OnProgress}
+	stream := &streamWriter{outcome: &outcome, onProgress: options.OnProgress, debug: config.Debug}
 	stderr := &tailWriter{}
 	command.Stdout = stream
 	command.Stderr = stderr
@@ -580,6 +586,13 @@ func RunSession(options SessionOptions) SessionOutcome {
 	if len(outcome.Errors) > 0 {
 		outcome.IsError = true
 	}
+	if config.Debug {
+		debugProgress(options.OnProgress, fmt.Sprintf("会话结束：subtype=%s is_error=%t turns=%d cost=$%.4f duration=%dms",
+			outcome.Subtype, outcome.IsError, outcome.NumTurns, outcome.CostUSD, outcome.DurationMS))
+		if tail := strings.TrimSpace(stderr.String()); tail != "" {
+			debugProgress(options.OnProgress, "stderr 尾部："+truncateRunes(tail, 600))
+		}
+	}
 	if outcome.DurationMS == 0 {
 		outcome.DurationMS = time.Since(startedAt).Milliseconds()
 	}
@@ -592,6 +605,8 @@ type streamWriter struct {
 	onProgress func(string)
 	buffer     []byte
 	sawResult  bool
+	// debug 为真时把每行原始 stream 事件也交给 onProgress（排查「会话在干什么」）
+	debug bool
 }
 
 func (w *streamWriter) Write(chunk []byte) (int, error) {
@@ -603,6 +618,7 @@ func (w *streamWriter) Write(chunk []byte) (int, error) {
 		}
 		line := string(w.buffer[:newline])
 		w.buffer = w.buffer[newline+1:]
+		w.reportDebug(line)
 		if FeedStreamLine(w.outcome, line, w.onProgress) {
 			w.sawResult = true
 		}
@@ -614,10 +630,40 @@ func (w *streamWriter) flush() {
 	if len(w.buffer) == 0 {
 		return
 	}
+	w.reportDebug(string(w.buffer))
 	if FeedStreamLine(w.outcome, string(w.buffer), w.onProgress) {
 		w.sawResult = true
 	}
 	w.buffer = nil
+}
+
+// debugProgress 在 --debug 下把细节写进待办日志（前缀 [debug]，便于过滤）。
+func debugProgress(onProgress func(string), line string) {
+	if onProgress == nil || line == "" {
+		return
+	}
+	onProgress("[debug] " + line)
+}
+
+// reportDebug 在 --debug 下把原始事件交出去（截断，避免日志被 base64/大 diff 淹没）。
+func (w *streamWriter) reportDebug(line string) {
+	if !w.debug || w.onProgress == nil {
+		return
+	}
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return
+	}
+	w.onProgress("[debug] 事件 " + truncateRunes(trimmed, 400))
+}
+
+// truncateRunes 按字符截断（日志用）。
+func truncateRunes(text string, limit int) string {
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit]) + "…"
 }
 
 // tailWriter 只保留 stderr 尾部（失败时留线索）。
