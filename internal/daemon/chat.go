@@ -25,8 +25,11 @@ import (
 const chatSystemPrompt = `你是 assistant daemon 的运维对话助手（微信桥）。用户通过微信提问，你用简洁中文回答。
 能力边界：通过 daemon MCP 只读查询调度状态——目标仓库、待办队列、进行中的评审/分诊会话、最近会话结果。
 必须用工具查询后再回答，不要编造状态；查询不可用（daemon 未运行）时如实说明。
-上下文被压缩后，可用 sessions MCP（session_search/session_read）回查本次会话的完整聊天记录。
 回答保持简短（微信场景），要点用短列表；除非用户要求，不复述原始 JSON。`
+
+// chatSessionsHint 只在配置了记录库时追加：sessions MCP 能回查被压缩掉的完整历史。
+const chatSessionsHint = `
+上下文被压缩或需要回忆更早的对话时，用 sessions MCP 的 session_search/session_read 回查本会话的完整记录。`
 
 // ChatConfig 是对话会话的配置。
 type ChatConfig struct {
@@ -281,7 +284,7 @@ func (c *Chat) sessionArgs(sessionID, title string, fresh bool, text, workspace 
 		"--mcp-config", mcpPath,
 		"--settings", settingsPath,
 		"--setting-sources", claudecfg.SettingSources,
-		"--append-system-prompt", chatSystemPrompt,
+		"--append-system-prompt", c.systemPrompt(),
 		"--max-turns", "50",
 	}
 	// 最小模式：不加载 hooks/插件同步/CLAUDE.md 自动发现与记忆，上下文只有上面
@@ -304,6 +307,14 @@ func (c *Chat) sessionArgs(sessionID, title string, fresh bool, text, workspace 
 		args = append(args, "--model", c.config.Model)
 	}
 	return args, nil
+}
+
+// systemPrompt 组装对话会话的 system 提示词：基础角色 + （配置了记录库时）历史回查提示。
+func (c *Chat) systemPrompt() string {
+	if strings.TrimSpace(c.config.Remote.URL) == "" {
+		return chatSystemPrompt
+	}
+	return chatSystemPrompt + chatSessionsHint
 }
 
 // logSessionConfig 逐行打印这一轮的生效配置：每行一个键值，不压成一条长行。
@@ -334,12 +345,14 @@ func (c *Chat) logSessionConfig(sessionID string, overrides claudecfg.Overrides,
 // mcpDocument 组装对话会话的 MCP 文档：自举 daemon MCP + provider 定义的原生
 // server（同名由 provider 覆盖）。写文件与日志摘要共用，避免两处漂移。
 func (c *Chat) mcpDocument(overrides claudecfg.Overrides) map[string]any {
-	document := map[string]any{
-		"mcpServers": map[string]any{
-			claudecfg.MCPServerDaemon:   claudecfg.DaemonMCPServer(claudecfg.AssistantCommand()),
-			claudecfg.MCPServerSessions: claudecfg.SessionsMCPServer(claudecfg.AssistantCommand()),
-		},
+	servers := map[string]any{
+		claudecfg.MCPServerDaemon: claudecfg.DaemonMCPServer(claudecfg.AssistantCommand()),
 	}
+	if strings.TrimSpace(c.config.Remote.URL) != "" {
+		// 记录库可用时才注入：否则这几个工具只会返回「未配置」
+		servers[claudecfg.MCPServerSessions] = claudecfg.SessionsMCPServer(claudecfg.AssistantCommand())
+	}
+	document := map[string]any{"mcpServers": servers}
 	return claudecfg.MergeMCPServers(document, overrides)
 }
 

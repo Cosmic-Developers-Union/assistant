@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"assistant/internal/claudecfg"
+	"assistant/internal/sessionstore"
 )
 
 // 对话会话按配置走 --bare（最小模式），并把自举 MCP 之外的上下文钉死为显式参数。
@@ -307,6 +308,7 @@ func TestChatConversationMappingAndSessionsMCP(t *testing.T) {
 	chat, err := NewChat(ChatConfig{
 		StateDir:   stateDir,
 		SessionDir: sessionDir,
+		Remote:     sessionstore.RemoteConfig{URL: "http://127.0.0.1:1", Token: "tok"},
 		RunClaude: func(_ context.Context, _ string, runArgs []string, _ string, _ []string) ([]byte, error) {
 			lastArgs = args2copy(runArgs)
 			return []byte(`{"subtype":"success","is_error":false,"result":"好的"}`), nil
@@ -379,7 +381,10 @@ func TestChatConversationMappingAndSessionsMCP(t *testing.T) {
 	}
 	servers, _ := document["mcpServers"].(map[string]any)
 	if _, ok := servers[claudecfg.MCPServerSessions]; !ok {
-		t.Errorf("应注入 sessions MCP：%v", servers)
+		t.Errorf("配置了记录库时应注入 sessions MCP：%v", servers)
+	}
+	if !strings.Contains(strings.Join(lastArgs, " "), "sessions MCP") {
+		t.Errorf("配置了记录库时提示词应带上回查提示：%v", lastArgs)
 	}
 	settings, _ := claudecfg.SessionSettingsMap(claudecfg.Overrides{}, "mcp__daemon", "mcp__daemon__*", "mcp__sessions", "mcp__sessions__*")["permissions"].(map[string]any)
 	allow, _ := settings["allow"].([]string)
