@@ -9,8 +9,8 @@ import (
 	"slices"
 	"strings"
 
+	"assistant/internal/credentials"
 	"assistant/internal/instances"
-	"assistant/internal/setup"
 	"assistant/internal/status"
 )
 
@@ -64,6 +64,7 @@ func setupConfigWritePath(configPath string) (string, error) {
 // 清单为空的 instance 不限定仓库（同步令牌可见的全部仓库）；否则逐个仓库限定。
 func instanceManagers(
 	ctx context.Context,
+	configPath string,
 	file *instances.File,
 	repoFilter string,
 	stderr io.Writer,
@@ -83,7 +84,7 @@ func instanceManagers(
 			matchedFilter = true
 		}
 		if len(repos) == 0 {
-			manager, err := newInstanceManager(ctx, instance, instances.Repo{}, logf)
+			manager, err := newInstanceManager(ctx, configPath, instance, instances.Repo{}, logf)
 			if err != nil {
 				return nil, err
 			}
@@ -91,7 +92,7 @@ func instanceManagers(
 			continue
 		}
 		for _, repo := range repos {
-			manager, err := newInstanceManager(ctx, instance, repo, logf)
+			manager, err := newInstanceManager(ctx, configPath, instance, repo, logf)
 			if err != nil {
 				return nil, err
 			}
@@ -109,54 +110,45 @@ func instanceManagers(
 
 func newInstanceManager(
 	ctx context.Context,
+	configPath string,
 	instance instances.Instance,
 	repo instances.Repo,
 	logf func(string, ...any),
 ) (*status.Manager, error) {
-	baseToken := instance.Reviewer.Token
-	if baseToken == "" {
-		baseToken = instance.AdminToken
-	}
-	if baseToken == "" {
-		return nil, fmt.Errorf("instance %s 缺少 reviewer/admin 令牌（请先运行 assistant setup）", instance.Host)
-	}
-	client, err := status.NewClient(instance.Host, baseToken)
+	review, err := tokenForPurpose(configPath, instance.Host, credentials.PurposeReview)
 	if err != nil {
 		return nil, err
 	}
-	adminToken := instance.AdminToken
-	if adminToken == "" && instance.AdminOAuth != nil {
-		// OAuth access token 短期有效：按需用 refresh token 换一个（不落盘）
-		access, _, refreshErr := setup.RefreshOAuthToken(
-			ctx, instance.Host,
-			instance.AdminOAuth.ClientID, instance.AdminOAuth.ClientSecret, instance.AdminOAuth.RefreshToken,
-			nil,
-		)
-		if refreshErr != nil {
-			logf("OAuth 凭据刷新失败（%v），分支保护读取回退严格模式", refreshErr)
-		} else {
-			adminToken = access
-		}
+	client, err := status.NewClient(instance.Host, review.Token)
+	if err != nil {
+		return nil, err
 	}
-	if adminToken != "" && adminToken != baseToken {
-		if err := client.UseBranchProtectionToken(adminToken); err != nil {
+	// 分支保护端点要求 repo admin：有 admin 用途令牌时单独配给这一处读取；
+	// 没有时读取被拒会按严格模式降级（不阻断其余能力）
+	if admin, ok, credentialErr := credentialFor(configPath, instance.Host, credentials.PurposeAdmin); credentialErr != nil {
+		return nil, credentialErr
+	} else if ok && admin.Token != review.Token {
+		if err := client.UseBranchProtectionToken(admin.Token); err != nil {
 			return nil, err
 		}
+		logf("分支保护读取使用 admin 令牌（@%s）", admin.User)
+	} else if !ok {
+		logf("没有 admin 用途令牌：分支保护读取将回退严格模式（管理员账号运行 assistant login 可补）")
 	}
 	managerOptions := []status.ManagerOption{status.WithProgress(logf)}
 	if instance.Reviewer.Name != "" {
 		managerOptions = append(managerOptions, status.WithContentReviewer(instance.Reviewer.Name))
 	}
-	// 状态评审者令牌按仓库独立（旧配置退回实例级共用令牌）
-	stateToken := repo.MergerToken
-	if stateToken == "" {
-		stateToken = instance.Merger.Token
-	}
-	if stateToken != "" {
-		if err := client.UseStateReviewerToken(stateToken); err != nil {
+	// 状态评审（门禁驳回）以 merge 账号提交才是 official review
+	if merge, ok, credentialErr := credentialFor(configPath, instance.Host, credentials.PurposeMerge); credentialErr != nil {
+		return nil, credentialErr
+	} else if ok {
+		if err := client.UseStateReviewerToken(merge.Token); err != nil {
 			return nil, err
 		}
 		managerOptions = append(managerOptions, status.WithStateReviewer(instance.Merger.Name))
+	} else {
+		logf("没有 merge 用途令牌：状态驳回将以基础令牌身份提交（运行 assistant setup 可补）")
 	}
 	if repo.Name != "" {
 		owner, name, err := instances.ParseRepoName(repo.Name)
@@ -176,7 +168,7 @@ func runManagerAction(
 	file *instances.File,
 	action func(context.Context, *status.Manager) error,
 ) error {
-	managers, err := instanceManagers(ctx, file, options.Repository, stderr)
+	managers, err := instanceManagers(ctx, options.ConfigPath, file, options.Repository, stderr)
 	if err != nil {
 		return err
 	}

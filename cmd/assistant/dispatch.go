@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"assistant/internal/credentials"
 	"assistant/internal/daemon"
 	"assistant/internal/dispatcher"
 	"assistant/internal/instances"
@@ -59,9 +60,10 @@ type dispatchTarget struct {
 	skipReason string
 }
 
-// targetToken 返回操作该仓库的令牌：评审者令牌优先，退回实例管理员令牌。
-func targetToken(instance instances.Instance) string {
-	return firstNonEmpty(instance.Reviewer.Token, instance.AdminToken)
+// targetToken 返回操作该仓库的令牌：目标解析时已从凭据库（purpose=review）写入
+// config.AccessToken；环境变量单实例模式则来自 GITEA_ACCESS_TOKEN / --token。
+func targetToken(target dispatchTarget) string {
+	return target.config.AccessToken
 }
 
 // countRepos 统计配置中的仓库总数（--repo-dir 单目标校验用）。
@@ -331,7 +333,7 @@ func resolveDispatchTargets(
 			continue
 		}
 		for _, repo := range repos {
-			target, err := resolveInstanceTarget(command, file, instance, repo, options)
+			target, err := resolveInstanceTarget(command, file, resolvedPath, instance, repo, options)
 			if err != nil {
 				return nil, err
 			}
@@ -362,6 +364,7 @@ func resolveDispatchTargets(
 func resolveInstanceTarget(
 	command *cobra.Command,
 	file *instances.File,
+	configPath string,
 	instance instances.Instance,
 	repo instances.Repo,
 	options *dispatcherOptions,
@@ -390,7 +393,12 @@ func resolveInstanceTarget(
 	flags := dispatcherFlags(command, repo.Name, options)
 	flags.Host = instance.Host
 	flags.Repository = repo.Name
-	flags.AccessToken = targetToken(instance)
+	// 评审身份从凭据库取（purpose=review）：会话提交的 review 以该令牌账号落库
+	reviewCredential, err := tokenForPurpose(configPath, instance.Host, credentials.PurposeReview)
+	if err != nil {
+		return dispatchTarget{}, err
+	}
+	flags.AccessToken = reviewCredential.Token
 	if flags.Reviewer == "" {
 		flags.Reviewer = instance.Reviewer.Name
 	}
@@ -471,27 +479,29 @@ func checkTargetsHealth(ctx context.Context, targets []dispatchTarget, log func(
 			return fmt.Errorf("instance %s reviewer 令牌校验失败: %w", host, err)
 		}
 		log(fmt.Sprintf("instance %s 可用（Gitea %s，reviewer @%s）", host, version, login))
-		if target.instance.Merger.Token != "" {
-			mergerClient, err := status.NewClient(host, target.instance.Merger.Token)
-			if err != nil {
-				return err
+		// merge / admin 令牌同样来自凭据库；缺失只提示，不阻断启动
+		for _, purpose := range []string{credentials.PurposeMerge, credentials.PurposeAdmin} {
+			credential, ok, credentialErr := credentialFor(target.config.ConfigPath, host, purpose)
+			if credentialErr != nil {
+				return credentialErr
 			}
-			mergerLogin, err := mergerClient.AuthenticatedUser(ctx)
-			if err != nil {
-				return fmt.Errorf("instance %s merger 令牌校验失败: %w", host, err)
+			if !ok {
+				log(fmt.Sprintf("提示：instance %s 缺少 %s 用途令牌——%s", host, purpose, missingTokenHint(host, purpose)))
+				continue
 			}
-			log(fmt.Sprintf("instance %s merger @%s 可用", host, mergerLogin))
-		}
-		if target.instance.AdminToken != "" {
-			adminClient, err := status.NewClient(host, target.instance.AdminToken)
-			if err != nil {
-				return err
+			roleClient, clientErr := status.NewClient(host, credential.Token)
+			if clientErr != nil {
+				return clientErr
 			}
-			if adminLogin, err := adminClient.AuthenticatedUser(ctx); err != nil {
-				log(fmt.Sprintf("警告：instance %s admin 令牌校验失败（%v），分支保护读取将回退严格模式", host, err))
-			} else {
-				log(fmt.Sprintf("instance %s admin @%s 可用", host, adminLogin))
+			roleLogin, loginErr := roleClient.AuthenticatedUser(ctx)
+			if loginErr != nil {
+				if purpose == credentials.PurposeAdmin {
+					log(fmt.Sprintf("警告：instance %s admin 令牌校验失败（%v），分支保护读取将回退严格模式", host, loginErr))
+					continue
+				}
+				return fmt.Errorf("instance %s %s 令牌校验失败: %w", host, purpose, loginErr)
 			}
+			log(fmt.Sprintf("instance %s %s @%s 可用", host, purpose, roleLogin))
 		}
 	}
 	return nil
@@ -573,7 +583,7 @@ func prepareManagedTargets(command *cobra.Command, targets []dispatchTarget) []d
 			continue
 		}
 		cloned, err := dispatcher.EnsureRepo(
-			target.repoDir, target.instance.Host, target.repo.Name, targetToken(target.instance))
+			target.repoDir, target.instance.Host, target.repo.Name, targetToken(*target))
 		if err != nil {
 			target.skipReason = err.Error()
 			fmt.Fprintf(command.ErrOrStderr(), "跳过 %s：%v\n", target.repo.Name, err)
@@ -630,7 +640,7 @@ func dispatchLogger(w io.Writer) func(string) {
 func newDispatchDeps(target dispatchTarget, w io.Writer, store *daemon.Store) dispatcher.Deps {
 	config := target.config
 	repoDir := target.repoDir
-	token := targetToken(target.instance)
+	token := targetToken(target)
 	deps := dispatcher.Deps{
 		Config:  config,
 		API:     target.client,
@@ -862,7 +872,7 @@ func runDispatchOneShot(
 		log(fmt.Sprintf("当前账户：@%s（reviewer=%s）", login, config.Reviewer))
 	}
 	if config.SyncMirror || target.managed {
-		if _, err := dispatcher.SyncMirror(target.repoDir, config.BaseBranch, targetToken(target.instance)); err != nil {
+		if _, err := dispatcher.SyncMirror(target.repoDir, config.BaseBranch, targetToken(target)); err != nil {
 			return err
 		}
 	}

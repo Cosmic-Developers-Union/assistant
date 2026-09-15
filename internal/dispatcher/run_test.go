@@ -421,7 +421,7 @@ func TestSessionCommandDocker(t *testing.T) {
 }
 
 // 会话必须显式拿到 reviewer 身份与配置来源：config.json 模式下 daemon 进程环境
-// 通常没有 Gitea 变量，会话 MCP 会退回个人 mcp_token，review 不再以 ai 落库。
+// 通常没有 Gitea 变量，会话 MCP 会退回开发者个人的 mcp 令牌，review 不再以 ai 落库。
 func TestSessionInjectsGiteaIdentityEnv(t *testing.T) {
 	// 宿主环境里的同名变量必须被会话注入值覆盖（而不是反过来）：否则 daemon 的
 	// 环境会决定会话的 Gitea 身份。

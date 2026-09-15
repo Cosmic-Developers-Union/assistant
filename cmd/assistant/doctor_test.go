@@ -78,8 +78,7 @@ func TestResolveServerTargetProbesRemotes(t *testing.T) {
 func TestResolveServerTargetMatchesInstanceByHostOnly(t *testing.T) {
 	dir := gitRemoteFixture(t)
 	file := &instances.File{Instances: []instances.Instance{{
-		Host:       "http://gitea.example.com:3000",
-		AdminOAuth: &instances.OAuthCredential{ClientID: "cid", RefreshToken: "rt"},
+		Host: "http://gitea.example.com:3000",
 	}}}
 	host, fullName, fromConfig := resolveServerTargetWithProbe(file, "", dir, func(string) bool {
 		t.Fatal("host 已命中实例，不应探测")

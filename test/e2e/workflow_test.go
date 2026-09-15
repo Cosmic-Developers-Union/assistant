@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"assistant/internal/credentials"
 	"assistant/internal/repoinstall"
 	"assistant/internal/setup"
 	"assistant/internal/status"
@@ -91,16 +92,21 @@ func TestInstalledWorkflowRunsOnGiteaRunner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAdmin() error = %v", err)
 	}
-	instance, err := setup.Run(ctx, options, admin)
+	result, err := setup.Run(ctx, options, admin)
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	// 2) Actions 配置：唯一需要的是 merge 令牌（MERGE_TOKEN）
+	instance := result.Instance
+	// 机器人令牌只在凭据库结果里：review / merge 按 purpose 各一条。
+	reviewCredential := credentialFor(t, result, credentials.PurposeReview)
+	mergeCredential := credentialFor(t, result, credentials.PurposeMerge)
+	// 2) Actions 配置：唯一需要的是 merge 令牌（MERGE_TOKEN，整站一条，
+	//    每个仓库写入同一个值）
 	actionsAdmin, err := setup.NewAdmin(ctx, setup.Options{Host: host, AdminToken: adminToken})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := setup.ConfigureActions(ctx, actionsAdmin, instance, false, t.Logf); err != nil {
+	if err := setup.ConfigureActions(ctx, actionsAdmin, instance, mergeCredential.Token, false, t.Logf); err != nil {
 		t.Fatalf("ConfigureActions() error = %v", err)
 	}
 
@@ -115,11 +121,11 @@ func TestInstalledWorkflowRunsOnGiteaRunner(t *testing.T) {
 	// 4) 用 install 的模板渲染生成仓库资产，经 PR 进入受保护的 main：直接推送
 	//    被分支保护拒绝，必须 2 票批准（ai + merge）后由 merge 合并（workflow
 	//    只有存在于默认分支才会被事件触发）
-	reviewerClient, err := status.NewClient(host, instance.Reviewer.Token)
+	reviewerClient, err := status.NewClient(host, reviewCredential.Token)
 	if err != nil {
 		t.Fatal(err)
 	}
-	mergerClient, err := status.NewClient(host, instance.Repos[0].MergerToken)
+	mergerClient, err := status.NewClient(host, mergeCredential.Token)
 	if err != nil {
 		t.Fatal(err)
 	}

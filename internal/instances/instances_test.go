@@ -14,7 +14,6 @@ func TestLoadNormalizesDefaultsAndRepoShorthand(t *testing.T) {
   "instances": [
     {
       "host": "https://gitea.example.com/",
-      "admin_token": "admin",
       "repos": ["owner/repo", {"name": "owner/another", "dir": "/srv/another"}]
     }
   ]
@@ -55,8 +54,6 @@ func TestLoadRejectsInvalidConfig(t *testing.T) {
 		"bad repository": `{"instances": [{"host": "https://a.example.com", "repos": ["nope"]}]}`,
 		"same account": `{"instances": [{"host": "https://a.example.com", "repos": [],
 			"reviewer": {"name": "bot"}, "merger": {"name": "bot"}}]}`,
-		"oauth without refresh": `{"instances": [{"host": "https://a.example.com", "repos": [],
-			"admin_oauth": {"client_id": "c1"}}]}`,
 		"unknown field": `{"instances": [{"host": "https://a.example.com", "repos": [], "token": "x"}]}`,
 	}
 	for name, content := range tests {
@@ -75,12 +72,10 @@ func TestLoadRejectsInvalidConfig(t *testing.T) {
 func TestSaveWritesRestrictedFileAndRoundTrips(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "config.json")
 	file := &File{Instances: []Instance{{
-		Host:       "https://gitea.example.com",
-		AdminToken: "admin",
-		AdminOAuth: &OAuthCredential{ClientID: "client-1", ClientSecret: "secret-1", RefreshToken: "refresh-1"},
-		Reviewer:   Account{Name: "ai", Token: "reviewer-token"},
-		Merger:     Account{Name: "merge", Token: "merger-token"},
-		Repos:      []Repo{{Name: "owner/repo", MergerToken: "repo-merger-token"}, {Name: "owner/another", Dir: "/srv/another"}},
+		Host:     "https://gitea.example.com",
+		Reviewer: Account{Name: "ai"},
+		Merger:   Account{Name: "merge"},
+		Repos:    []Repo{{Name: "owner/repo"}, {Name: "owner/another", Dir: "/srv/another"}},
 	}}}
 	if err := Save(path, file); err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -96,18 +91,21 @@ func TestSaveWritesRestrictedFileAndRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if loaded.Instances[0].Reviewer.Token != "reviewer-token" {
-		t.Errorf("token round-trip failed: %+v", loaded.Instances[0].Reviewer)
+	if loaded.Instances[0].Reviewer.Name != "ai" || loaded.Instances[0].Merger.Name != "merge" {
+		t.Errorf("account round-trip failed: %+v/%+v", loaded.Instances[0].Reviewer, loaded.Instances[0].Merger)
 	}
-	if loaded.Instances[0].AdminOAuth == nil || loaded.Instances[0].AdminOAuth.RefreshToken != "refresh-1" {
-		t.Errorf("admin_oauth round-trip failed: %+v", loaded.Instances[0].AdminOAuth)
+	if len(loaded.Instances[0].Repos) != 2 ||
+		loaded.Instances[0].Repos[0].Name != "owner/repo" ||
+		loaded.Instances[0].Repos[1].Dir != "/srv/another" {
+		t.Errorf("repo round-trip failed: %+v", loaded.Instances[0].Repos)
 	}
+	// 凭据已迁出配置：配置里不应再出现任何令牌字段。
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(raw), `"repo-merger-token"`) || !strings.Contains(string(raw), `"merger_token"`) {
-		t.Errorf("repo merger token should be persisted:\n%s", raw)
+	if strings.Contains(string(raw), "token") {
+		t.Errorf("凭据不应再写入 config.json：\n%s", raw)
 	}
 }
 
@@ -127,18 +125,19 @@ func TestRepoJSONShapes(t *testing.T) {
 		t.Errorf("encoded = %s", encoded)
 	}
 	var object Repo
-	if err := json.Unmarshal([]byte(`{"name":"owner/repo","dir":"/srv/repo","merger_token":"tok-1"}`), &object); err != nil {
+	if err := json.Unmarshal([]byte(`{"name":"owner/repo","dir":"/srv/repo","provider":"anthropic"}`), &object); err != nil {
 		t.Fatal(err)
 	}
-	if object.Dir != "/srv/repo" || object.MergerToken != "tok-1" {
+	if object.Dir != "/srv/repo" || object.Provider != "anthropic" {
 		t.Errorf("object = %+v", object)
 	}
-	// 有 dir/merger_token 时序列化为对象（不丢字段）
+	// 有 dir/provider 时序列化为对象（不丢字段）
 	encoded, err = json.Marshal(object)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(encoded), `"merger_token":"tok-1"`) {
+	if !strings.Contains(string(encoded), `"dir":"/srv/repo"`) ||
+		!strings.Contains(string(encoded), `"provider":"anthropic"`) {
 		t.Errorf("encoded = %s", encoded)
 	}
 }

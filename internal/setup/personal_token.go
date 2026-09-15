@@ -9,8 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-
-	"assistant/internal/credentials"
 )
 
 // 个人令牌端点（/api/v1/users/{user}/tokens）只接受账号自己的 Basic Auth：
@@ -125,21 +123,22 @@ func DeleteUserToken(ctx context.Context, host, user, password, totp string, id 
 	return userTokenRequest(ctx, http.MethodDelete, host, path, user, password, totp, nil, nil)
 }
 
-// EnsureMCPToken 保证账号上只有一条名为 name 的 MCP 令牌：先删除同名旧令牌
-// （Gitea 不回读令牌值，无法原地续期，只能轮换），再用最小 scope 新建。
+// EnsureUserToken 保证账号上只有一条名为 name 的用途令牌：先删除同名旧令牌
+// （Gitea 不回读令牌值，无法原地续期，只能轮换），再用给定 scope 新建。
 // 返回新令牌与轮换掉的同名旧令牌数。
 //
 // 复用判断不在这里：调用方先用已存的令牌做身份校验，校验通过就完全不调用本函数
 // （重复登录不会产生新令牌）。
-func EnsureMCPToken(
+func EnsureUserToken(
 	ctx context.Context,
 	host, user, password, totp, name string,
+	scopes []string,
 ) (token string, replaced int, err error) {
 	if err := validateUserTokenHost(host); err != nil {
 		return "", 0, err
 	}
-	if user == "" || password == "" || name == "" {
-		return "", 0, fmt.Errorf("创建 MCP 令牌需要用户名、密码和令牌名")
+	if user == "" || password == "" || name == "" || len(scopes) == 0 {
+		return "", 0, fmt.Errorf("创建令牌需要用户名、密码、令牌名与 scope")
 	}
 	tokens, err := ListUserTokens(ctx, host, user, password, totp)
 	if err != nil {
@@ -154,7 +153,7 @@ func EnsureMCPToken(
 		}
 		replaced++
 	}
-	token, err = CreateUserToken(ctx, host, user, password, totp, name, credentials.MCPScopes())
+	token, err = CreateUserToken(ctx, host, user, password, totp, name, scopes)
 	if err != nil {
 		return "", replaced, err
 	}

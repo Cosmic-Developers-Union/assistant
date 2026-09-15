@@ -6,6 +6,10 @@
 //	make test-e2e
 //
 // 触发。没有测试环境变量时自动跳过。
+//
+// 新认证模型下，instance 配置里没有任何令牌：管理员令牌由调用方从环境注入，
+// review/merge 令牌是 setup.Run 返回的 result.Credentials，按
+// (host, 账号, purpose) 唯一，写回凭据库（credentials.json）。
 package e2e
 
 import (
@@ -24,6 +28,7 @@ import (
 
 	gitea "gitea.dev/sdk"
 
+	"assistant/internal/credentials"
 	"assistant/internal/instances"
 	"assistant/internal/setup"
 	"assistant/internal/status"
@@ -81,6 +86,27 @@ func environment(t *testing.T) e2eEnv {
 	return env
 }
 
+// credentialsFor 返回 result.Credentials 里指定用途的令牌（0 条或多条都返回）。
+func credentialsFor(result setup.Result, purpose string) []credentials.Credential {
+	var matches []credentials.Credential
+	for _, credential := range result.Credentials {
+		if credential.Purpose == purpose {
+			matches = append(matches, credential)
+		}
+	}
+	return matches
+}
+
+// credentialFor 取指定用途的唯一令牌：(host, purpose) 只应有一条，多/少都算失败。
+func credentialFor(t *testing.T, result setup.Result, purpose string) credentials.Credential {
+	t.Helper()
+	matches := credentialsFor(result, purpose)
+	if len(matches) != 1 {
+		t.Fatalf("result.Credentials 中 purpose=%s 的令牌有 %d 条，want 1: %+v", purpose, len(matches), result.Credentials)
+	}
+	return matches[0]
+}
+
 func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 	env := environment(t)
 	host, adminToken := env.Host, env.AdminToken
@@ -93,13 +119,16 @@ func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("管理员令牌不可用: %v", err)
 	}
-	repositoryName := fmt.Sprintf("e2e-%d", time.Now().Unix())
+	stamp := time.Now().Unix()
+	repositoryName := fmt.Sprintf("e2e-%d", stamp)
+	secondRepositoryName := fmt.Sprintf("e2e-%d-b", stamp)
 	fullName := adminLogin + "/" + repositoryName
+	secondFullName := adminLogin + "/" + secondRepositoryName
 
 	options := setup.Options{
 		Host:        host,
 		AdminToken:  adminToken,
-		Repos:       []string{fullName},
+		Repos:       []string{fullName, secondFullName},
 		CreateRepos: true,
 		Log:         t.Logf,
 	}
@@ -107,39 +136,78 @@ func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAdmin() error = %v", err)
 	}
-	instance, err := setup.Run(ctx, options, admin)
+	result, err := setup.Run(ctx, options, admin)
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if instance.Reviewer.Token == "" || len(instance.Repos) != 1 || instance.Repos[0].MergerToken == "" {
-		t.Fatalf("tokens missing: %+v", instance)
-	}
-	if instance.Merger.Token != "" {
-		t.Errorf("Merger.Token = %q, want per-repo tokens only", instance.Merger.Token)
+	instance := result.Instance
+	if len(instance.Repos) != 2 {
+		t.Fatalf("instance.Repos = %+v, want 2 个仓库", instance.Repos)
 	}
 
-	// 机器人令牌可用且身份正确（merger 用仓库专属令牌）
-	for _, account := range []instances.Account{instance.Reviewer, {Name: instance.Merger.Name, Token: instance.Repos[0].MergerToken}} {
-		client, err := status.NewClient(host, account.Token)
+	// 凭据只在凭据库（result.Credentials）：review / merge 各一条，按
+	// (host, 账号, purpose) 唯一；instance 里只有账号名，没有令牌。
+	reviewCredential := credentialFor(t, result, credentials.PurposeReview)
+	mergeCredential := credentialFor(t, result, credentials.PurposeMerge)
+	if len(result.Credentials) != 2 {
+		t.Errorf("result.Credentials 有 %d 条，want 2（review + merge）: %+v", len(result.Credentials), result.Credentials)
+	}
+	for _, want := range []struct {
+		purpose    string
+		user       string
+		credential credentials.Credential
+	}{
+		{credentials.PurposeReview, instance.Reviewer.Name, reviewCredential},
+		{credentials.PurposeMerge, instance.Merger.Name, mergeCredential},
+	} {
+		if want.credential.Host != credentials.NormalizeHost(host) {
+			t.Errorf("%s 凭据 host = %q, want %q", want.purpose, want.credential.Host, credentials.NormalizeHost(host))
+		}
+		if want.credential.User != want.user {
+			t.Errorf("%s 凭据 user = %q, want %q", want.purpose, want.credential.User, want.user)
+		}
+		if want.credential.Token == "" {
+			t.Errorf("%s 凭据缺令牌: %+v", want.purpose, want.credential)
+		}
+		if want.credential.TokenName != setup.ReviewerTokenName {
+			t.Errorf("%s 凭据 token name = %q, want %q", want.purpose, want.credential.TokenName, setup.ReviewerTokenName)
+		}
+		if want.credential.Source != credentials.SourceSetup {
+			t.Errorf("%s 凭据 source = %q, want %q", want.purpose, want.credential.Source, credentials.SourceSetup)
+		}
+		if want.credential.LastEight != credentials.LastEight(want.credential.Token) {
+			t.Errorf("%s 凭据 last_eight = %q, want %q", want.purpose, want.credential.LastEight, credentials.LastEight(want.credential.Token))
+		}
+	}
+
+	// merge 是「一个站点一个账号一条令牌」：两个仓库共用同一条 MERGE_TOKEN，
+	// 新模型里不存在 per-repo merger token。
+	if got := len(credentialsFor(result, credentials.PurposeMerge)); got != 1 {
+		t.Errorf("merge 凭据有 %d 条，want 1（同一站点 merge 账号只允许一条令牌）", got)
+	}
+
+	// 机器人令牌可用且身份正确（review 与 merge 各用自己那条令牌）。
+	for _, credential := range []credentials.Credential{reviewCredential, mergeCredential} {
+		client, err := status.NewClient(host, credential.Token)
 		if err != nil {
 			t.Fatal(err)
 		}
 		login, err := client.AuthenticatedUser(ctx)
 		if err != nil {
-			t.Fatalf("AuthenticatedUser(%s) error = %v", account.Name, err)
+			t.Fatalf("AuthenticatedUser(%s) error = %v", credential.User, err)
 		}
-		if login != account.Name {
-			t.Errorf("token identity = %q, want %q", login, account.Name)
+		if login != credential.User {
+			t.Errorf("token identity = %q, want %q", login, credential.User)
 		}
 	}
 
 	repository := status.Repository{Owner: adminLogin, Name: repositoryName}
-	reviewerClient, err := status.NewClient(host, instance.Reviewer.Token)
+	reviewerClient, err := status.NewClient(host, reviewCredential.Token)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// 分支保护读取需要 repo admin：与运行期同口径，用 admin 令牌读取
-	if err := reviewerClient.UseBranchProtectionToken(instance.AdminToken); err != nil {
+	if err := reviewerClient.UseBranchProtectionToken(adminToken); err != nil {
 		t.Fatal(err)
 	}
 
@@ -148,7 +216,7 @@ func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 		{instance.Reviewer.Name, "write"},
 		{instance.Merger.Name, "admin"},
 	} {
-		permission := collaboratorPermission(t, host, instance.AdminToken, adminLogin, repositoryName, want.name)
+		permission := collaboratorPermission(t, host, adminToken, adminLogin, repositoryName, want.name)
 		if permission != want.permission {
 			t.Errorf("collaborator %s permission = %q, want %q", want.name, permission, want.permission)
 		}
@@ -211,11 +279,11 @@ func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateIssue() error = %v", err)
 	}
-	syncClient, err := status.NewClient(host, instance.Reviewer.Token)
+	syncClient, err := status.NewClient(host, reviewCredential.Token)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := syncClient.UseBranchProtectionToken(instance.AdminToken); err != nil {
+	if err := syncClient.UseBranchProtectionToken(adminToken); err != nil {
 		t.Fatal(err)
 	}
 	manager := status.NewManager(syncClient,
@@ -340,7 +408,7 @@ func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 
 	// merge 会签（第二票）后以 merge 身份合并：白名单 + 管理员须遵守 +
 	// official review request 门禁下仍能合入（回应后请求行已删）。
-	mergerClient, err := status.NewClient(host, instance.Repos[0].MergerToken)
+	mergerClient, err := status.NewClient(host, mergeCredential.Token)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,38 +453,63 @@ func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 	}
 
-	// Actions 配置：写 variable/secret 并回读校验（secret 只写不可读，只能
-	// 校验列表里存在；variable 可读回比对值）。
+	// Actions 配置：每个受管仓库写 MERGE_TOKEN，值是同一条 merge 令牌（整站
+	// 唯一）。secret 只写不可读，无法回读比对，因此这里校验两块：result 里
+	// merge 凭据恰好一条 + 每个仓库都存在 MERGE_TOKEN；令牌值正确性由
+	// workflow_test 的 automerge job（真实的 merge 身份合并）端到端验证。
 	actionsAdmin, err := setup.NewAdmin(ctx, setup.Options{Host: host, AdminToken: adminToken})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := setup.ConfigureActions(ctx, actionsAdmin, instance, false, t.Logf); err != nil {
-		t.Fatalf("ConfigureActions() error = %v", err)
+	// 写两次：同值 PUT 幂等（Gitea secret 只能覆盖写，重复执行不报错）。
+	for round := 0; round < 2; round++ {
+		if err := setup.ConfigureActions(ctx, actionsAdmin, instance, mergeCredential.Token, false, t.Logf); err != nil {
+			t.Fatalf("ConfigureActions() round %d error = %v", round+1, err)
+		}
 	}
-	secrets := listActionSecrets(t, host, adminToken, adminLogin, repositoryName)
-	if !slices.Contains(secrets, setup.ActionsSecretMergeToken) {
-		t.Errorf("secrets = %v, want %s", secrets, setup.ActionsSecretMergeToken)
+	for _, repo := range instance.Repos {
+		owner, name, err := instances.ParseRepoName(repo.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		secrets := listActionSecrets(t, host, adminToken, owner, name)
+		if !slices.Contains(secrets, setup.ActionsSecretMergeToken) {
+			t.Errorf("%s secrets = %v, want %s", repo.Name, secrets, setup.ActionsSecretMergeToken)
+		}
 	}
 
-	// 幂等：重复 setup 复用令牌
+	// 幂等：重复 setup 复用凭据库里的同一条令牌（按 purpose 比对，而不是
+	// 旧模型 instance 上的令牌字段）。
 	rerunOptions := options
 	rerunOptions.Existing = &instance
+	rerunOptions.ExistingCredentials = result.Credentials
 	rerunOptions.Log = t.Logf
 	admin2, err := setup.NewAdmin(ctx, rerunOptions)
 	if err != nil {
 		t.Fatal(err)
 	}
-	instance2, err := setup.Run(ctx, rerunOptions, admin2)
+	rerun, err := setup.Run(ctx, rerunOptions, admin2)
 	if err != nil {
 		t.Fatalf("rerun Run() error = %v", err)
 	}
-	if instance2.Reviewer.Token != instance.Reviewer.Token ||
-		instance2.Repos[0].MergerToken != instance.Repos[0].MergerToken {
-		t.Errorf("rerun regenerated tokens: %+v", instance2)
+	for _, purpose := range []string{credentials.PurposeReview, credentials.PurposeMerge} {
+		before := credentialFor(t, result, purpose)
+		after := credentialFor(t, rerun, purpose)
+		if after.Token == "" {
+			t.Errorf("rerun %s 凭据缺令牌: %+v", purpose, after)
+			continue
+		}
+		if after.Token != before.Token || after.LastEight != before.LastEight || after.User != before.User {
+			t.Errorf("rerun %s 令牌未复用：before(last_eight)=%s after(last_eight)=%s",
+				purpose, before.LastEight, after.LastEight)
+		}
+	}
+	if rerun.Instance.Reviewer.Name != instance.Reviewer.Name || rerun.Instance.Merger.Name != instance.Merger.Name {
+		t.Errorf("rerun instance 机器人账号变化：%+v，want reviewer=%s merger=%s",
+			rerun.Instance, instance.Reviewer.Name, instance.Merger.Name)
 	}
 
-	// 配置落盘可回读
+	// 配置落盘可回读，且不落任何令牌（凭据只在凭据库）。
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	if err := instances.Save(configPath, &instances.File{Instances: []instances.Instance{instance}}); err != nil {
 		t.Fatal(err)
@@ -425,8 +518,19 @@ func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if loaded.Instances[0].Reviewer.Token != instance.Reviewer.Token {
-		t.Errorf("config round-trip lost token")
+	if loaded.Instances[0].Reviewer.Name != instance.Reviewer.Name ||
+		loaded.Instances[0].Merger.Name != instance.Merger.Name ||
+		len(loaded.Instances[0].Repos) != len(instance.Repos) {
+		t.Errorf("config round-trip lost instance 配置：%+v", loaded.Instances[0])
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, credential := range result.Credentials {
+		if credential.Token != "" && strings.Contains(string(data), credential.Token) {
+			t.Errorf("config.json 不应包含 %s 令牌明文（凭据只在 credentials.json）", credential.Purpose)
+		}
 	}
 }
 

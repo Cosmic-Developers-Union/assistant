@@ -133,7 +133,7 @@ func newMCPCommand(configFlag *string) *cobra.Command {
 
 // newDoctorCommand 检测当前仓库的 assistant 配置状态：本地 install 产物
 // （文件/段落/MCP）与仓库服务端（分支保护/标签/协作者/merge 令牌）。
-func newDoctorCommand() *cobra.Command {
+func newDoctorCommand(configFlag *string) *cobra.Command {
 	options := &repoToolOptions{}
 	var requiredApprovals int64
 	var allowAdminOverride bool
@@ -148,7 +148,7 @@ func newDoctorCommand() *cobra.Command {
 			"发现问题时以退出码 1 结束；本地问题重新 install、服务端问题重新 setup/actions。",
 		Args: cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			return runDoctor(command, options, requiredApprovals, allowAdminOverride)
+			return runDoctor(command, *configFlag, options, requiredApprovals, allowAdminOverride)
 		},
 	}
 	flags := command.Flags()

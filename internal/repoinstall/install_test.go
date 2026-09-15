@@ -365,32 +365,6 @@ func TestInstallSkipsSkillsWithNoneSource(t *testing.T) {
 	}
 }
 
-// tea CLI 登录检测：按站点匹配第一条 URL 且令牌非空的登录。
-func TestDetectTeaToken(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yml")
-	content := `logins:
-    - name: other
-      url: https://other.example.com
-      token: other-token
-    - name: gitea
-      url: https://gitea.example.com
-      token: tea-token
-`
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("TEA_CONFIG", path)
-
-	token, source, ok := DetectTeaToken("https://gitea.example.com/", os.Getenv)
-	if !ok || token != "tea-token" || source != path {
-		t.Errorf("DetectTeaToken() = %q %q %v, want tea-token", token, source, ok)
-	}
-	if _, _, ok := DetectTeaToken("https://none.example.com", os.Getenv); ok {
-		t.Error("未登录站点不应命中")
-	}
-}
-
 func TestResolveMCPFromGitRemote(t *testing.T) {
 	dir := t.TempDir()
 	if output, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {

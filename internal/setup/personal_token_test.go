@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"assistant/internal/credentials"
 )
 
 // personalTokenServer 模拟 Gitea 的个人令牌端点（Basic Auth + X-Gitea-OTP）。
@@ -72,7 +74,7 @@ func (s *personalTokenServer) handler() http.Handler {
 	})
 }
 
-func TestEnsureMCPTokenRotatesSameName(t *testing.T) {
+func TestEnsureUserTokenRotatesSameName(t *testing.T) {
 	state := &personalTokenServer{
 		t: t, user: "alice", password: "s3cret", totp: "123456",
 		existing: []map[string]any{
@@ -83,8 +85,8 @@ func TestEnsureMCPTokenRotatesSameName(t *testing.T) {
 	server := httptest.NewServer(state.handler())
 	defer server.Close()
 
-	token, replaced, err := EnsureMCPToken(context.Background(), server.URL, "alice", "s3cret", "123456",
-		"assistant-mcp-gitea.example.com-alice")
+	token, replaced, err := EnsureUserToken(context.Background(), server.URL, "alice", "s3cret", "123456",
+		"assistant-mcp-gitea.example.com-alice", credentials.BotScopes())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,12 +111,12 @@ func TestEnsureMCPTokenRotatesSameName(t *testing.T) {
 }
 
 // 创建失败时不回显服务端响应体（避免密码/提示语泄露），也不误报成功。
-func TestEnsureMCPTokenCreateFailure(t *testing.T) {
+func TestEnsureUserTokenCreateFailure(t *testing.T) {
 	state := &personalTokenServer{t: t, user: "alice", password: "s3cret", failCreate: true}
 	server := httptest.NewServer(state.handler())
 	defer server.Close()
 
-	_, _, err := EnsureMCPToken(context.Background(), server.URL, "alice", "s3cret", "", "assistant-mcp-x-alice")
+	_, _, err := EnsureUserToken(context.Background(), server.URL, "alice", "s3cret", "", "assistant-mcp-x-alice", credentials.BotScopes())
 	if err == nil {
 		t.Fatal("创建失败必须报错")
 	}
@@ -126,13 +128,13 @@ func TestEnsureMCPTokenCreateFailure(t *testing.T) {
 	}
 }
 
-func TestEnsureMCPTokenRejectsBadInput(t *testing.T) {
-	if _, _, err := EnsureMCPToken(context.Background(), "not a url", "alice", "p", "", "n"); err == nil {
+func TestEnsureUserTokenRejectsBadInput(t *testing.T) {
+	if _, _, err := EnsureUserToken(context.Background(), "not a url", "alice", "p", "", "n", credentials.BotScopes()); err == nil {
 		t.Fatal("无效站点地址应报错")
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer server.Close()
-	if _, _, err := EnsureMCPToken(context.Background(), server.URL, "alice", "", "", "n"); err == nil {
+	if _, _, err := EnsureUserToken(context.Background(), server.URL, "alice", "", "", "n", credentials.BotScopes()); err == nil {
 		t.Fatal("缺密码应报错（不发起请求）")
 	}
 }

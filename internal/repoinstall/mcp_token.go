@@ -1,7 +1,6 @@
 package repoinstall
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -10,13 +9,14 @@ import (
 	"assistant/internal/instances"
 )
 
-// resolveMCPToken 只自动选择与目标站点绑定的凭据，按优先级：
+// resolveMCPToken 选择与目标站点绑定的 MCP 令牌，按优先级：
 //
 //	GITEA_ACCESS_TOKEN > GITEA_ACCESS_TOKEN_FILE >
-//	credentials.json 里 (host, purpose=mcp) 的身份令牌 >
-//	config.json 的 mcp_token（旧版字段，兼容读取）
+//	credentials.json 里 (host, purpose=mcp) 的登录令牌
 //
-// 显式覆盖出错时不降级，避免配置错误意外切换调用身份。
+// 环境变量优先是为了让评审会话的显式注入（dispatcher 以 reviewer 身份启动会话）
+// 能覆盖本地登录；其余情况一律以凭据库为准。显式覆盖出错时不降级，避免配置错误
+// 意外切换调用身份。
 func resolveMCPToken(host, configPath string, getenv func(string) string) (string, string, error) {
 	if token := strings.TrimSpace(getenv("GITEA_ACCESS_TOKEN")); token != "" {
 		return token, "GITEA_ACCESS_TOKEN", nil
@@ -44,10 +44,10 @@ func resolveMCPToken(host, configPath string, getenv func(string) string) (strin
 	if err != nil {
 		return "", "", err
 	}
-	if ok {
-		return credential.Token, "assistant login (" + credentialPath + "，@" + credential.User + ")", nil
+	if !ok {
+		return "", "", nil
 	}
-	return legacyMCPToken(host, configPath, getenv)
+	return credential.Token, "assistant login (" + credentialPath + "，@" + credential.User + ")", nil
 }
 
 // mcpCredentialPath 决定凭据库位置：ASSISTANT_CREDENTIALS > 与 config.json 同目录
@@ -68,37 +68,4 @@ func mcpCredentialPath(configPath string, getenv func(string) string) (string, e
 		effective = path
 	}
 	return credentials.PathFor(effective)
-}
-
-// legacyMCPToken 读取旧版写在 config.json 实例条目里的 mcp_token（迁移期兼容）。
-func legacyMCPToken(host, configPath string, getenv func(string) string) (string, string, error) {
-	path := strings.TrimSpace(configPath)
-	if path == "" {
-		path = strings.TrimSpace(getenv("ASSISTANT_CONFIG"))
-	}
-	explicit := path != ""
-	if path == "" {
-		var err error
-		path, err = instances.DefaultConfigPath()
-		if err != nil {
-			return "", "", err
-		}
-	}
-	file, err := instances.Load(path)
-	if err != nil && (explicit || !errors.Is(err, os.ErrNotExist)) {
-		return "", "", err
-	}
-	if file == nil {
-		return "", "", nil
-	}
-	for _, instance := range file.Instances {
-		if !sameTeaHost(instance.Host, host) {
-			continue
-		}
-		if token := strings.TrimSpace(instance.MCPToken); token != "" {
-			return token, "config.json mcp_token (" + path + "，旧版字段)", nil
-		}
-		break
-	}
-	return "", "", nil
 }

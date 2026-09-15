@@ -14,41 +14,32 @@ import (
 
 	gitea "gitea.dev/sdk"
 
+	"assistant/internal/credentials"
 	"assistant/internal/instances"
 	"assistant/internal/status"
 )
 
 const (
-	adminTokenName = "assistant-admin"
-	// 机器人令牌的最小权限集：仓库读写（分支/协作者/合并）、Issue 读写
-	// （标签、评论、PR review）与读取自身账号（完成判定的身份校验）。
-	botTokenScopes = "read:repository,write:repository,read:issue,write:issue,read:user"
-	httpTimeout    = 30 * time.Second
+	// 机器人令牌的 scope 见 credentials.BotScopes()。
+	httpTimeout = 30 * time.Second
 )
 
 // giteaAdmin 是 Admin 的真实实现：读操作走 raw REST，写操作走 Gitea SDK。
+// 管理员令牌由调用方从凭据库（purpose=admin）解析后传入——setup 不自己获取凭据。
 type giteaAdmin struct {
-	host          string
-	token         string
-	basicUser     string
-	basicPassword string
-	http          *http.Client
-	sdk           *gitea.Client
-	dryRun        bool
-	// ephemeral 表示令牌来自 OAuth 登录（会过期），不应写入配置。
-	ephemeral bool
-	// oauth 是 OAuth 登录留下的刷新凭据（可落盘，运行期换取 access token）。
-	oauth *instances.OAuthCredential
-	log   func(string, ...any)
+	host   string
+	token  string
+	http   *http.Client
+	sdk    *gitea.Client
+	dryRun bool
+	log    func(string, ...any)
 	// passwords 记录本次创建的机器人账号随机密码，用于令牌创建失败时以
 	// Basic Auth 回退（不写盘）。
 	passwords map[string]string
 }
 
-// NewAdmin 构造高权限操作面：校验管理员身份。凭据来源：
-//   - --oauth：OAuth2 授权码 + PKCE 浏览器登录（令牌不落盘）；
-//   - --admin-token / 已有配置：直接校验；
-//   - --admin-user/--admin-password：用它换取一个长期管理员令牌。
+// NewAdmin 构造高权限操作面：只接受管理员令牌（assistant login 写入凭据库的
+// purpose=admin），并在线校验该令牌确实是实例管理员。
 func NewAdmin(ctx context.Context, options Options) (*giteaAdmin, error) {
 	options.applyDefaults()
 	if err := options.validate(); err != nil {
@@ -60,90 +51,31 @@ func NewAdmin(ctx context.Context, options Options) (*giteaAdmin, error) {
 	}
 	httpClient := &http.Client{Timeout: httpTimeout}
 	admin := &giteaAdmin{
-		host:          options.Host,
-		token:         options.AdminToken,
-		basicUser:     options.AdminUser,
-		basicPassword: options.AdminPassword,
-		http:          httpClient,
-		dryRun:        options.DryRun,
-		log:           logf,
-		passwords:     map[string]string{},
+		host:      options.Host,
+		token:     options.AdminToken,
+		http:      httpClient,
+		dryRun:    options.DryRun,
+		log:       logf,
+		passwords: map[string]string{},
 	}
-	var login string
-	var isAdmin bool
-	if options.OAuth != nil {
-		oauthOptions := *options.OAuth
-		oauthOptions.Host = options.Host
-		if strings.TrimSpace(oauthOptions.ClientID) == "" {
-			oauthOptions.ClientID = DefaultOAuthClientID
-		}
-		if oauthOptions.Log == nil {
-			oauthOptions.Log = logf
-		}
-		result, err := OAuthLogin(ctx, oauthOptions)
-		if err != nil {
-			return nil, err
-		}
-		admin.token = result.Token
-		admin.ephemeral = true
-		admin.oauth = &instances.OAuthCredential{
-			ClientID:     oauthOptions.ClientID,
-			ClientSecret: oauthOptions.ClientSecret,
-			RefreshToken: result.RefreshToken,
-		}
-		login, isAdmin = result.Login, result.IsAdmin
-	} else {
-		if admin.token == "" && !admin.dryRun {
-			token, err := admin.createTokenWithBasic(ctx, options.AdminUser, options.AdminPassword, adminTokenName)
-			if err != nil {
-				return nil, fmt.Errorf("用管理员账号生成令牌: %w", err)
-			}
-			admin.token = token
-			logf("已为管理员账号 @%s 生成访问令牌", options.AdminUser)
-		}
-		var err error
-		login, isAdmin, err = admin.AuthenticatedUser(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("校验管理员凭据: %w", err)
-		}
+	login, isAdmin, err := admin.AuthenticatedUser(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("校验管理员令牌: %w", err)
 	}
 	if !isAdmin {
 		return nil, fmt.Errorf("账号 @%s 不是管理员，setup 需要管理员权限", login)
 	}
-	if admin.token != "" {
-		sdk, err := gitea.NewClient(
-			admin.host,
-			gitea.SetToken(admin.token),
-			gitea.SetHTTPClient(httpClient),
-			gitea.SetUserAgent("assistant-setup/1"),
-		)
-		if err != nil {
-			return nil, fmt.Errorf("创建 Gitea 客户端: %w", err)
-		}
-		admin.sdk = sdk
+	sdk, err := gitea.NewClient(
+		admin.host,
+		gitea.SetToken(admin.token),
+		gitea.SetHTTPClient(httpClient),
+		gitea.SetUserAgent("assistant-setup/1"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("创建 Gitea 客户端: %w", err)
 	}
+	admin.sdk = sdk
 	return admin, nil
-}
-
-func (a *giteaAdmin) AdminToken() string {
-	return a.token
-}
-
-// PersistentToken 返回可长期使用的管理员令牌；OAuth 令牌会过期，返回空。
-func (a *giteaAdmin) PersistentToken() string {
-	if a.ephemeral {
-		return ""
-	}
-	return a.token
-}
-
-// AdminOAuth 返回 OAuth 刷新凭据（非 OAuth 登录时为 nil）。
-func (a *giteaAdmin) AdminOAuth() *instances.OAuthCredential {
-	if a.oauth == nil {
-		return nil
-	}
-	copied := *a.oauth
-	return &copied
 }
 
 func (a *giteaAdmin) AuthenticatedUser(ctx context.Context) (string, bool, error) {
@@ -208,9 +140,9 @@ type tokenInfo struct {
 	TokenLastEight string `json:"token_last_eight"`
 }
 
-// ConvergeToken 把账号令牌收敛为唯一一个：保留 keepToken（按末 8 位匹配）
-// 或新建 tokenName，删除账号下其余所有令牌。reviewer 用：同一站点同时只允许
-// 一个评审主机（dispatcher 单飞锁是进程内的），令牌唯一从凭据层面强制约束。
+// ConvergeToken 把账号令牌收敛为唯一一个：保留 keepToken（按末 8 位匹配）或新建
+// tokenName，删除账号下其余所有令牌。review/merge 机器人都用它：一个站点一个
+// 机器人账号只允许一条令牌，避免凭据层面出现多个可用身份。
 func (a *giteaAdmin) ConvergeToken(
 	ctx context.Context,
 	name, password, tokenName, keepToken string,
@@ -240,46 +172,7 @@ func (a *giteaAdmin) ConvergeToken(
 		created = true
 	}
 	if deleted > 0 {
-		a.log("已清理 %s 的 %d 个历史令牌（保证单一评审主机）", name, deleted)
-	}
-	return token, created, nil
-}
-
-// EnsureRepoToken 保证 tokenName 令牌存在（保留 keepToken 或新建），只清理
-// 同名旧令牌与历史共享名（assistant / assistant-setup-*），不影响账号下其他
-// 仓库的独立令牌。merger 用：每个项目一个自己的令牌。
-func (a *giteaAdmin) EnsureRepoToken(
-	ctx context.Context,
-	name, password, tokenName, keepToken string,
-) (token string, created bool, err error) {
-	tokens, err := a.listTokensBasic(ctx, name, password)
-	if err != nil {
-		return "", false, fmt.Errorf("列出 %s 的令牌: %w", name, err)
-	}
-	keepID := matchToken(tokens, keepToken)
-	deleted := 0
-	for _, item := range tokens {
-		if item.ID == keepID {
-			continue
-		}
-		if item.Name == tokenName || isLegacySharedTokenName(item.Name) {
-			if err := a.deleteTokenBasic(ctx, name, password, item.ID); err != nil {
-				return "", false, fmt.Errorf("删除 %s 的令牌 %s: %w", name, item.Name, err)
-			}
-			deleted++
-		}
-	}
-	if keepID != 0 {
-		token = keepToken
-	} else {
-		token, err = a.createTokenBasic(ctx, name, password, tokenName)
-		if err != nil {
-			return "", false, err
-		}
-		created = true
-	}
-	if deleted > 0 {
-		a.log("已清理 %s 的 %d 个同名/历史令牌（%s）", name, deleted, tokenName)
+		a.log("已清理 %s 的 %d 个历史令牌（一个机器人账号只保留一条令牌）", name, deleted)
 	}
 	return token, created, nil
 }
@@ -298,16 +191,10 @@ func matchToken(tokens []tokenInfo, token string) int64 {
 	return 0
 }
 
-// isLegacySharedTokenName 是旧版共用令牌的命名：merger 收敛时会清掉这些，
-// 避免多个项目复用同一个令牌。
-func isLegacySharedTokenName(name string) bool {
-	return name == "assistant" || strings.HasPrefix(name, "assistant-setup-")
-}
-
 // createTokenBasic 以机器人自己的 Basic Auth 建一个指定名称的令牌。
-// Gitea 的建令牌端点只接受 Basic Auth：管理员令牌（含 OAuth 令牌）会 401/403。
+// Gitea 的建令牌端点只接受 Basic Auth：管理员令牌调不了。
 func (a *giteaAdmin) createTokenBasic(ctx context.Context, name, password, tokenName string) (string, error) {
-	body := map[string]any{"name": tokenName, "scopes": strings.Split(botTokenScopes, ",")}
+	body := map[string]any{"name": tokenName, "scopes": credentials.BotScopes()}
 	var payload struct {
 		Token string `json:"sha1"`
 	}
@@ -605,22 +492,7 @@ type requestAuth struct {
 }
 
 func (a *giteaAdmin) auth() requestAuth {
-	return requestAuth{token: a.token, user: a.basicUser, password: a.basicPassword}
-}
-
-func (a *giteaAdmin) createTokenWithBasic(ctx context.Context, user, password, tokenName string) (string, error) {
-	var payload struct {
-		Token string `json:"sha1"`
-	}
-	body := map[string]any{"name": tokenName, "scopes": []string{"all"}}
-	path := "/api/v1/users/" + url.PathEscape(user) + "/tokens"
-	if _, err := a.do(ctx, http.MethodPost, path, requestAuth{user: user, password: password}, body, &payload); err != nil {
-		return "", err
-	}
-	if payload.Token == "" {
-		return "", fmt.Errorf("Gitea 未返回令牌")
-	}
-	return payload.Token, nil
+	return requestAuth{token: a.token}
 }
 
 func (a *giteaAdmin) do(

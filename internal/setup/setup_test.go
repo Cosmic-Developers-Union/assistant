@@ -6,12 +6,12 @@ import (
 	"strings"
 	"testing"
 
+	"assistant/internal/credentials"
 	"assistant/internal/instances"
 )
 
 type fakeAdmin struct {
 	adminLogin    string
-	adminToken    string
 	users         map[string]bool
 	tokens        map[string]string
 	passwords     map[string]string
@@ -21,14 +21,12 @@ type fakeAdmin struct {
 	collaborators map[string]string
 	protections   map[string]ProtectionOptions
 	labels        map[string]bool
-	oauth         *instances.OAuthCredential
 	secrets       map[string]string
 }
 
 func newFakeAdmin(repos ...string) *fakeAdmin {
 	fake := &fakeAdmin{
 		adminLogin:    "admin",
-		adminToken:    "admin-token",
 		users:         map[string]bool{"admin": true},
 		tokens:        map[string]string{},
 		passwords:     map[string]string{},
@@ -46,18 +44,6 @@ func newFakeAdmin(repos ...string) *fakeAdmin {
 
 func (f *fakeAdmin) AuthenticatedUser(context.Context) (string, bool, error) {
 	return f.adminLogin, true, nil
-}
-
-func (f *fakeAdmin) AdminToken() string { return f.adminToken }
-
-func (f *fakeAdmin) PersistentToken() string { return f.adminToken }
-
-func (f *fakeAdmin) AdminOAuth() *instances.OAuthCredential {
-	if f.oauth == nil {
-		return nil
-	}
-	copied := *f.oauth
-	return &copied
 }
 
 func (f *fakeAdmin) UserExists(_ context.Context, name string) (bool, error) {
@@ -82,7 +68,7 @@ func (f *fakeAdmin) EnsurePassword(_ context.Context, name string) (string, erro
 	return f.passwords[name], nil
 }
 
-// ConvergeToken 模拟 reviewer 语义：账号下只保留一个令牌。
+// ConvergeToken 模拟 review/merge 共用语义：账号下只保留一个令牌。
 func (f *fakeAdmin) ConvergeToken(_ context.Context, name, _ /*password*/, tokenName, keepToken string) (string, bool, error) {
 	if keepToken != "" {
 		for key, value := range f.tokens {
@@ -101,19 +87,6 @@ func (f *fakeAdmin) ConvergeToken(_ context.Context, name, _ /*password*/, token
 			delete(f.tokens, key)
 		}
 	}
-	f.tokenSeq++
-	token := fmt.Sprintf("token-%s-%d", name, f.tokenSeq)
-	f.tokens[tokenKey(name, tokenName)] = token
-	return token, true, nil
-}
-
-// EnsureRepoToken 模拟 merger 语义：每个令牌名一个独立令牌，其他仓库的令牌
-// 不受影响。
-func (f *fakeAdmin) EnsureRepoToken(_ context.Context, name, _ /*password*/, tokenName, keepToken string) (string, bool, error) {
-	if keepToken != "" && f.tokens[tokenKey(name, tokenName)] == keepToken {
-		return keepToken, false, nil
-	}
-	delete(f.tokens, tokenKey(name, tokenName))
 	f.tokenSeq++
 	token := fmt.Sprintf("token-%s-%d", name, f.tokenSeq)
 	f.tokens[tokenKey(name, tokenName)] = token
@@ -178,12 +151,11 @@ func (f *fakeAdmin) DeleteRepoSecret(_ context.Context, fullName, name string) e
 func TestConfigureActionsWritesExpectedRepoConfig(t *testing.T) {
 	admin := newFakeAdmin("acme/repo")
 	instance := instances.Instance{
-		Host:       "https://gitea.example.com",
-		AdminToken: "admin-token",
-		Merger:     instances.Account{Name: "merge"},
-		Repos:      []instances.Repo{{Name: "acme/repo", MergerToken: "merger-token"}},
+		Host:   "https://gitea.example.com",
+		Merger: instances.Account{Name: "merge"},
+		Repos:  []instances.Repo{{Name: "acme/repo"}},
 	}
-	if err := ConfigureActions(context.Background(), admin, instance, false, nil); err != nil {
+	if err := ConfigureActions(context.Background(), admin, instance, "merger-token", false, nil); err != nil {
 		t.Fatalf("ConfigureActions() error = %v", err)
 	}
 	if got := admin.secrets["acme/repo/"+ActionsSecretMergeToken]; got != "merger-token" {
@@ -194,15 +166,20 @@ func TestConfigureActionsWritesExpectedRepoConfig(t *testing.T) {
 	}
 }
 
-func TestConfigureActionsRequiresRepoToken(t *testing.T) {
+// merge 令牌来自凭据库（setup 的 Result.Credentials），不再从 instance 读取：
+// 缺失/空令牌必须被拒绝。
+func TestConfigureActionsRequiresMergeToken(t *testing.T) {
 	admin := newFakeAdmin("acme/repo")
 	instance := instances.Instance{
 		Host:   "https://gitea.example.com",
 		Merger: instances.Account{Name: "merge"},
 		Repos:  []instances.Repo{{Name: "acme/repo"}},
 	}
-	if err := ConfigureActions(context.Background(), admin, instance, false, nil); err == nil {
-		t.Error("ConfigureActions() error = nil, want missing merger token error")
+	if err := ConfigureActions(context.Background(), admin, instance, "", false, nil); err == nil {
+		t.Error("ConfigureActions() error = nil, want missing merge token error")
+	}
+	if len(admin.secrets) != 0 {
+		t.Errorf("missing token must not write secrets: %+v", admin.secrets)
 	}
 }
 
@@ -213,7 +190,7 @@ func TestConfigureActionsDryRunMakesNoWrites(t *testing.T) {
 		Merger: instances.Account{Name: "merge"},
 		Repos:  []instances.Repo{{Name: "acme/repo"}},
 	}
-	if err := ConfigureActions(context.Background(), admin, instance, true, nil); err != nil {
+	if err := ConfigureActions(context.Background(), admin, instance, "merger-token", true, nil); err != nil {
 		t.Fatalf("ConfigureActions() error = %v", err)
 	}
 	if len(admin.secrets) != 0 {
@@ -230,26 +207,64 @@ func testOptions() Options {
 	}
 }
 
+// credentialFor 在 Result.Credentials 里按 (user, purpose) 取凭据。
+func credentialFor(result Result, user, purpose string) (credentials.Credential, bool) {
+	for _, credential := range result.Credentials {
+		if credential.User == user && credential.Purpose == purpose {
+			return credential, true
+		}
+	}
+	return credentials.Credential{}, false
+}
+
+// assertBotCredential 断言 Result.Credentials 恰好有一条该机器人凭据并核对元数据。
+func assertBotCredential(t *testing.T, result Result, user, purpose, tokenPrefix string) {
+	t.Helper()
+	matches := 0
+	for _, item := range result.Credentials {
+		if item.User == user && item.Purpose == purpose {
+			matches++
+		}
+	}
+	credential, ok := credentialFor(result, user, purpose)
+	if !ok || matches != 1 {
+		t.Fatalf("credentials for %s/%s = %+v, want exactly one", user, purpose, result.Credentials)
+	}
+	if credential.Host != "https://gitea.example.com" {
+		t.Errorf("credential.Host = %q", credential.Host)
+	}
+	if credential.TokenName != ReviewerTokenName || credential.Source != credentials.SourceSetup {
+		t.Errorf("credential = %+v", credential)
+	}
+	if !strings.HasPrefix(credential.Token, tokenPrefix) {
+		t.Errorf("credential.Token = %q, want prefix %q", credential.Token, tokenPrefix)
+	}
+	if credential.LastEight != credentials.LastEight(credential.Token) {
+		t.Errorf("credential.LastEight = %q", credential.LastEight)
+	}
+	if len(credential.Scopes) != len(credentials.BotScopes()) {
+		t.Errorf("credential.Scopes = %v", credential.Scopes)
+	}
+}
+
 func TestRunInitializesInstance(t *testing.T) {
 	admin := newFakeAdmin("acme/repo")
-	instance, err := Run(context.Background(), testOptions(), admin)
+	result, err := Run(context.Background(), testOptions(), admin)
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
+	instance := result.Instance
 	if instance.Host != "https://gitea.example.com" {
 		t.Errorf("Host = %q", instance.Host)
 	}
-	if instance.Reviewer.Name != instances.DefaultReviewerName || instance.Reviewer.Token == "" {
+	if instance.Reviewer.Name != instances.DefaultReviewerName {
 		t.Errorf("Reviewer = %+v", instance.Reviewer)
 	}
-	if instance.Merger.Name != instances.DefaultMergerName || instance.Merger.Token != "" {
-		t.Errorf("Merger = %+v, want account without instance-level token", instance.Merger)
+	if instance.Merger.Name != instances.DefaultMergerName {
+		t.Errorf("Merger = %+v", instance.Merger)
 	}
-	if len(instance.Repos) != 1 || instance.Repos[0].MergerToken == "" {
-		t.Errorf("Repos = %+v, want per-repo merger token", instance.Repos)
-	}
-	if !strings.HasPrefix(instance.Repos[0].MergerToken, "token-"+instances.DefaultMergerName+"-") {
-		t.Errorf("repo merger token = %q", instance.Repos[0].MergerToken)
+	if len(instance.Repos) != 1 || instance.Repos[0].Name != "acme/repo" {
+		t.Errorf("Repos = %+v", instance.Repos)
 	}
 	if !admin.users[instances.DefaultReviewerName] || !admin.users[instances.DefaultMergerName] {
 		t.Errorf("bot users not created: %v", admin.users)
@@ -271,12 +286,14 @@ func TestRunInitializesInstance(t *testing.T) {
 	if !admin.labels["acme/repo"] {
 		t.Error("labels were not reconciled")
 	}
-	if len(instance.Repos) != 1 || instance.Repos[0].Name != "acme/repo" {
-		t.Errorf("Repos = %+v", instance.Repos)
+	// 机器人令牌只回 Result.Credentials，绝不进 instance。
+	if len(result.Credentials) != 2 {
+		t.Fatalf("Credentials = %+v, want exactly review + merge", result.Credentials)
 	}
-	if instance.AdminToken != "admin-token" {
-		t.Errorf("AdminToken = %q", instance.AdminToken)
-	}
+	assertBotCredential(t, result, instances.DefaultReviewerName, credentials.PurposeReview,
+		"token-"+instances.DefaultReviewerName+"-")
+	assertBotCredential(t, result, instances.DefaultMergerName, credentials.PurposeMerge,
+		"token-"+instances.DefaultMergerName+"-")
 }
 
 func TestRunReusesValidToken(t *testing.T) {
@@ -286,14 +303,19 @@ func TestRunReusesValidToken(t *testing.T) {
 	options := testOptions()
 	options.Existing = &instances.Instance{
 		Host:     "https://gitea.example.com",
-		Reviewer: instances.Account{Name: instances.DefaultReviewerName, Token: "existing-token"},
+		Reviewer: instances.Account{Name: instances.DefaultReviewerName},
 	}
-	instance, err := Run(context.Background(), options, admin)
+	options.ExistingCredentials = []credentials.Credential{{
+		Host: "https://gitea.example.com", User: instances.DefaultReviewerName,
+		Purpose: credentials.PurposeReview, Token: "existing-token",
+	}}
+	result, err := Run(context.Background(), options, admin)
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if instance.Reviewer.Token != "existing-token" {
-		t.Errorf("Reviewer.Token = %q, want reused token", instance.Reviewer.Token)
+	credential, ok := credentialFor(result, instances.DefaultReviewerName, credentials.PurposeReview)
+	if !ok || credential.Token != "existing-token" {
+		t.Errorf("review credential = %+v ok=%v, want reused token", credential, ok)
 	}
 }
 
@@ -301,7 +323,7 @@ func TestRunDryRunMakesNoMutations(t *testing.T) {
 	admin := newFakeAdmin("acme/repo")
 	options := testOptions()
 	options.DryRun = true
-	instance, err := Run(context.Background(), options, admin)
+	result, err := Run(context.Background(), options, admin)
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -311,12 +333,12 @@ func TestRunDryRunMakesNoMutations(t *testing.T) {
 	if len(admin.collaborators) != 0 || len(admin.protections) != 0 || len(admin.labels) != 0 {
 		t.Errorf("dry-run mutated: %+v %+v %+v", admin.collaborators, admin.protections, admin.labels)
 	}
-	if instance.Reviewer.Token != "" || instance.Merger.Token != "" {
-		t.Errorf("dry-run should not invent tokens: %+v", instance)
+	if len(result.Credentials) != 0 {
+		t.Errorf("dry-run should not invent credentials: %+v", result.Credentials)
 	}
-	for _, repo := range instance.Repos {
-		if repo.MergerToken != "" {
-			t.Errorf("dry-run should not invent repo merger tokens: %+v", repo)
+	for _, repo := range result.Instance.Repos {
+		if repo.Name == "" {
+			t.Errorf("dry-run lost repo config: %+v", result.Instance.Repos)
 		}
 	}
 }
@@ -344,18 +366,20 @@ func TestRunWithoutReposInitializesInstanceOnly(t *testing.T) {
 	admin := newFakeAdmin()
 	options := testOptions()
 	options.Repos = nil
-	instance, err := Run(context.Background(), options, admin)
+	result, err := Run(context.Background(), options, admin)
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if len(instance.Repos) != 0 {
-		t.Errorf("Repos = %+v, want empty", instance.Repos)
+	if len(result.Instance.Repos) != 0 {
+		t.Errorf("Repos = %+v, want empty", result.Instance.Repos)
 	}
-	if instance.Reviewer.Token == "" {
-		t.Errorf("reviewer token missing: %+v", instance)
-	}
-	if instance.Merger.Token != "" {
-		t.Errorf("Merger.Token = %q, want no instance-level merger token", instance.Merger.Token)
+	for user, purpose := range map[string]string{
+		instances.DefaultReviewerName: credentials.PurposeReview,
+		instances.DefaultMergerName:   credentials.PurposeMerge,
+	} {
+		if _, ok := credentialFor(result, user, purpose); !ok {
+			t.Errorf("缺少 %s/%s 凭据：%+v", user, purpose, result.Credentials)
+		}
 	}
 	if len(admin.collaborators) != 0 || len(admin.protections) != 0 || len(admin.labels) != 0 {
 		t.Errorf("repo-level mutations with no repos: %+v %+v %+v",
@@ -393,12 +417,12 @@ func TestRunOverridesExistingReposAndKeepsDirs(t *testing.T) {
 			{Name: "acme/stale"},
 		},
 	}
-	instance, err := Run(context.Background(), options, admin)
+	result, err := Run(context.Background(), options, admin)
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if len(instance.Repos) != 1 || instance.Repos[0].Dir != "/srv/repo" {
-		t.Errorf("Repos = %+v, want preserved dir for acme/repo", instance.Repos)
+	if len(result.Instance.Repos) != 1 || result.Instance.Repos[0].Dir != "/srv/repo" {
+		t.Errorf("Repos = %+v, want preserved dir for acme/repo", result.Instance.Repos)
 	}
 }
 
@@ -429,6 +453,3 @@ func TestRandomPassword(t *testing.T) {
 		t.Errorf("passwords look weak: %q %q", first, second)
 	}
 }
-
-// 显式指定的 OAuth 客户端（如管理员在 /-/admin/applications 创建的全局应用）
-// 直接采用，不再自动注册用户级应用。

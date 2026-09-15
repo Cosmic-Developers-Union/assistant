@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"assistant/internal/config"
+	"assistant/internal/credentials"
 	"assistant/internal/dispatcher"
 	"assistant/internal/instances"
 	"assistant/internal/repoinstall"
@@ -20,6 +21,7 @@ import (
 // （分支保护/标签/协作者/merge 令牌）。服务端检查在拿不到实例配置或凭据时跳过。
 func runDoctor(
 	command *cobra.Command,
+	configPath string,
 	options *repoToolOptions,
 	requiredApprovals int64,
 	allowAdminOverride bool,
@@ -31,7 +33,7 @@ func runDoctor(
 	}
 	problems := printLocalFindings(stdout, local)
 
-	server, target, err := auditServer(command, options, requiredApprovals, allowAdminOverride)
+	server, target, err := auditServer(command, configPath, options, requiredApprovals, allowAdminOverride)
 	if err != nil {
 		return err
 	}
@@ -81,6 +83,7 @@ func printServerFindings(stdout io.Writer, findings []status.AuditFinding) int {
 // 说明原因，而不是报错。
 func auditServer(
 	command *cobra.Command,
+	configPath string,
 	options *repoToolOptions,
 	requiredApprovals int64,
 	allowAdminOverride bool,
@@ -114,8 +117,8 @@ func auditServer(
 		return nil, "", err
 	}
 
-	// 凭据：实例配置优先（登录/setup 写入的 admin 令牌或 OAuth 刷新凭据），
-	// 否则 env 单实例模式
+	// 凭据：config.json 模式用该实例的 admin 用途令牌（凭据库）；env 单实例模式
+	// 用 GITEA_HOST/GITEA_ACCESS_TOKEN
 	var token, reviewer, merger string
 	if fromConfig {
 		instance, ok := findInstanceByHost(file, host)
@@ -124,10 +127,12 @@ func auditServer(
 		}
 		host = instance.Host
 		reviewer, merger = instance.Reviewer.Name, instance.Merger.Name
-		var adminErr error
-		token, adminErr = adminTokenForInstance(ctx, instance, func(string, ...any) {})
-		if adminErr != nil {
-			token = instance.Reviewer.Token
+		admin, found, credentialErr := credentialFor(configPath, host, credentials.PurposeAdmin)
+		if credentialErr != nil {
+			return nil, "", credentialErr
+		}
+		if found {
+			token = admin.Token
 		}
 	} else {
 		configuration, loadErr := config.Load(os.Getenv)

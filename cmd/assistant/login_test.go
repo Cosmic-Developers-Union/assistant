@@ -2,9 +2,6 @@ package main
 
 import (
 	"bytes"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,64 +12,59 @@ import (
 	"assistant/internal/repoinstall"
 )
 
-// 身份登录只写自己那条 (host, user, purpose=mcp) 凭据：管理、机器人凭据与其他
-// 实例都不受影响，MCP 解析也用凭据库里的令牌。
-func TestLoginMCPCredentialIsolation(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/user" || !strings.Contains(r.Header.Get("Authorization"), "mcp-private-token") {
-			t.Errorf("unexpected authentication request: %s", r.URL.Path)
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		fmt.Fprint(w, `{"login":"developer","is_admin":true}`)
-	}))
-	defer server.Close()
-	path := filepath.Join(t.TempDir(), "config.json")
+// 登录只影响目标 (host, user) 的凭据：其他站点的凭据不动，MCP 解析用登录写入的
+// mcp 令牌。
+func TestLoginCredentialIsolation(t *testing.T) {
+	state, server := newLoginServer(t, "developer", false)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
 	t.Setenv("ASSISTANT_CREDENTIALS", "")
 	savePlatform(t, path, instances.Instance{
-		Host: server.URL, AdminToken: "admin-token",
-		Reviewer: instances.Account{Name: "ai", Token: "reviewer-token"},
-		Merger:   instances.Account{Name: "merge", Token: "merger-token"},
+		Host:     server.URL,
+		Reviewer: instances.Account{Name: "ai"},
+		Merger:   instances.Account{Name: "merge"},
 	})
-	before, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out bytes.Buffer
-	command := newLoginCommand(&path)
-	command.SetOut(&out)
-	command.SetArgs([]string{server.URL, "--user", "developer", "--token", "mcp-private-token"})
-	if err := command.Execute(); err != nil {
+	store := &credentials.File{}
+	store.SetCredential(credentials.Credential{
+		Host: "https://other.example.com", User: "bob", Purpose: credentials.PurposeMerge, Token: "other-merge",
+	})
+	if err := credentials.Save(filepath.Join(dir, "credentials.json"), store); err != nil {
 		t.Fatal(err)
 	}
 
-	store, err := credentials.Load(filepath.Join(filepath.Dir(path), "credentials.json"))
+	var out bytes.Buffer
+	command := newLoginCommand(&path)
+	command.SetOut(&out)
+	command.SetErr(&out)
+	command.SetIn(strings.NewReader(" s3cret \n"))
+	command.SetArgs([]string{server.URL, "--user", "developer", "--password-stdin"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.creates) != 1 {
+		t.Fatalf("creates = %v", state.creates)
+	}
+
+	reloaded, err := credentials.Load(filepath.Join(dir, "credentials.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	credential, ok := store.CredentialForUser(server.URL, "developer", credentials.PurposeMCP)
-	if !ok || credential.Token != "mcp-private-token" {
+	if credential, ok := reloaded.CredentialForUser("https://other.example.com", "bob", credentials.PurposeMerge); !ok ||
+		credential.Token != "other-merge" {
+		t.Fatalf("其他站点凭据被改动：%+v", credential)
+	}
+	credential, ok := reloaded.CredentialForUser(server.URL, "developer", credentials.PurposeMCP)
+	if !ok || credential.Token != "token-"+state.creates[0] {
 		t.Fatalf("凭据 = %+v ok=%v", credential, ok)
 	}
-	if identity, ok := store.IdentityFor(server.URL); !ok || identity.User != "developer" || !identity.IsAdmin {
-		t.Fatalf("identity = %+v ok=%v", identity, ok)
-	}
-	// 没有旧字段可迁移时，config.json 原样不动
-	after, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(before, after) {
-		t.Fatalf("身份登录不应改动 config.json：\n%s", after)
-	}
-	if strings.Contains(out.String(), "mcp-private-token") {
-		t.Fatal("login output leaked token")
+	if strings.Contains(out.String(), credential.Token) {
+		t.Fatal("登录输出泄露令牌")
 	}
 	spec, err := repoinstall.ResolveMCP(command.Context(), repoinstall.MCPOptions{
 		Host: server.URL, ConfigPath: path, Getenv: func(string) string { return "" },
 	})
-	if err != nil || spec.Token != "mcp-private-token" {
-		t.Fatalf("MCP cannot use registered credential: %v", err)
+	if err != nil || spec.Token != credential.Token {
+		t.Fatalf("MCP 未使用登录写入的令牌：%v", err)
 	}
 }
 
@@ -83,69 +75,27 @@ func savePlatform(t *testing.T, path string, instance instances.Instance) {
 	}
 }
 
-// 旧的 tea/OAuth 登记路径只记录身份、不派生 mcp 令牌：必须当场说明，否则用户下次
-// 跑 assistant mcp gitea 会看到"没有匹配的登录凭据"，看起来像工具坏了。
-func TestLegacyLoginAnnouncesMissingMCPCredential(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/user" {
-			t.Errorf("unexpected request: %s", r.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		fmt.Fprint(w, `{"login":"Ge","is_admin":true}`)
-	}))
-	defer server.Close()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-	t.Setenv("ASSISTANT_CREDENTIALS", "")
-
-	var out bytes.Buffer
-	command := newLoginCommand(&path)
-	command.SetOut(&out)
-	command.SetErr(&out)
-	command.SetArgs([]string{server.URL, "--token", "admin-token"})
-	if err := command.Execute(); err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"MCP 工具面还没有凭据", "assistant login " + server.URL + " --user Ge", "--token-file"} {
-		if !strings.Contains(out.String(), want) {
-			t.Errorf("输出缺少 %q：\n%s", want, out.String())
-		}
-	}
-	store, err := credentials.Load(filepath.Join(dir, "credentials.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if identity, ok := store.IdentityFor(server.URL); !ok || identity.User != "Ge" || !identity.IsAdmin {
-		t.Fatalf("identity = %+v ok=%v", identity, ok)
-	}
-	if _, ok := store.CredentialForUser(server.URL, "Ge", credentials.PurposeMCP); ok {
-		t.Fatal("这条路径不应生成 mcp 令牌")
-	}
-
-	// login list 把「有身份、没 mcp」标成 none(仅身份)，而不是与完全没配过的站点混同
-	out.Reset()
-	savePlatform(t, path, instances.Instance{Host: server.URL, AdminToken: "admin-token"})
-	list := newLoginListCommand(&path)
-	list.SetOut(&out)
-	if err := list.Execute(); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out.String(), "mcp=none(仅身份)") || !strings.Contains(out.String(), "identity=@Ge(admin)") {
-		t.Fatalf("login list 输出 = %q", out.String())
-	}
-}
-
 func TestLoginListAndRemove(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
+	t.Setenv("ASSISTANT_CREDENTIALS", "")
 	savePlatform(t, path, instances.Instance{
-		Host:       "https://gitea.example.com",
-		Reviewer:   instances.Account{Name: "ai"},
-		Merger:     instances.Account{Name: "merge"},
-		Repos:      []instances.Repo{{Name: "acme/repo"}},
-		AdminOAuth: &instances.OAuthCredential{ClientID: "cid", RefreshToken: "rt"},
+		Host:     "https://gitea.example.com",
+		Reviewer: instances.Account{Name: "ai"},
+		Merger:   instances.Account{Name: "merge"},
+		Repos:    []instances.Repo{{Name: "acme/repo"}},
 	})
+	store := &credentials.File{}
+	store.SetIdentity(credentials.Identity{Host: "https://gitea.example.com", User: "Ge", IsAdmin: true})
+	store.SetCredential(credentials.Credential{Host: "https://gitea.example.com", User: "Ge",
+		Purpose: credentials.PurposeMCP, Token: "mcp", TokenName: "assistant-mcp"})
+	store.SetCredential(credentials.Credential{Host: "https://gitea.example.com", User: "Ge",
+		Purpose: credentials.PurposeAdmin, Token: "admin", TokenName: "assistant-admin"})
+	store.SetCredential(credentials.Credential{Host: "https://gitea.example.com", User: "ai",
+		Purpose: credentials.PurposeReview, Token: "review", TokenName: "assistant"})
+	if err := credentials.Save(filepath.Join(dir, "credentials.json"), store); err != nil {
+		t.Fatal(err)
+	}
 
 	var output bytes.Buffer
 	list := newLoginListCommand(&path)
@@ -153,10 +103,14 @@ func TestLoginListAndRemove(t *testing.T) {
 	if err := list.Execute(); err != nil {
 		t.Fatalf("login list error = %v", err)
 	}
-	if !strings.Contains(output.String(), "https://gitea.example.com") ||
-		!strings.Contains(output.String(), "admin=oauth") ||
-		!strings.Contains(output.String(), "repos=1") {
-		t.Fatalf("login list 输出 = %q", output.String())
+	text := output.String()
+	for _, want := range []string{
+		"https://gitea.example.com", "repos=1", "reviewer=ai", "merger=merge",
+		"identity=@Ge(admin)", "mcp@Ge", "admin@Ge", "review@ai",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("login list 输出缺少 %q：\n%s", want, text)
+		}
 	}
 
 	output.Reset()
@@ -169,18 +123,28 @@ func TestLoginListAndRemove(t *testing.T) {
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("移除最后一个平台后应删除配置文件：%v", err)
 	}
+	if _, err := os.Stat(filepath.Join(dir, "credentials.json")); !os.IsNotExist(err) {
+		t.Errorf("凭据清空后应删除凭据文件：%v", err)
+	}
 }
 
 func TestLoginRemoveKeepsOtherPlatforms(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
+	t.Setenv("ASSISTANT_CREDENTIALS", "")
 	file := &instances.File{Instances: []instances.Instance{
-		{Host: "https://a.example.com", Reviewer: instances.Account{Name: "ai"},
-			Merger: instances.Account{Name: "merge"}, AdminToken: "token-a"},
-		{Host: "https://b.example.com", Reviewer: instances.Account{Name: "ai"},
-			Merger: instances.Account{Name: "merge"}, AdminToken: "token-b"},
+		{Host: "https://a.example.com", Reviewer: instances.Account{Name: "ai"}, Merger: instances.Account{Name: "merge"}},
+		{Host: "https://b.example.com", Reviewer: instances.Account{Name: "ai"}, Merger: instances.Account{Name: "merge"}},
 	}}
 	if err := instances.Save(path, file); err != nil {
+		t.Fatal(err)
+	}
+	store := &credentials.File{}
+	store.SetCredential(credentials.Credential{Host: "https://a.example.com", User: "alice",
+		Purpose: credentials.PurposeMCP, Token: "a-mcp"})
+	store.SetCredential(credentials.Credential{Host: "https://b.example.com", User: "bob",
+		Purpose: credentials.PurposeMCP, Token: "b-mcp"})
+	if err := credentials.Save(filepath.Join(dir, "credentials.json"), store); err != nil {
 		t.Fatal(err)
 	}
 	remove := newLoginRemoveCommand(&path)
@@ -195,6 +159,16 @@ func TestLoginRemoveKeepsOtherPlatforms(t *testing.T) {
 	}
 	if len(loaded.Instances) != 1 || loaded.Instances[0].Host != "https://b.example.com" {
 		t.Fatalf("剩余平台 = %+v", loaded.Instances)
+	}
+	reloaded, err := credentials.Load(filepath.Join(dir, "credentials.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reloaded.CredentialForUser("https://a.example.com", "alice", credentials.PurposeMCP); ok {
+		t.Fatal("a 站点的凭据应被删除")
+	}
+	if _, ok := reloaded.CredentialForUser("https://b.example.com", "bob", credentials.PurposeMCP); !ok {
+		t.Fatal("b 站点的凭据不应受影响")
 	}
 }
 
@@ -224,42 +198,5 @@ func TestConfigResolutionIgnoresWorkingDirectory(t *testing.T) {
 	want := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "Cosmic-Developers-Union", "assistant", "config.json")
 	if writePath != want {
 		t.Fatalf("写配置落点 = %q, want %q", writePath, want)
-	}
-}
-
-// 登录令牌解析：显式 --token 优先，其次 tea CLI 配置，无匹配则为空。
-func TestResolveLoginToken(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yml")
-	content := `logins:
-    - name: gitea
-      url: https://gitea.example.com
-      token: tea-token
-`
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("TEA_CONFIG", path)
-
-	if token, source, _ := resolveLoginToken("https://gitea.example.com", "explicit-token", os.Getenv); token != "explicit-token" || source != "--token" {
-		t.Errorf("显式令牌 = %q %q", token, source)
-	}
-	token, source, hint := resolveLoginToken("https://gitea.example.com/", "", os.Getenv)
-	if token != "tea-token" || !strings.Contains(source, "tea config") || hint != "" {
-		t.Errorf("tea 复用 = %q %q hint=%q, want tea-token", token, source, hint)
-	}
-	if token, _, hint := resolveLoginToken("https://other.example.com", "", os.Getenv); token != "" || hint != "" {
-		t.Errorf("未登录站点不应命中：%q hint=%q", token, hint)
-	}
-
-	// 有登录条目但没有令牌：给出可行动提示
-	noToken := filepath.Join(dir, "no-token.yml")
-	if err := os.WriteFile(noToken, []byte("logins:\n  - name: GeX\n    url: https://gitea.aicler.com\n    auth_method: oauth\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("TEA_CONFIG", noToken)
-	token, _, hint = resolveLoginToken("https://gitea.aicler.com", "", os.Getenv)
-	if token != "" || !strings.Contains(hint, "没有保存令牌") || !strings.Contains(hint, "--token") {
-		t.Errorf("空令牌提示缺失：token=%q hint=%q", token, hint)
 	}
 }

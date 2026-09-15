@@ -33,7 +33,7 @@ const (
 	PurposeMerge  = "merge"
 )
 
-// MCPScopes 返回自动创建的 MCP 个人令牌的权限集：仓库/Issue 读写 + 读取自身账号
+// MCPScopes 返回登录派生的 MCP 个人令牌权限集：仓库/Issue 读写 + 读取自身账号
 // （身份校验用）。刻意不含 organization/package——MCP 工具面用不到。
 //
 // 每次返回新切片：调用方会把它交给排序/序列化，共享同一个 backing array 会让
@@ -41,6 +41,31 @@ const (
 func MCPScopes() []string {
 	return []string{"read:repository", "write:repository", "read:issue", "write:issue", "read:user"}
 }
+
+// AdminScopes 返回登录为管理员派生的管理令牌权限集：仓库读写（分支保护/协作者/
+// Actions secret）、Issue 读写（标签）、读取自身账号，以及管理 API（setup 创建
+// 机器人账号）。管理令牌只在账号本身是实例管理员时派生。
+func AdminScopes() []string {
+	return []string{
+		"read:repository", "write:repository",
+		"read:issue", "write:issue",
+		"read:user", "write:admin",
+	}
+}
+
+// BotScopes 返回机器人账号（review/merge）令牌的权限集：仓库读写（分支/协作者/
+// 合并）、Issue 读写（标签、评论、PR review）与读取自身账号。
+func BotScopes() []string {
+	return []string{"read:repository", "write:repository", "read:issue", "write:issue", "read:user"}
+}
+
+// 令牌来源，用于诊断（Credential.Source 的取值）。
+const (
+	// SourceLogin 表示登录按身份派生（含轮换重建）。
+	SourceLogin = "login"
+	// SourceSetup 表示 setup 为机器人账号创建。
+	SourceSetup = "setup"
+)
 
 // CurrentVersion 是文件格式版本；升级格式时递增并在 Load 中做迁移。
 const CurrentVersion = 1
@@ -72,7 +97,7 @@ type Credential struct {
 	TokenName string   `json:"token_name,omitempty"`
 	LastEight string   `json:"last_eight,omitempty"`
 	Scopes    []string `json:"scopes,omitempty"`
-	// Source 说明令牌来源：password（登录时创建）、token-file、--token、oauth、setup。
+	// Source 说明令牌来源：login（登录派生）或 setup（机器人账号）。
 	Source    string `json:"source,omitempty"`
 	CreatedAt string `json:"created_at,omitempty"`
 }

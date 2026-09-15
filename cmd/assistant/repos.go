@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 
+	"assistant/internal/credentials"
 	"assistant/internal/dispatcher"
 	"assistant/internal/instances"
 
@@ -46,10 +47,11 @@ func newReposCommand(configFlag *string) *cobra.Command {
 func newReposListCommand(configFlag *string, options *reposOptions) *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
-		Short: "列出配置中登记的仓库（含 dir 与仓库级 merger 令牌状态）",
+		Short: "列出配置中登记的仓库（含 dir 与 merge 用途令牌状态）",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			_, file, err := resolveInstanceFile(commandOptions{ConfigPath: *configFlag})
+			configPath := *configFlag
+			_, file, err := resolveInstanceFile(commandOptions{ConfigPath: configPath})
 			if err != nil {
 				return err
 			}
@@ -77,11 +79,11 @@ func newReposListCommand(configFlag *string, options *reposOptions) *cobra.Comma
 					if dir == "" {
 						dir = "-"
 					}
-					merger := "no"
-					if repo.MergerToken != "" {
-						merger = "yes"
+					merge := "no"
+					if credential, ok, credentialErr := credentialFor(configPath, instance.Host, credentials.PurposeMerge); credentialErr == nil && ok {
+						merge = "token@" + credential.User
 					}
-					fmt.Fprintf(stdout, "%s\t%s\tdir=%s\tmerger_token=%s\n", instance.Host, repo.Name, dir, merger)
+					fmt.Fprintf(stdout, "%s\t%s\tdir=%s\tmerge=%s\n", instance.Host, repo.Name, dir, merge)
 					total++
 				}
 			}

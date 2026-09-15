@@ -1,6 +1,7 @@
 package main
 
 import (
+	"assistant/internal/credentials"
 	"assistant/internal/status"
 	"bytes"
 	"context"
@@ -384,5 +385,33 @@ func TestWaitForReportStopsWhenCheckIsCancelled(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "已中断等待") {
 		t.Errorf("output = %q", stdout.String())
+	}
+}
+
+// withReviewCredential 在默认凭据库写入 (host, ai, review) 令牌：dispatcher 的令牌
+// 全部来自凭据库，测试用目标解析前需要先有它。
+func withReviewCredential(t *testing.T, host string) {
+	t.Helper()
+	withReviewCredentialFor(t, "", host)
+}
+
+// withReviewCredentialFor 在指定 config.json 同目录的凭据库写入 review 令牌
+// （configPath 为空表示默认凭据库）。
+func withReviewCredentialFor(t *testing.T, configPath, host string) {
+	t.Helper()
+	path, err := credentials.PathFor(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := credentials.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.SetCredential(credentials.Credential{
+		Host: host, User: "ai", Purpose: credentials.PurposeReview,
+		Token: "reviewer-token", TokenName: "assistant",
+	})
+	if err := credentials.Save(path, store); err != nil {
+		t.Fatal(err)
 	}
 }

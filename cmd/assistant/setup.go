@@ -5,36 +5,15 @@ import (
 	"os"
 	"strings"
 
+	"assistant/internal/credentials"
 	"assistant/internal/instances"
 	"assistant/internal/setup"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 )
-
-// promptPassword 在 TTY 上读取密码（不回显）。
-func promptPassword(prompt string) (string, error) {
-	fmt.Fprint(os.Stderr, prompt)
-	password, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Fprintln(os.Stderr)
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(password)), nil
-}
 
 type setupOptions struct {
 	Host               string
-	AdminToken         string
-	AdminTokenFile     string
-	AdminUser          string
-	AdminPassword      string
-	OAuth              bool
-	Relogin            bool
-	OAuthClientID      string
-	OAuthClientSecret  string
-	OAuthScope         string
-	OAuthPort          int
 	Repos              []string
 	ReviewerName       string
 	MergerName         string
@@ -52,15 +31,15 @@ func newSetupCommand(configFlag *string) *cobra.Command {
 		Short: "初始化实例与仓库：建机器人账号/令牌、配协作者与分支保护、补齐标签",
 		Long: "初始化 Gitea 实例与仓库，使「评审 → 批准 → 会签 → 自动合并」闭环成立：\n" +
 			"  1. 复用/创建 reviewer（默认 ai）与 merger（默认 merge）账号；\n" +
-			"  2. 生成访问令牌（已配置且有效的令牌直接复用）；\n" +
-			"  3. 把两个账号加为仓库协作者（write），并补齐与 sync 相同口径的标签体系；\n" +
+			"  2. 为它们生成令牌（有效则复用），写入凭据库 purpose=review / merge；\n" +
+			"  3. 把两个账号加为仓库协作者（write/admin），并补齐与 sync 相同口径的标签体系；\n" +
 			"  4. 在默认分支配置分支保护（required approvals、驳回阻塞、过期批准作废、落后分支阻塞）；\n" +
-			"  5. 把结果写回 config.json（0600）。\n\n" +
+			"  5. 把实例与仓库写回 config.json（0600）。\n\n" +
+			"不使用任何独立的凭据参数：管理员令牌来自 assistant login 写入凭据库的\n" +
+			"purpose=admin，因此运行前必须先用**管理员账号**登录：\n" +
+			"  assistant login <host> --user <管理员账号>\n\n" +
 			"仓库清单可省略（--repos 与配置文件都为空时只初始化实例：建号与令牌，\n" +
-			"不触碰任何仓库），之后再次运行 setup 补齐仓库即可。\n" +
-			"管理员凭据支持多种方式：--admin-token、--admin-token-file、\n" +
-			"--oauth（浏览器 OAuth2 登录，令牌不落盘）或 --admin-user/--admin-password。\n" +
-			"全流程幂等，可重复执行。",
+			"不触碰任何仓库），之后再次运行 setup 补齐仓库即可。全流程幂等。",
 		Args: cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			return runSetup(command, *configFlag, options)
@@ -68,22 +47,6 @@ func newSetupCommand(configFlag *string) *cobra.Command {
 	}
 	flags := command.Flags()
 	flags.StringVar(&options.Host, "host", "", "Gitea 站点根地址（缺省取配置文件中的 instance）")
-	flags.StringVar(&options.AdminToken, "admin-token", "", "管理员访问令牌（可选，见 --oauth / --admin-user）")
-	flags.StringVar(&options.AdminTokenFile, "admin-token-file", "", "从文件读取管理员令牌（避免 shell 历史/进程参数泄露）")
-	flags.StringVar(&options.AdminUser, "admin-user", "", "管理员账号（换取长期令牌；缺密码时交互式输入）")
-	flags.StringVar(&options.AdminPassword, "admin-password", "", "管理员密码（仅用于换取令牌，不落盘）")
-	flags.BoolVar(&options.OAuth, "oauth", false, "用浏览器 OAuth2 登录（优先复用配置中的管理员凭据；--relogin 强制登录）")
-	flags.BoolVar(&options.Relogin, "relogin", false, "忽略配置中的管理员凭据，强制 OAuth 重新登录（隐含 --oauth）")
-	flags.StringVar(
-		&options.OAuthClientID,
-		"oauth-client-id",
-		"",
-		"OAuth2 Client ID（缺省用 Gitea 内置 tea 公共客户端；旧版 Gitea 需自建公共应用）",
-	)
-	flags.StringVar(&options.OAuthClientSecret, "oauth-client-secret", "", "OAuth2 Client Secret（公共客户端留空）")
-	flags.StringVar(&options.OAuthScope, "oauth-scope", "",
-		"授权 scope（如 all 或 read:user,write:repository；缺省不带 scope。已有授权记录换 scope 会被 Gitea 拒绝，需撤销旧授权或用本参数对齐）")
-	flags.IntVar(&options.OAuthPort, "oauth-port", 0, "OAuth 本地回调端口（缺省随机空闲端口）")
 	flags.StringSliceVar(&options.Repos, "repos", nil, "仓库 owner/name（逗号分隔可多个；缺省取配置文件；两者皆空时只初始化账号与令牌）")
 	flags.StringVar(&options.ReviewerName, "reviewer", "", "内容评审账号名（缺省 ai）")
 	flags.StringVar(&options.MergerName, "merger", "", "状态评审/会签账号名（缺省 merge）")
@@ -102,8 +65,8 @@ func runSetup(command *cobra.Command, configPath string, options *setupOptions) 
 		fmt.Fprintf(stdout, "[setup] %s\n", fmt.Sprintf(format, arguments...))
 	}
 
-	// 读取已有配置（--config 允许指向尚不存在的文件；否则依次找当前目录与
-	// 平台标准配置目录），并确定写回路径。
+	// 读取已有配置（--config 允许指向尚不存在的文件；否则用平台标准配置目录），
+	// 并确定写回路径。
 	_, file, err := loadInstanceFileForSetup(configPath)
 	if err != nil {
 		return err
@@ -134,112 +97,54 @@ func runSetup(command *cobra.Command, configPath string, options *setupOptions) 
 	if host == "" {
 		return fmt.Errorf("缺少站点：--host 或配置文件中的 instance.host")
 	}
-	// 能力门禁：调用者没给显式管理员凭据时，记录在案的非管理员身份直接拒绝
-	if options.AdminToken == "" && options.AdminTokenFile == "" && options.AdminUser == "" &&
-		!options.OAuth && !options.Relogin {
-		if err := requireAdminIdentity(configPath, host); err != nil {
-			return err
-		}
+	// 能力门禁：本地身份记录显示不是管理员时立即拒绝（权威判定仍在服务端）
+	if err := requireAdminIdentity(configPath, host); err != nil {
+		return err
+	}
+	// 唯一的凭据来源：assistant login 写入的 admin 用途令牌
+	adminCredential, err := tokenForPurpose(writePath, host, credentials.PurposeAdmin)
+	if err != nil {
+		return err
+	}
+	credentialPath, err := credentials.PathFor(writePath)
+	if err != nil {
+		return err
+	}
+	store, err := credentials.Load(credentialPath)
+	if err != nil {
+		return err
 	}
 
 	repos := cleanStrings(options.Repos)
 	if len(repos) == 0 && existing != nil {
 		repos = existing.RepoNames()
 	}
-	// 允许空仓库清单：只初始化实例（账号/令牌/OAuth 凭据），仓库配置留给
-	// 之后的 setup 运行补齐。
-
-	// 管理员凭据优先级：显式令牌（--admin-token/-file）> 配置里的 admin_token
-	// > GITEA_ACCESS_TOKEN > 配置里的 admin_oauth（用 refresh token 换取，不弹
-	// 浏览器）> --admin-user/--admin-password > OAuth 登录（需要 --oauth）。
-	// 也就是说：配置里已有可用管理凭据时，setup 重复运行不会要求重新登录；
-	// --relogin 可强制忽略凭据重新走 OAuth。
-	adminToken := strings.TrimSpace(options.AdminToken)
-	if adminToken == "" && strings.TrimSpace(options.AdminTokenFile) != "" {
-		data, readErr := os.ReadFile(options.AdminTokenFile)
-		if readErr != nil {
-			return fmt.Errorf("读取令牌文件: %w", readErr)
-		}
-		adminToken = strings.TrimSpace(string(data))
-		if adminToken == "" {
-			return fmt.Errorf("令牌文件为空：%s", options.AdminTokenFile)
-		}
-	}
-	if adminToken == "" && existing != nil {
-		adminToken = existing.AdminToken
-	}
-	if adminToken == "" {
-		adminToken = strings.TrimSpace(os.Getenv("GITEA_ACCESS_TOKEN"))
-	}
-	if adminToken == "" && !options.Relogin && existing != nil && existing.AdminOAuth != nil {
-		access, _, refreshErr := setup.RefreshOAuthToken(
-			command.Context(), host,
-			existing.AdminOAuth.ClientID, existing.AdminOAuth.ClientSecret, existing.AdminOAuth.RefreshToken,
-			nil,
-		)
-		if refreshErr == nil {
-			adminToken = access
-			logf("复用配置中的 OAuth 凭据（已用 refresh token 换取短期管理员令牌）")
-		} else {
-			logf("配置中的 OAuth 凭据已失效（%v），需要重新登录", refreshErr)
-		}
-	}
-	adminPassword := options.AdminPassword
-	if adminToken == "" && options.AdminUser != "" && adminPassword == "" {
-		if !term.IsTerminal(int(os.Stdin.Fd())) {
-			return fmt.Errorf("缺少管理员密码：--admin-password（非交互环境）")
-		}
-		adminPassword, err = promptPassword(fmt.Sprintf("请输入管理员 @%s 的密码：", options.AdminUser))
-		if err != nil {
-			return fmt.Errorf("读取密码: %w", err)
-		}
-	}
-	useOAuth := adminToken == "" && options.AdminUser == "" && (options.OAuth || options.Relogin)
-	if adminToken == "" && options.AdminUser == "" && !useOAuth {
-		return fmt.Errorf(
-			"缺少管理员凭据：--admin-token / --admin-token-file，或 --oauth 登录 / --admin-user 密码")
-	}
-
-	var oauth *setup.OAuthOptions
-	if useOAuth {
-		oauth = &setup.OAuthOptions{
-			Host:         host,
-			ClientID:     options.OAuthClientID,
-			ClientSecret: options.OAuthClientSecret,
-			Scope:        options.OAuthScope,
-			Port:         options.OAuthPort,
-			Log:          logf,
-		}
-	}
+	// 允许空仓库清单：只初始化实例（账号与令牌），仓库配置留给之后的 setup。
 
 	setupOptions := setup.Options{
-		Host:               host,
-		AdminToken:         adminToken,
-		AdminUser:          options.AdminUser,
-		AdminPassword:      adminPassword,
-		OAuth:              oauth,
-		Repos:              repos,
-		ReviewerName:       options.ReviewerName,
-		MergerName:         options.MergerName,
-		EmailDomain:        options.EmailDomain,
-		RequiredApprovals:  options.RequiredApprovals,
-		AllowAdminOverride: options.AllowAdminOverride,
-		CreateRepos:        options.CreateRepos,
-		DryRun:             options.DryRun,
-		Existing:           existing,
-		Log:                logf,
+		Host:                host,
+		AdminToken:          adminCredential.Token,
+		Repos:               repos,
+		ReviewerName:        options.ReviewerName,
+		MergerName:          options.MergerName,
+		EmailDomain:         options.EmailDomain,
+		RequiredApprovals:   options.RequiredApprovals,
+		AllowAdminOverride:  options.AllowAdminOverride,
+		CreateRepos:         options.CreateRepos,
+		DryRun:              options.DryRun,
+		Existing:            existing,
+		ExistingCredentials: store.Credentials,
+		Log:                 logf,
 	}
 	admin, err := setup.NewAdmin(command.Context(), setupOptions)
 	if err != nil {
 		return err
 	}
-	instance, err := setup.Run(command.Context(), setupOptions, admin)
+	result, err := setup.Run(command.Context(), setupOptions, admin)
 	if err != nil {
 		return err
 	}
-	if useOAuth && instance.AdminToken == "" {
-		logf("提示：OAuth 令牌不写入配置（会过期）；automerge 的必要检查门禁将回退为严格模式")
-	}
+	instance := result.Instance
 
 	if file == nil {
 		file = &instances.File{}
@@ -261,12 +166,18 @@ func runSetup(command *cobra.Command, configPath string, options *setupOptions) 
 	}
 
 	if options.DryRun {
-		logf("dry-run：未写入 %s", writePath)
+		logf("dry-run：未写入 %s 与 %s", writePath, credentialPath)
 	} else {
 		if err := instances.Save(writePath, file); err != nil {
 			return err
 		}
-		logf("配置已写入 %s（0600）", writePath)
+		for _, credential := range result.Credentials {
+			store.SetCredential(credential)
+		}
+		if err := credentials.Save(credentialPath, store); err != nil {
+			return err
+		}
+		logf("配置已写入 %s，机器人令牌写入 %s（0600）", writePath, credentialPath)
 	}
 	logf("完成：%s reviewer=%s merger=%s repos=%d", instance.Host,
 		instance.Reviewer.Name, instance.Merger.Name, len(instance.Repos))

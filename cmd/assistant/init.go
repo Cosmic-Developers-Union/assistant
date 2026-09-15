@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 
+	"assistant/internal/credentials"
 	"assistant/internal/dispatcher"
 	"assistant/internal/instances"
 	"assistant/internal/setup"
@@ -43,7 +44,7 @@ func newInitCommand(configFlag *string) *cobra.Command {
 			"  1. 按 remote/--repo/位置参数确定仓库，定位 config.json 中的平台；\n" +
 			"  2. 复用或补齐 ai/merge 账号与令牌，配协作者、分支保护（同 setup 口径）、标签；\n" +
 			"  3. 写入仓库级 Actions secret（MERGE_TOKEN）；\n" +
-			"  4. 把仓库条目（含 merger_token）自动加入 config.json。\n\n" +
+			"  4. 把仓库条目自动加入 config.json。\n\n" +
 			"平台不在配置中时先运行 assistant login <host>。",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(command *cobra.Command, args []string) error {
@@ -94,44 +95,63 @@ func runInit(command *cobra.Command, configPath string, args []string, options *
 	if err := requireAdminIdentity(configPath, target.Host); err != nil {
 		return err
 	}
-	adminToken, adminErr := adminTokenForInstance(ctx, target.Instance, logf)
-	if adminErr != nil {
-		return fmt.Errorf("缺少管理员凭据（先 assistant login %s）: %w", target.Host, adminErr)
-	}
-	admin, err := setup.NewAdmin(ctx, setup.Options{Host: target.Host, AdminToken: adminToken, Log: logf})
+	adminCredential, err := tokenForPurpose(configPath, target.Host, credentials.PurposeAdmin)
 	if err != nil {
 		return err
 	}
-	updated, err := setup.Run(ctx, setup.Options{
-		Host:               target.Host,
-		AdminToken:         adminToken,
-		Repos:              []string{target.FullName},
-		RequiredApprovals:  options.RequiredApprovals,
-		AllowAdminOverride: options.AllowAdminOverride,
-		CreateRepos:        options.CreateRepos,
-		Existing:           &target.Instance,
-		DryRun:             options.DryRun,
-		Log:                logf,
+	credentialPath, err := credentials.PathFor(target.Path)
+	if err != nil {
+		return err
+	}
+	store, err := credentials.Load(credentialPath)
+	if err != nil {
+		return err
+	}
+	admin, err := setup.NewAdmin(ctx, setup.Options{Host: target.Host, AdminToken: adminCredential.Token, Log: logf})
+	if err != nil {
+		return err
+	}
+	result, err := setup.Run(ctx, setup.Options{
+		Host:                target.Host,
+		AdminToken:          adminCredential.Token,
+		Repos:               []string{target.FullName},
+		RequiredApprovals:   options.RequiredApprovals,
+		AllowAdminOverride:  options.AllowAdminOverride,
+		CreateRepos:         options.CreateRepos,
+		Existing:            &target.Instance,
+		ExistingCredentials: store.Credentials,
+		DryRun:              options.DryRun,
+		Log:                 logf,
 	}, admin)
 	if err != nil {
 		return err
 	}
-	merged := mergeRepoIntoInstance(target.Instance, updated)
+	merged := mergeRepoIntoInstance(target.Instance, result.Instance)
 	if options.DryRun {
 		logf("dry-run：未写入 %s", target.Path)
 		return nil
 	}
 
-	// 仓库级 Actions secret 只针对当前仓库
+	// 仓库级 Actions secret 只针对当前仓库；merge 令牌来自凭据库
+	mergeCredential, err := tokenForPurpose(configPath, target.Host, credentials.PurposeMerge)
+	if err != nil {
+		return err
+	}
 	actionInstance := merged
 	if repo, ok := merged.FindRepo(target.FullName); ok {
 		actionInstance.Repos = []instances.Repo{repo}
 	}
-	if err := setup.ConfigureActions(ctx, admin, actionInstance, false, logf); err != nil {
+	if err := setup.ConfigureActions(ctx, admin, actionInstance, mergeCredential.Token, false, logf); err != nil {
 		return fmt.Errorf("写入仓库 Actions 配置: %w", err)
 	}
 
 	if err := saveInstance(target.File, target.Path, target.Host, merged); err != nil {
+		return err
+	}
+	for _, credential := range result.Credentials {
+		store.SetCredential(credential)
+	}
+	if err := credentials.Save(credentialPath, store); err != nil {
 		return err
 	}
 	logf("仓库 %s 已初始化并登记到 %s（本地文件可用 assistant install 补齐）", target.FullName, target.Path)
@@ -158,11 +178,11 @@ func runDeinit(command *cobra.Command, configPath string, args []string, purge, 
 		if err := requireAdminIdentity(configPath, target.Host); err != nil {
 			return err
 		}
-		adminToken, adminErr := adminTokenForInstance(ctx, target.Instance, logf)
-		if adminErr != nil {
-			return fmt.Errorf("--purge 需要管理员凭据（先 assistant login %s）: %w", target.Host, adminErr)
+		adminCredential, credentialErr := tokenForPurpose(configPath, target.Host, credentials.PurposeAdmin)
+		if credentialErr != nil {
+			return fmt.Errorf("--purge 需要管理员凭据: %w", credentialErr)
 		}
-		admin, err := setup.NewAdmin(ctx, setup.Options{Host: target.Host, AdminToken: adminToken, Log: logf})
+		admin, err := setup.NewAdmin(ctx, setup.Options{Host: target.Host, AdminToken: adminCredential.Token, Log: logf})
 		if err != nil {
 			return err
 		}

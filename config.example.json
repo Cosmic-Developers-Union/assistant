@@ -24,24 +24,20 @@
   "instances": [
     {
       "host": "https://gitea.example.com",
-      "admin_token": "admin-personal-access-token",
       "reviewer": {
-        "name": "ai",
-        "token": "created-by-assistant-setup"
+        "name": "ai"
       },
       "merger": {
         "name": "merge"
       },
       "repos": [
         {
-          "name": "owner/repo",
-          "merger_token": "created-by-assistant-setup"
+          "name": "owner/repo"
         },
         {
           "name": "owner/another",
           "dir": "/srv/another",
-          "provider": "anthropic",
-          "merger_token": "created-by-assistant-setup"
+          "provider": "anthropic"
         }
       ]
     }

@@ -113,13 +113,13 @@ func newRootCommand(stdout, stderr io.Writer, checker, syncer, merger managerRun
 	}
 	command.AddCommand(checkCommand, syncCommand, autoMergeCommand)
 	command.AddCommand(newDispatcherCommands(&options.Repository, &options.ConfigPath)...)
-	command.AddCommand(newLoginCommand(&options.ConfigPath), newAuthCommand(&options.ConfigPath))
+	command.AddCommand(newLoginCommand(&options.ConfigPath))
 	command.AddCommand(newReposCommand(&options.ConfigPath))
 	command.AddCommand(newWeixinCommand(&options.ConfigPath))
 	command.AddCommand(newInitCommand(&options.ConfigPath), newDeinitCommand(&options.ConfigPath))
 	command.AddCommand(newSetupCommand(&options.ConfigPath))
 	command.AddCommand(newActionsCommand(&options.ConfigPath))
-	command.AddCommand(newInstallCommand(), newUninstallCommand(), newMCPCommand(&options.ConfigPath), newDoctorCommand())
+	command.AddCommand(newInstallCommand(), newUninstallCommand(), newMCPCommand(&options.ConfigPath), newDoctorCommand(&options.ConfigPath))
 	return command
 }
 
@@ -151,7 +151,7 @@ func runCheck(ctx context.Context, stdout, stderr io.Writer, options commandOpti
 			return waitForReport(ctx, stdout, manager, options.Wait, options.Timeout, options.Interval)
 		})
 	}
-	managers, err := instanceManagers(ctx, file, options.Repository, stderr)
+	managers, err := instanceManagers(ctx, options.ConfigPath, file, options.Repository, stderr)
 	if err != nil {
 		return err
 	}

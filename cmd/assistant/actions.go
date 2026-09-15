@@ -1,11 +1,10 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
 
-	"assistant/internal/instances"
+	"assistant/internal/credentials"
 	"assistant/internal/setup"
 
 	"github.com/spf13/cobra"
@@ -58,8 +57,9 @@ func runActions(command *cobra.Command, configPath string, options *actionsOptio
 			logf("%s: 没有仓库，跳过", instance.Host)
 			continue
 		}
-		if len(instance.Merger.Token) == 0 {
-			runErrors = append(runErrors, fmt.Errorf("%s: 缺少 merger 令牌（先运行 setup）", instance.Host))
+		mergeCredential, err := tokenForPurpose(configPath, instance.Host, credentials.PurposeMerge)
+		if err != nil {
+			runErrors = append(runErrors, err)
 			continue
 		}
 		if err := requireAdminIdentity(configPath, instance.Host); err != nil {
@@ -67,55 +67,30 @@ func runActions(command *cobra.Command, configPath string, options *actionsOptio
 			continue
 		}
 		if options.DryRun {
-			if err := setup.ConfigureActions(command.Context(), nil, instance, true, logf); err != nil {
+			if err := setup.ConfigureActions(command.Context(), nil, instance, mergeCredential.Token, true, logf); err != nil {
 				runErrors = append(runErrors, err)
 			}
 			continue
 		}
-		adminToken, err := adminTokenForInstance(command.Context(), instance, logf)
+		adminCredential, err := tokenForPurpose(configPath, instance.Host, credentials.PurposeAdmin)
 		if err != nil {
 			runErrors = append(runErrors, err)
 			continue
 		}
 		admin, err := setup.NewAdmin(command.Context(), setup.Options{
 			Host:       instance.Host,
-			AdminToken: adminToken,
+			AdminToken: adminCredential.Token,
 			Log:        logf,
 		})
 		if err != nil {
 			runErrors = append(runErrors, err)
 			continue
 		}
-		if err := setup.ConfigureActions(command.Context(), admin, instance, false, logf); err != nil {
+		if err := setup.ConfigureActions(command.Context(), admin, instance, mergeCredential.Token, false, logf); err != nil {
 			runErrors = append(runErrors, err)
 			continue
 		}
 		logf("%s: 完成 %d 个仓库的 Actions 配置", instance.Host, len(instance.Repos))
 	}
 	return errors.Join(runErrors...)
-}
-
-// adminTokenForInstance 解析管理员令牌：静态 admin_token 优先；否则用
-// admin_oauth 的 refresh token 现场换取短期 access token。
-func adminTokenForInstance(
-	ctx context.Context,
-	instance instances.Instance,
-	logf func(string, ...any),
-) (string, error) {
-	if instance.AdminToken != "" {
-		return instance.AdminToken, nil
-	}
-	if instance.AdminOAuth == nil {
-		return "", fmt.Errorf("%s: 缺少管理员凭据（admin_token 或 admin_oauth；先运行 setup）", instance.Host)
-	}
-	access, _, err := setup.RefreshOAuthToken(
-		ctx, instance.Host,
-		instance.AdminOAuth.ClientID, instance.AdminOAuth.ClientSecret, instance.AdminOAuth.RefreshToken,
-		nil,
-	)
-	if err != nil {
-		return "", fmt.Errorf("%s: 刷新 OAuth 凭据失败: %w", instance.Host, err)
-	}
-	logf("%s: 已用 refresh token 换取短期管理员令牌", instance.Host)
-	return access, nil
 }

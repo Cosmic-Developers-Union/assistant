@@ -53,8 +53,8 @@ type MCPSpec struct {
 //
 // host：--host > GITEA_HOST > Gitea remote 推导；
 // token：--token > GITEA_ACCESS_TOKEN > GITEA_ACCESS_TOKEN_FILE >
-// credentials.json 中该站点的 mcp 用途令牌 > config.json 的 mcp_token（旧版）。
-// 不自动读取未绑定站点的历史全局 token 文件。
+// credentials.json 中该站点的 (host, purpose=mcp) 登录令牌。
+// 不自动读取全局 token 文件（config.json 里没有凭据）。
 func ResolveMCP(ctx context.Context, options MCPOptions) (MCPSpec, error) {
 	getenv := options.Getenv
 	if getenv == nil {
@@ -96,7 +96,7 @@ func ResolveMCP(ctx context.Context, options MCPOptions) (MCPSpec, error) {
 	}
 	if spec.Token == "" {
 		return MCPSpec{}, fmt.Errorf("站点 %s 没有匹配的登录凭据：%s；"+
-			"也可显式设置 GITEA_ACCESS_TOKEN / GITEA_ACCESS_TOKEN_FILE（不再自动读取历史全局 token 文件）",
+			"CI / 评审会话也可显式注入 GITEA_ACCESS_TOKEN 或 GITEA_ACCESS_TOKEN_FILE",
 			spec.Host, missingMCPHint(spec.Host, options.ConfigPath, getenv))
 	}
 	return spec, nil
@@ -104,8 +104,7 @@ func ResolveMCP(ctx context.Context, options MCPOptions) (MCPSpec, error) {
 
 // missingMCPHint 在缺凭据时给出可行动说明。区分两种状态：
 //
-//   - 已登记身份但没有 mcp 用途令牌：多半是用旧的 tea/OAuth 登记路径登录的——那条
-//     路径写不了 mcp 令牌（Gitea 建令牌端点只接受账号密码的 Basic Auth），要说清楚，
+//   - 已登记身份但没有 mcp 用途令牌（登录中断、手工编辑过凭据库）：点名账号，
 //     否则「identity 有、mcp 没有」看起来像工具坏了；
 //   - 完全没有身份：直接给出登录命令。
 func missingMCPHint(host, configPath string, getenv func(string) string) string {
@@ -119,12 +118,8 @@ func missingMCPHint(host, configPath string, getenv func(string) string) string 
 		return "请运行 " + login
 	}
 	if identity, ok := store.IdentityFor(host); ok {
-		user := identity.User
-		return fmt.Sprintf(
-			"已登记身份 @%s，但没有 (host, %s, mcp) 用途令牌——旧的 assistant login 登记路径"+
-				"（tea/OAuth）只能记录身份，不会创建 MCP 令牌。"+
-				"请运行 assistant login %s --user %s 派生长期令牌（或 `--user %s --token-file <文件>` 录入已有令牌）",
-			user, user, host, user, user)
+		return fmt.Sprintf("已登记身份 @%s，但没有 (host, %s, mcp) 用途令牌：运行 assistant login %s --user %s 派生",
+			identity.User, identity.User, host, identity.User)
 	}
 	return "请运行 " + login
 }

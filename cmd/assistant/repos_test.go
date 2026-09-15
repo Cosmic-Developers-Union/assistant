@@ -177,7 +177,7 @@ func TestReposList(t *testing.T) {
 	file := &instances.File{Instances: []instances.Instance{
 		{Host: "https://a.example.com", Reviewer: instances.Account{Name: "ai"},
 			Merger: instances.Account{Name: "merge"},
-			Repos:  []instances.Repo{{Name: "acme/repo", Dir: "/tmp/repo", MergerToken: "mt"}}},
+			Repos:  []instances.Repo{{Name: "acme/repo", Dir: "/tmp/repo"}}},
 		{Host: "https://b.example.com", Reviewer: instances.Account{Name: "ai"},
 			Merger: instances.Account{Name: "merge"}},
 	}}
@@ -192,7 +192,7 @@ func TestReposList(t *testing.T) {
 		t.Fatalf("repos list: %v", err)
 	}
 	text := output.String()
-	for _, want := range []string{"acme/repo", "dir=/tmp/repo", "merger_token=yes", "未登记仓库", "共 1 个仓库"} {
+	for _, want := range []string{"acme/repo", "dir=/tmp/repo", "merge=no", "未登记仓库", "共 1 个仓库"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("repos list 输出缺少 %q：%s", want, text)
 		}

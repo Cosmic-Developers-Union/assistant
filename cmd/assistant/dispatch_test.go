@@ -14,13 +14,13 @@ import (
 
 // 未 setup 的实例（无 repos）应跳过并提示，不阻断其他实例。
 func TestResolveDispatchTargetsSkipsInstancesWithoutRepos(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	dir := t.TempDir()
 	file := &instances.File{Instances: []instances.Instance{
-		{Host: "https://gitea.aicler.com", AdminToken: "token-aicler"},
+		{Host: "https://gitea.aicler.com"},
 		{
-			Host:       "https://gitea.mms.vincentge.top",
-			AdminToken: "token-mms",
-			Repos:      []instances.Repo{{Name: "Ge/assistant", Dir: dir}},
+			Host:  "https://gitea.mms.vincentge.top",
+			Repos: []instances.Repo{{Name: "Ge/assistant", Dir: dir}},
 		},
 	}}
 	file.Normalize()
@@ -28,6 +28,8 @@ func TestResolveDispatchTargetsSkipsInstancesWithoutRepos(t *testing.T) {
 	if err := instances.Save(path, file); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
+
+	withReviewCredentialFor(t, path, "https://gitea.mms.vincentge.top")
 
 	stderr := &bytes.Buffer{}
 	command := &cobra.Command{}
@@ -48,14 +50,16 @@ func TestResolveDispatchTargetsSkipsInstancesWithoutRepos(t *testing.T) {
 // 未配置 repo.dir 的仓库使用受管克隆落点：检出、日志/锁都在数据目录（不随
 // 当前目录漂移），worktree 固定在 /tmp。
 func TestResolveInstanceTargetUsesManagedDefaults(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	withReviewCredential(t, "https://gitea.example.com")
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	instance := instances.Instance{
 		Host:     "https://gitea.example.com",
-		Reviewer: instances.Account{Name: "ai", Token: "reviewer-token"},
+		Reviewer: instances.Account{Name: "ai"},
 		Merger:   instances.Account{Name: "merge"},
 	}
 	command := &cobra.Command{}
-	target, err := resolveInstanceTarget(command, &instances.File{}, instance, instances.Repo{Name: "acme/repo"}, &dispatcherOptions{})
+	target, err := resolveInstanceTarget(command, &instances.File{}, "", instance, instances.Repo{Name: "acme/repo"}, &dispatcherOptions{})
 	if err != nil {
 		t.Fatalf("resolveInstanceTarget: %v", err)
 	}
@@ -82,14 +86,16 @@ func TestResolveInstanceTargetUsesManagedDefaults(t *testing.T) {
 
 // 显式配置 dir 的共享检出保持原语义：日志/锁在检出内，不受管、不自动镜像。
 func TestResolveInstanceTargetExplicitDir(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	withReviewCredential(t, "https://gitea.example.com")
 	dir := t.TempDir()
 	instance := instances.Instance{
 		Host:     "https://gitea.example.com",
-		Reviewer: instances.Account{Name: "ai", Token: "reviewer-token"},
+		Reviewer: instances.Account{Name: "ai"},
 		Merger:   instances.Account{Name: "merge"},
 	}
 	command := &cobra.Command{}
-	target, err := resolveInstanceTarget(command, &instances.File{}, instance, instances.Repo{Name: "acme/repo", Dir: dir}, &dispatcherOptions{})
+	target, err := resolveInstanceTarget(command, &instances.File{}, "", instance, instances.Repo{Name: "acme/repo", Dir: dir}, &dispatcherOptions{})
 	if err != nil {
 		t.Fatalf("resolveInstanceTarget: %v", err)
 	}
@@ -106,15 +112,17 @@ func TestResolveInstanceTargetExplicitDir(t *testing.T) {
 
 // --repo-dir 是单目标显式覆盖：按共享检出处理，多目标时必须配合 --repo。
 func TestRepoDirOverride(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	withReviewCredential(t, "https://gitea.example.com")
 	dir := t.TempDir()
 	instance := instances.Instance{
 		Host:     "https://gitea.example.com",
-		Reviewer: instances.Account{Name: "ai", Token: "reviewer-token"},
+		Reviewer: instances.Account{Name: "ai"},
 		Merger:   instances.Account{Name: "merge"},
 	}
 	command := &cobra.Command{}
 	target, err := resolveInstanceTarget(
-		command, &instances.File{}, instance, instances.Repo{Name: "acme/repo"}, &dispatcherOptions{RepoDir: dir})
+		command, &instances.File{}, "", instance, instances.Repo{Name: "acme/repo"}, &dispatcherOptions{RepoDir: dir})
 	if err != nil {
 		t.Fatalf("resolveInstanceTarget: %v", err)
 	}
@@ -142,6 +150,8 @@ func TestRepoDirOverride(t *testing.T) {
 
 // 受管仓库未就绪（缺 install 产物）只跳过该仓库：其余照跑，daemon 不退出。
 func TestPrepareManagedTargetsSkipsUnprovisioned(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	withReviewCredential(t, "https://gitea.example.com")
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	command := &cobra.Command{}
 	command.SetOut(&bytes.Buffer{})
@@ -151,10 +161,10 @@ func TestPrepareManagedTargetsSkipsUnprovisioned(t *testing.T) {
 	targetFor := func(name string) dispatchTarget {
 		instance := instances.Instance{
 			Host:     "https://gitea.example.com",
-			Reviewer: instances.Account{Name: "ai", Token: "reviewer-token"},
+			Reviewer: instances.Account{Name: "ai"},
 			Merger:   instances.Account{Name: "merge"},
 		}
-		target, err := resolveInstanceTarget(command, &instances.File{}, instance, instances.Repo{Name: name}, &dispatcherOptions{})
+		target, err := resolveInstanceTarget(command, &instances.File{}, "", instance, instances.Repo{Name: name}, &dispatcherOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -198,6 +208,8 @@ func TestPrepareManagedTargetsSkipsUnprovisioned(t *testing.T) {
 
 // provider 逐级回退写进运行配置（仅运行时覆盖）：repo > instance > 全局默认。
 func TestResolveInstanceTargetProviderCascade(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	withReviewCredential(t, "https://gitea.example.com")
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	command := &cobra.Command{}
 	file := &instances.File{
@@ -212,12 +224,12 @@ func TestResolveInstanceTargetProviderCascade(t *testing.T) {
 	instance := instances.Instance{
 		Host:     "https://gitea.example.com",
 		Provider: "instance",
-		Reviewer: instances.Account{Name: "ai", Token: "reviewer-token"},
+		Reviewer: instances.Account{Name: "ai"},
 		Merger:   instances.Account{Name: "merge"},
 	}
 
 	repo := instances.Repo{Name: "acme/repo", Provider: "repo"}
-	target, err := resolveInstanceTarget(command, file, instance, repo, &dispatcherOptions{})
+	target, err := resolveInstanceTarget(command, file, "", instance, repo, &dispatcherOptions{})
 	if err != nil {
 		t.Fatalf("resolveInstanceTarget: %v", err)
 	}
@@ -232,7 +244,7 @@ func TestResolveInstanceTargetProviderCascade(t *testing.T) {
 	}
 
 	repo.Provider = ""
-	target, err = resolveInstanceTarget(command, file, instance, repo, &dispatcherOptions{})
+	target, err = resolveInstanceTarget(command, file, "", instance, repo, &dispatcherOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +253,7 @@ func TestResolveInstanceTargetProviderCascade(t *testing.T) {
 	}
 
 	instance.Provider = ""
-	target, err = resolveInstanceTarget(command, file, instance, repo, &dispatcherOptions{})
+	target, err = resolveInstanceTarget(command, file, "", instance, repo, &dispatcherOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

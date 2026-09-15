@@ -74,7 +74,7 @@ func TestSetupRefusesRecordedNonAdmin(t *testing.T) {
 	}
 	if len(after.Instances) != len(before.Instances) ||
 		after.Instances[0].Host != before.Instances[0].Host ||
-		len(after.Instances[0].Repos) != 0 || after.Instances[0].AdminToken != "" {
+		len(after.Instances[0].Repos) != 0 {
 		t.Fatalf("门禁失败时不应改动配置：%+v", after.Instances[0])
 	}
 }

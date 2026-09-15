@@ -20,7 +20,7 @@ func TestStartDaemonServicesServesAPI(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	savePlatform(t, configPath, instances.Instance{
 		Host:     "https://gitea.example.com",
-		Reviewer: instances.Account{Name: "ai", Token: "reviewer-token"},
+		Reviewer: instances.Account{Name: "ai"},
 		Merger:   instances.Account{Name: "merge"},
 		Repos:    []instances.Repo{{Name: "acme/repo"}},
 	})

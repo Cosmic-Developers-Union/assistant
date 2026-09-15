@@ -77,39 +77,25 @@ type Weixin struct {
 	SessionTimeoutMS int64 `json:"session_timeout_ms,omitempty"`
 }
 
-// Instance 是一台 Gitea 站点及其仓库与凭据。
+// Instance 是一台 Gitea 站点及其仓库。
+//
+// 这里**只有配置，没有凭据**：所有令牌按 (host, user, purpose) 存在
+// credentials.json（见 internal/credentials）。Reviewer/Merger 只保留账号名——
+// 它们的令牌同样在凭据库里。
 type Instance struct {
 	Host string `json:"host"`
 	// Provider 覆盖本实例仓库使用的 provider 名（仓库自身 provider 优先，
 	// 缺省回退全局 default_provider）
 	Provider string `json:"provider,omitempty"`
-	// AdminToken 是高权限令牌：读取分支保护需要 repo admin；setup 也用它建
-	// 账号与令牌。留空时运行期分支保护读取自动回退严格模式。
-	AdminToken string `json:"admin_token,omitempty"`
-	// AdminOAuth 是 OAuth 登录留下的刷新凭据：access token 短期有效不落盘，
-	// refresh token 长期有效，运行期按需换取（用 OAuth 初始化时写入）。
-	AdminOAuth *OAuthCredential `json:"admin_oauth,omitempty"`
-	// MCPToken 是独立的 MCP 长期个人令牌，不复用管理或 tea 令牌。
-	MCPToken string `json:"mcp_token,omitempty"`
-	// MCPUser 是 MCPToken 所属的 Gitea 账号名：登录时以站点身份校验后落盘，
-	// 使令牌与账号绑定（换账号必须重新登录，不靠文件位置或环境推断）。
-	MCPUser  string  `json:"mcp_user,omitempty"`
+	// Reviewer / Merger 是内容评审与状态评审/合并的机器人账号名（缺省 ai / merge）。
 	Reviewer Account `json:"reviewer,omitempty"`
 	Merger   Account `json:"merger,omitempty"`
 	Repos    []Repo  `json:"repos"`
 }
 
-// OAuthCredential 是 OAuth2 刷新凭据。
-type OAuthCredential struct {
-	ClientID     string `json:"client_id"`
-	ClientSecret string `json:"client_secret,omitempty"`
-	RefreshToken string `json:"refresh_token"`
-}
-
-// Account 是一个机器人账号及其访问令牌。
+// Account 是一个机器人账号（令牌在凭据库里）。
 type Account struct {
-	Name  string `json:"name"`
-	Token string `json:"token,omitempty"`
+	Name string `json:"name"`
 }
 
 // Repo 是一个被管理的仓库。JSON 里可写 "owner/name" 简写，或 {"name":...,
@@ -121,9 +107,6 @@ type Repo struct {
 	// Provider 是该仓库专属的 provider 名（最高优先级；缺省回退 instance 与
 	// 全局 default_provider）
 	Provider string `json:"provider,omitempty"`
-	// MergerToken 是该仓库专属的 merger 令牌（仓库级 Actions workflow 会签/
-	// 合并用）。每个项目独立令牌，互不影响；由 setup 生成并写入仓库 secret。
-	MergerToken string `json:"merger_token,omitempty"`
 }
 
 func (r *Repo) UnmarshalJSON(data []byte) error {
@@ -144,7 +127,7 @@ func (r *Repo) UnmarshalJSON(data []byte) error {
 
 // MarshalJSON 无扩展字段时写回字符串简写，保持配置文件简洁。
 func (r Repo) MarshalJSON() ([]byte, error) {
-	if r.Dir == "" && r.MergerToken == "" && r.Provider == "" {
+	if r.Dir == "" && r.Provider == "" {
 		return json.Marshal(r.Name)
 	}
 	type plain Repo
@@ -673,11 +656,6 @@ func (i Instance) Validate() error {
 	}
 	if i.Reviewer.Name == i.Merger.Name {
 		return fmt.Errorf("reviewer 与 merger 不能是同一账号（%s）", i.Reviewer.Name)
-	}
-	if i.AdminOAuth != nil {
-		if i.AdminOAuth.ClientID == "" || i.AdminOAuth.RefreshToken == "" {
-			return fmt.Errorf("admin_oauth 需要 client_id 与 refresh_token")
-		}
 	}
 	for _, repo := range i.Repos {
 		if _, _, err := ParseRepoName(repo.Name); err != nil {
