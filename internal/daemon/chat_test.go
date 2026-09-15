@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -235,5 +236,58 @@ func TestChatDropsLegacySharedConfig(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(stateDir, "sessions.json")); err != nil {
 		t.Errorf("会话映射不该被动：%v", err)
+	}
+}
+
+// 新建会话时把生效配置写进日志（env 逐项、settings/MCP 路径、声明的 MCP），
+// 密钥只留首尾——调试「到底用了什么配置」不该靠猜。
+func TestChatLogsEffectiveConfigWithMaskedSecrets(t *testing.T) {
+	var logs []string
+	chat, err := NewChat(ChatConfig{
+		StateDir:   t.TempDir(),
+		SessionDir: t.TempDir(),
+		Provider: claudecfg.Overrides{
+			Env: map[string]string{
+				"ANTHROPIC_AUTH_TOKEN": "sk-cp-abcdefghijklmn",
+				"ANTHROPIC_BASE_URL":   "https://api.minimaxi.com/anthropic",
+				"ANTHROPIC_MODEL":      "MiniMax-M3[1m]",
+			},
+			MCP: map[string]any{"MiniMax": map[string]any{
+				"command": "uvx", "args": []any{"minimax-coding-plan-mcp"},
+				"env": map[string]any{"MINIMAX_API_KEY": "sk-cp-abcdefghijklmn"},
+			}},
+		},
+		Log: func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+		RunClaude: func(_ context.Context, _ string, _ []string, _ string, _ []string) ([]byte, error) {
+			return []byte(`{"subtype":"success","is_error":false,"result":"好的"}`), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewChat: %v", err)
+	}
+	if _, err := chat.Handle(context.Background(), "user-1", "在吗"); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(logs, "\n")
+	for _, want := range []string{
+		"会话配置：env 3 项",
+		"ANTHROPIC_AUTH_TOKEN=sk-cp-…klmn",
+		"ANTHROPIC_BASE_URL=https://api.minimaxi.com/anthropic",
+		"ANTHROPIC_MODEL=MiniMax-M3[1m]",
+		"model=MiniMax-M3[1m]",
+		"settings=",
+		"mcp=",
+		"MCP 声明：",
+		"MiniMax（uvx minimax-coding-plan-mcp [",
+		"MINIMAX_API_KEY=sk-cp-…klmn]",
+		"新建会话",
+		"工作目录",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("日志缺少 %q：\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "sk-cp-abcdefghijklmn") {
+		t.Errorf("密钥未打码：\n%s", joined)
 	}
 }

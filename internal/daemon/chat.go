@@ -235,7 +235,8 @@ func (c *Chat) sessionArgs(sessionID, title string, fresh bool, text, workspace 
 		// 声明的 MCP server 与命令；实际是否连上由 init 事件单独报
 		c.config.Log("对话[%s] 会话配置：%s；model=%s；权限=%s；settings=%s；mcp=%s",
 			shortSession(sessionID), overrides.Describe(),
-			firstNonEmptyString(c.config.Model, "账号默认"), claudecfg.SettingSources,
+			firstNonEmptyString(c.config.Model, overrides.Env["ANTHROPIC_MODEL"], "账号默认"),
+			claudecfg.SettingSources,
 			settingsPath, mcpPath)
 		c.config.Log("对话[%s] MCP 声明：%s", shortSession(sessionID),
 			claudecfg.DescribeMCPServers(c.mcpDocument(overrides)))
