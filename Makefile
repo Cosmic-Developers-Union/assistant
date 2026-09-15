@@ -52,6 +52,7 @@ help: ## 显示帮助信息
 	@echo "  make build-local         # 构建本地平台二进制"
 	@echo "  make install             # 先构建再安装到本机 (PREFIX 可改，缺省 /usr/local)"
 	@echo "  make test                # 运行测试"
+	@echo "  make compose-up          # 构建二进制并启动 docker compose 部署 (容器挂载该二进制)"
 	@echo "  make push                # 手动发布: 构建并推送 latest 到 generic package registry"
 	@echo ""
 	@echo "正式发布无需手动操作: 合入 main 后 CI 自动发布时间戳版本并移动 latest 指针"
@@ -96,7 +97,7 @@ review-image: ## 构建评审会话镜像（target review；Dockerfile 在 image
 	@echo "==> 构建完成: $(REVIEW_IMAGE)"
 
 .PHONY: daemon-image
-daemon-image: ## 构建 daemon 镜像（评审环境 + assistant 二进制；docker compose 使用）
+daemon-image: ## 构建自带二进制的独立 daemon 镜像（评审环境 + assistant；compose 默认改用 review 镜像 + 宿主二进制挂载）
 	@echo "==> 构建 daemon 镜像 $(DAEMON_IMAGE)..."
 	docker build -f images/review/Dockerfile --target daemon \
 		--build-arg VERSION="$$(git describe --tags --always 2>/dev/null || echo dev)" \
@@ -104,13 +105,13 @@ daemon-image: ## 构建 daemon 镜像（评审环境 + assistant 二进制；doc
 	@echo "==> 构建完成: $(DAEMON_IMAGE)"
 
 .PHONY: compose-up
-compose-up: ## 预建挂载点并启动 docker compose 部署（daemon；等价 compose up -d）
+compose-up: build ## 构建宿主二进制并启动 docker compose 部署（容器跑挂载进去的 ./assistant）
 	@echo "==> 预建挂载点..."
 	@mkdir -p "$(HOME)/.claude" "$(HOME)/.cache" \
 		"$(HOME)/.config/Cosmic-Developers-Union/assistant" \
 		"$(HOME)/.local/share/Cosmic-Developers-Union/assistant"
-	@echo "==> 启动 docker compose..."
-	docker compose up -d
+	@echo "==> 启动 docker compose（--force-recreate 让最新二进制生效）..."
+	docker compose up -d --force-recreate
 
 .PHONY: test-e2e
 test-e2e: ## 起临时 Gitea（docker compose）并运行端到端测试

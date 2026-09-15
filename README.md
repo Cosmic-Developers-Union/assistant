@@ -464,17 +464,20 @@ export DISPATCH_SYNC_MIRROR=1     # 每轮把宿主检出强制对齐 origin/mai
 
 #### 容器化部署（docker compose）
 
-daemon 整体跑在容器里：宿主机**用户目录原样挂载**（claude 登录态、config.json、受管克隆都在里面，容器内外路径一致），`/tmp` 用 **tmpfs**（评审 worktree 全在 `/tmp`，落内存、退出即清），状态 API 只发布到宿主 `127.0.0.1:8770`：
+daemon 整体跑在容器里：**宿主构建的二进制直接挂载进去**（`make build` 的产物以只读方式覆盖 `/usr/local/bin/assistant`，镜像里不再内置副本，升级不必重建镜像），宿主机**用户目录原样挂载**（claude 登录态、config.json/credentials.json、受管克隆都在里面，容器内外路径一致），`/tmp` 用 **tmpfs**（评审 worktree 全在 `/tmp`，落内存、退出即清），状态 API 只发布到宿主 `127.0.0.1:8770`：
 
 ```bash
-make compose-up         # 预建挂载点并启动（等价：docker compose up -d，首次会构建镜像）
+make compose-up         # 构建 ./assistant（linux/amd64 静态）→ 预建挂载点 → 启动/重建容器
 docker compose logs -f
 docker compose exec assistant assistant weixin login   # 首次扫码（终端直接渲染二维码）
+
+make build && docker compose up -d --force-recreate    # 升级：重新构建二进制并让容器换上新的一份
 ```
 
-`docker compose up` 会从 `images/review/Dockerfile` 的 `daemon` target 构建镜像（与评审镜像共用 `review-env` 层，无需从 registry 拉取预构建镜像）；`make daemon-image` 可单独构建。
+镜像只用 `images/review/Dockerfile` 的 `review` target（评审环境：claude / go / bun / uv / node，与评审会话镜像共用 `review-env` 层，无需从 registry 拉取预构建镜像）。容器入口固定指向挂载进来的二进制：**只替换文件不会重启进程**，所以升级要用 `docker compose up -d --force-recreate`（即 `make compose-up`）或 `docker compose restart assistant`。想让镜像自带二进制（离线分发、不走挂载）时用 `make daemon-image` 构建 `daemon` target。
 
-- 挂载是**细粒度**的（不用整目录 `$HOME`）：`~/.claude`（登录态）、`~/.config/Cosmic-Developers-Union/assistant`（config.json / daemon.json / chat 会话）、`~/.local/share/Cosmic-Developers-Union/assistant`（受管克隆与状态）读写，`~/.config/tea`（凭据）只读；git 身份与 `docker.sock` 按需（compose 内已注释示例）。
+- **二进制挂载**：`${ASSISTANT_BINARY:-./assistant}` → `/usr/local/bin/assistant:ro`（相对路径按 compose 文件所在目录解析，默认就是仓库根目录下 `make build` 的产物）。`make compose-up` 先构建再启动，因此不存在挂载点缺失；手工 `docker compose up` 前请确认该文件已存在——路径不存在时 docker 会把它建成**目录**，容器启动会报 `is a directory`。`make build` 用 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64` 构建，静态链接，不依赖容器基座的 C 库。
+- 挂载是**细粒度**的（不用整目录 `$HOME`）：`~/.claude`（登录态）、`~/.config/Cosmic-Developers-Union/assistant`（config.json / credentials.json（`assistant login` 派生的用途令牌）/ daemon.json / chat 会话）、`~/.local/share/Cosmic-Developers-Union/assistant`（受管克隆与状态）读写；git 身份与 `docker.sock` 按需（compose 内已注释示例）。
 - 挂载点需先在宿主存在（docker 对不存在的路径会建 root 属主目录）：用 `make compose-up` 会自动预建，或手动 `mkdir -p ~/.claude ~/.config/Cosmic-Developers-Union/assistant ~/.local/share/Cosmic-Developers-Union/assistant`（跑过一次 `assistant login`/`setup` 也会生成）。
 - UID/GID/HOME 由 compose 插值（缺省 `1000:1000` + 宿主 `$HOME`）；以宿主用户运行，写回挂载目录的文件属主不变。请在 `.env` 或环境里按需 `export ASSISTANT_UID=$(id -u) ASSISTANT_GID=$(id -g)`。
 - `/tmp` 为 `tmpfs`（`exec,mode=1777,size=16g`）：评审 worktree 全在内存盘、退出即清；16G 是上限，占用受宿主可用内存约束，可调。

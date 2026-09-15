@@ -1,9 +1,15 @@
 # 正式部署：assistant daemon（调度 + 只读状态 API + 微信对话桥）常驻容器。
 #
+# - assistant 二进制由**宿主挂载**：`make build` 产出的静态 ./assistant 以只读方式
+#   覆盖 /usr/local/bin/assistant，容器跑的就是宿主这一份——升级只需重新构建再重建
+#   容器，不必重新构建镜像；镜像里不再内置副本，挂载缺失即启动失败（不会静默跑旧版）；
+# - 镜像只提供评审环境（claude / go / bun / uv / node 等），从 images/review/Dockerfile
+#   的 review target 构建（与评审会话镜像共用 review-env 层，不拉 registry）；
+#   需要自带二进制的独立镜像时用 `make daemon-image`（daemon target）；
 # - 宿主机用户目录按需**细粒度挂载**（容器内外路径一致）：~/.claude（claude
 #   登录态）、~/.config/Cosmic-Developers-Union/assistant（config.json /
-#   daemon.json / chat 会话）、~/.local/share/Cosmic-Developers-Union/assistant
-#   （受管克隆 repos/ 与状态 state/）、~/.config/tea（凭据，只读）；
+#   credentials.json / daemon.json / chat 会话）、
+#   ~/.local/share/Cosmic-Developers-Union/assistant（受管克隆 repos/ 与状态 state/）；
 # - /tmp 用 tmpfs（16G 上限）：评审 worktree 与会话临时目录全在 /tmp，
 #   落内存、退出即清；
 # - 状态 API 只发布在宿主 127.0.0.1:8770（`assistant mcp daemon` 走 daemon.json
@@ -12,8 +18,9 @@
 #   （docker-out-of-docker；默认注释）。
 #
 # 用法：
-#   make daemon-image                 # 构建镜像（REVIEW_IMAGE=... 可换基座）
-#   docker compose up -d
+#   make compose-up        # 构建 ./assistant（linux/amd64 静态）→ 启动/重建容器（推荐）
+#   make build && docker compose up -d --force-recreate    # 等价手工流程
+#   make daemon-image      # 可选：构建内置二进制的独立 daemon 镜像（BASE_IMAGE=... 可换基座）
 #   docker compose logs -f
 #   docker compose exec assistant assistant weixin login   # 首次扫码（终端渲染二维码）
 #
@@ -25,12 +32,12 @@ services:
   assistant:
     build:
       context: .
-      # 与评审镜像同源（多 target 共用 review-env 层），不依赖 registry 拉取
+      # 只要评审环境：二进制走下面的宿主挂载，镜像不编译、不内置 assistant
       dockerfile: images/review/Dockerfile
-      target: daemon
-      args:
-        VERSION: ${ASSISTANT_VERSION:-dev}
+      target: review
     image: ${DAEMON_IMAGE:-ghcr.io/cosmic-developers-union/assistant-daemon:latest}
+    # 入口显式指向挂载进来的宿主二进制（review 镜像本身没有 ENTRYPOINT）
+    entrypoint: ["/usr/local/bin/assistant"]
     restart: unless-stopped
     user: "${ASSISTANT_UID:-1000}:${ASSISTANT_GID:-1000}"
     environment:
@@ -51,19 +58,19 @@ services:
       # ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       # CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
     volumes:
+      # 宿主最新二进制（make build 产物）：只读覆盖镜像同名路径，升级 = 重新构建
+      # + 重建容器（文件必须已存在，否则 docker 会把它建成目录；ASSISTANT_BINARY 可换路径）
+      - ${ASSISTANT_BINARY:-./assistant}:/usr/local/bin/assistant:ro
       # claude 登录态与会话数据（评审/对话会话的认证与 --resume 数据）
       - ${HOME}/.claude:${HOME}/.claude
-      # assistant 配置：config.json / daemon.json / chat 会话映射
+      # assistant 配置：config.json / credentials.json（login 派生的用途令牌）/
+      # daemon.json / chat 会话映射
       - ${HOME}/.config/Cosmic-Developers-Union/assistant:${HOME}/.config/Cosmic-Developers-Union/assistant
       # 受管克隆与状态：repos/（基线检出）+ state/（日志、单飞锁）
       - ${HOME}/.local/share/Cosmic-Developers-Union/assistant:${HOME}/.local/share/Cosmic-Developers-Union/assistant
       # 工具链与 MCP 缓存（go/npm/uv/pip/bun）：npx/uvx 首次拉取供应商 MCP
       # 需要可写 HOME 缓存（非 root 且镜像里无 /home/<user>）
       - ${HOME}/.cache:${HOME}/.cache
-      # tea CLI 凭据（assistant mcp gitea / login 复用），只读
-      - ${HOME}/.config/tea:${HOME}/.config/tea:ro
-      # 旧版 token 位置（token 候选链），只读
-      # - ${HOME}/.config/mmc:${HOME}/.config/mmc:ro
       # 本地 git 提交身份：评审会话需要本地 commit 时才挂（文件需先存在，
       # 否则 docker 会把它建成目录）
       # - ${HOME}/.gitconfig:${HOME}/.gitconfig:ro
