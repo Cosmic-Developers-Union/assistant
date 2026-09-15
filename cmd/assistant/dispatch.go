@@ -285,7 +285,7 @@ func resolveDispatchTargets(
 	repoFlag, configPath string,
 	options *dispatcherOptions,
 ) ([]dispatchTarget, error) {
-	_, file, err := resolveInstanceFile(commandOptions{ConfigPath: configPath})
+	resolvedPath, file, err := resolveInstanceFile(commandOptions{ConfigPath: configPath})
 	if err != nil {
 		return nil, err
 	}
@@ -335,6 +335,9 @@ func resolveDispatchTargets(
 			if err != nil {
 				return nil, err
 			}
+			// 会话 MCP 以 ASSISTANT_CONFIG 继承同一份配置：daemon 用 --config 指向
+			// 非标准路径时，会话内 `assistant mcp gitea/daemon` 也必须解析到它。
+			target.config.ConfigPath = resolvedPath
 			targets = append(targets, target)
 		}
 	}

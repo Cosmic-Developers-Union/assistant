@@ -420,6 +420,89 @@ func TestSessionCommandDocker(t *testing.T) {
 	}
 }
 
+// 会话必须显式拿到 reviewer 身份与配置来源：config.json 模式下 daemon 进程环境
+// 通常没有 Gitea 变量，会话 MCP 会退回个人 mcp_token，review 不再以 ai 落库。
+func TestSessionInjectsGiteaIdentityEnv(t *testing.T) {
+	// 宿主环境里的同名变量必须被会话注入值覆盖（而不是反过来）：否则 daemon 的
+	// 环境会决定会话的 Gitea 身份。
+	t.Setenv("GITEA_HOST", "https://ambient.example.com")
+	t.Setenv("GITEA_ACCESS_TOKEN", "ambient-token")
+	t.Setenv("ASSISTANT_CONFIG", "/ambient/config.json")
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, "env.txt")
+	bin := fakeClaude(t, dir, fmt.Sprintf(
+		`printf '%%s|%%s|%%s\n' "$GITEA_HOST" "$GITEA_ACCESS_TOKEN" "$ASSISTANT_CONFIG" > '%s'
+printf '%%s\n' '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"session_id":"s-1","result":"ok"}'`,
+		envFile,
+	))
+	config := testConfig(func(config *Config) {
+		config.ClaudeBin = bin
+		config.Host = "https://gitea.example.com"
+		config.AccessToken = "reviewer-token"
+		config.ConfigPath = "/etc/assistant/config.json"
+	})
+	outcome := RunSession(SessionOptions{
+		Config:        config,
+		Prompt:        "review pr #1",
+		Cwd:           dir,
+		MCPConfigPath: filepath.Join(dir, ".mcp.json"),
+	})
+	if outcome.IsError {
+		t.Fatalf("outcome = %+v, want success", outcome)
+	}
+	raw, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.TrimSpace(string(raw))
+	if got != "https://gitea.example.com|reviewer-token|/etc/assistant/config.json" {
+		t.Fatalf("会话环境 = %q（应钉定 reviewer 身份与 config 路径）", got)
+	}
+}
+
+// 会话凭据环境：配置项齐全时三件都注入；环境变量单实例模式不产生 ASSISTANT_CONFIG；
+// docker 形态按 -e 键透传（值由宿主进程环境继承）。
+func TestSessionCredentialEnv(t *testing.T) {
+	full := Config{
+		Host:        "https://gitea.example.com",
+		AccessToken: "reviewer-token",
+		ConfigPath:  "/etc/assistant/config.json",
+	}
+	if got, want := sessionCredentialEnv(full), []string{
+		"GITEA_HOST=https://gitea.example.com",
+		"GITEA_ACCESS_TOKEN=reviewer-token",
+		"ASSISTANT_CONFIG=/etc/assistant/config.json",
+	}; !slices.Equal(got, want) {
+		t.Errorf("sessionCredentialEnv = %v, want %v", got, want)
+	}
+	if got, want := sessionCredentialKeys(full), []string{
+		"GITEA_HOST", "GITEA_ACCESS_TOKEN", "ASSISTANT_CONFIG",
+	}; !slices.Equal(got, want) {
+		t.Errorf("sessionCredentialKeys = %v, want %v", got, want)
+	}
+	if got, want := sessionCredentialEnv(Config{Host: "h", AccessToken: "t"}),
+		[]string{"GITEA_HOST=h", "GITEA_ACCESS_TOKEN=t"}; !slices.Equal(got, want) {
+		t.Errorf("单实例模式 sessionCredentialEnv = %v, want %v", got, want)
+	}
+	if got := sessionCredentialEnv(Config{}); len(got) != 0 {
+		t.Errorf("空配置不应注入环境变量：%v", got)
+	}
+
+	docker := full
+	docker.DockerImage = "assistant-review:dev"
+	docker.ClaudeBin = "claude"
+	t.Setenv("GITEA_ACCESS_TOKEN", "reviewer-token")
+	_, args, _ := sessionCommand(SessionOptions{
+		Config: docker, Prompt: "review pr #1", Cwd: "/w", MCPConfigPath: "/w/.mcp.json",
+	})
+	joined := strings.Join(args, " ")
+	for _, key := range []string{"-e GITEA_HOST", "-e GITEA_ACCESS_TOKEN", "-e ASSISTANT_CONFIG"} {
+		if !strings.Contains(joined, key) {
+			t.Errorf("docker args missing %q: %v", key, args)
+		}
+	}
+}
+
 // 项目评审约定：ProjectDir 下的 .assistant/review.md 作为附加 system 提示词注入。
 func TestRunSessionInjectsReviewConventions(t *testing.T) {
 	dir := t.TempDir()

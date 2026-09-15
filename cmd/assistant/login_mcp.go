@@ -28,8 +28,8 @@ func runMCPLogin(command *cobra.Command, host, path string, file *instances.File
 		return fmt.Errorf("--token 与 --token-file 只能指定一个")
 	}
 	importing := token != "" || options.TokenFile != ""
-	if importing && (options.User != "" || options.PasswordStdin || options.TOTP != "" || options.TokenName != "") {
-		return fmt.Errorf("录入令牌不能同时使用密码认证参数")
+	if importing && (options.PasswordStdin || options.TOTP != "" || options.TokenName != "") {
+		return fmt.Errorf("录入令牌不能同时使用密码认证参数（--password-stdin / --totp / --token-name）；--user 可作为身份断言")
 	}
 	if options.TokenFile != "" {
 		data, err := os.ReadFile(options.TokenFile)
@@ -41,14 +41,15 @@ func runMCPLogin(command *cobra.Command, host, path string, file *instances.File
 			return fmt.Errorf("--token-file 文件为空")
 		}
 	}
+	// expectUser 非空表示本次登录声明了账号身份：身份校验必须一致，否则不落盘。
+	expectUser := strings.TrimSpace(options.User)
 	createdName := ""
 	if !importing {
-		user := strings.TrimSpace(options.User)
-		if user == "" {
+		if expectUser == "" {
 			// 只复用同站点 tea 登录的用户名，不取 tea token。
-			user = repoinstall.InspectTeaLogin(host, os.Getenv).User
+			expectUser = strings.TrimSpace(repoinstall.InspectTeaLogin(host, os.Getenv).User)
 		}
-		if user == "" {
+		if expectUser == "" {
 			return fmt.Errorf("请用 --user 指定个人账号用户名，或用 --token-file 录入专用令牌")
 		}
 		var password string
@@ -62,7 +63,7 @@ func runMCPLogin(command *cobra.Command, host, path string, file *instances.File
 			if !term.IsTerminal(int(os.Stdin.Fd())) {
 				return fmt.Errorf("非交互环境请用 --password-stdin 传入密码，或 --token-file 录入令牌")
 			}
-			fmt.Fprintf(command.ErrOrStderr(), "请输入 %s 上 @%s 的密码：", host, user)
+			fmt.Fprintf(command.ErrOrStderr(), "请输入 %s 上 @%s 的密码：", host, expectUser)
 			data, err := term.ReadPassword(int(os.Stdin.Fd()))
 			fmt.Fprintln(command.ErrOrStderr())
 			if err != nil {
@@ -79,7 +80,7 @@ func runMCPLogin(command *cobra.Command, host, path string, file *instances.File
 			name = "assistant-mcp-" + hex.EncodeToString(raw)
 		}
 		var err error
-		token, err = setup.CreateMCPToken(command.Context(), host, user, password, strings.TrimSpace(options.TOTP), name)
+		token, err = setup.CreateMCPToken(command.Context(), host, expectUser, password, strings.TrimSpace(options.TOTP), name)
 		if err != nil {
 			return err
 		}
@@ -96,7 +97,16 @@ func runMCPLogin(command *cobra.Command, host, path string, file *instances.File
 		}
 		return fmt.Errorf("MCP 令牌无法通过站点 %s 的身份校验", host)
 	}
-	upsertLoginInstance(file, host, func(instance *instances.Instance) { instance.MCPToken = token })
+	if expectUser != "" && login != expectUser {
+		if createdName != "" {
+			return fmt.Errorf("账号 @%s 的令牌创建成功（名称 %s），但校验得到身份 @%s；未保存，请在 Gitea Applications 页面撤销该令牌", expectUser, createdName, login)
+		}
+		return fmt.Errorf("MCP 令牌属于 @%s，与声明的 --user @%s 不一致；未保存（换账号请分别登录）", login, expectUser)
+	}
+	upsertLoginInstance(file, host, func(instance *instances.Instance) {
+		instance.MCPToken = token
+		instance.MCPUser = login
+	})
 	if err := saveLoginFile(file, path); err != nil {
 		if createdName != "" {
 			return fmt.Errorf("已创建令牌 %s，但保存失败；请在 Gitea Applications 页面检查该令牌: %w", createdName, err)

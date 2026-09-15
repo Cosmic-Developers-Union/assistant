@@ -355,9 +355,47 @@ func sessionCommand(options SessionOptions) (bin string, args []string, containe
 	for _, key := range dockerPassthroughEnv() {
 		args = append(args, "-e", key)
 	}
+	// Gitea 身份与配置来源由宿主显式钉定：docker 从宿主环境继承值（见
+	// sessionCredentialEnv），容器内的 MCP 才能拿到与 daemon 相同的评审身份。
+	for _, key := range sessionCredentialKeys(config) {
+		args = append(args, "-e", key)
+	}
 	args = append(args, config.DockerImage, config.ClaudeBin)
 	args = append(args, claudeArgs...)
 	return "docker", args, container
+}
+
+// sessionCredentialEnv 返回钉定评审会话 Gitea 身份与配置来源的环境变量：
+//   - GITEA_HOST / GITEA_ACCESS_TOKEN 让会话内 `assistant mcp gitea` 以 reviewer
+//     （默认 ai）令牌落库 review——完成判定只承认该账号名下的 review；
+//   - ASSISTANT_CONFIG 让会话内 MCP/daemon 解析与 dispatcher 相同的 config.json。
+//
+// 必须显式注入而非依赖继承：config.json 模式下 daemon 进程环境通常没有 Gitea
+// 变量，会话 MCP 会回退到个人 mcp_token，评审身份随之漂移。
+func sessionCredentialEnv(config Config) []string {
+	pairs := make([]string, 0, 3)
+	if config.Host != "" {
+		pairs = append(pairs, "GITEA_HOST="+config.Host)
+	}
+	if config.AccessToken != "" {
+		pairs = append(pairs, "GITEA_ACCESS_TOKEN="+config.AccessToken)
+	}
+	if config.ConfigPath != "" {
+		pairs = append(pairs, "ASSISTANT_CONFIG="+config.ConfigPath)
+	}
+	return pairs
+}
+
+// sessionCredentialKeys 与 sessionCredentialEnv 同源，只返回键名：docker -e 的
+// 值由 docker 从（已注入这些变量的）宿主进程环境继承。
+func sessionCredentialKeys(config Config) []string {
+	pairs := sessionCredentialEnv(config)
+	keys := make([]string, 0, len(pairs))
+	for _, pair := range pairs {
+		key, _, _ := strings.Cut(pair, "=")
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 var (
@@ -449,9 +487,12 @@ func RunSession(options SessionOptions) SessionOutcome {
 	bin, args, container := sessionCommand(options)
 	command := exec.Command(bin, args...)
 	command.Dir = options.Cwd
-	// 文本记录的固定项目目录名必须在进程环境里（settings.env 无效）
-	if pairs := claudecfg.SessionEnv(config.SessionDir, config.SessionProject); len(pairs) > 0 {
-		command.Env = append(os.Environ(), pairs...)
+	// 文本记录的固定项目目录名必须在进程环境里（settings.env 无效）；同时把
+	// Gitea 身份与配置来源显式钉定给会话（见 sessionCredentialEnv）
+	env := claudecfg.SessionEnv(config.SessionDir, config.SessionProject)
+	env = append(env, sessionCredentialEnv(config)...)
+	if len(env) > 0 {
+		command.Env = append(os.Environ(), env...)
 	}
 	stream := &streamWriter{outcome: &outcome, onProgress: options.OnProgress}
 	stderr := &tailWriter{}

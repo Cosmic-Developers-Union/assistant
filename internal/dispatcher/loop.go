@@ -457,9 +457,16 @@ func ConfigPreview(config Config, repoDir string) []string {
 	if model == "" {
 		model = "账号默认"
 	}
+	// 会话以该令牌身份提交 review（sessionCredentialEnv 显式注入），配置来源
+	// 决定会话内 MCP/daemon 读哪份 config.json
+	configSource := config.ConfigPath
+	if configSource == "" {
+		configSource = "无（环境变量单实例模式）"
+	}
 	return []string{
 		fmt.Sprintf("配置预览：host=%s repo=%s reviewer=%s", config.Host, config.Repository.FullName(), config.Reviewer),
-		fmt.Sprintf("  认证：令牌=%s 来源=--token/GITEA_ACCESS_TOKEN", maskSecret(config.AccessToken)),
+		fmt.Sprintf("  认证：令牌=%s 来源=--token/GITEA_ACCESS_TOKEN（会话继承同身份）", maskSecret(config.AccessToken)),
+		fmt.Sprintf("  配置：config=%s", configSource),
 		fmt.Sprintf("  会话：model=%s %s", model, session),
 		fmt.Sprintf("  节奏：interval=%s timeout=%s concurrency=%d", config.Interval, config.SessionTimeout, config.Concurrency),
 		fmt.Sprintf("  路径：repo_dir=%s worktree_root=%s log_dir=%s lock=%s",

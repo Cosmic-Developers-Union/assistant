@@ -29,7 +29,10 @@ type Config struct {
 	Host string
 	// AccessToken 决定评审身份：会话提交的 review 以该令牌账号落库
 	AccessToken string
-	Repository  status.Repository
+	// ConfigPath 是本次运行使用的 config.json 路径（环境变量单实例模式为空）：
+	// 评审会话以 ASSISTANT_CONFIG 继承，使会话内 `assistant mcp` 解析同一份配置。
+	ConfigPath string
+	Repository status.Repository
 	// Interval 是空闲轮询间隔
 	Interval time.Duration
 	// SessionTimeout 是单个评审会话的超时，超时杀会话

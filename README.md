@@ -330,7 +330,7 @@ Claude 的项目级 `.claude/settings.json` 是**增量托管**：只写下面�
 
 - host：`--host` > `GITEA_HOST` > 多 remote 探测（origin 优先，`/api/v1/version` 判定 Gitea）；
 - token：`--token` > `GITEA_ACCESS_TOKEN` > `GITEA_ACCESS_TOKEN_FILE` > 当前实例的 `mcp_token`。显式 token 文件缺失或为空时直接报错。
-- 实例配置：`--config` > `ASSISTANT_CONFIG` > `~/.config/Cosmic-Developers-Union/assistant/config.json`。MCP 凭据独立于管理、reviewer、merge 和 tea 凭据。
+- 实例配置：`--config` > `ASSISTANT_CONFIG` > `~/.config/Cosmic-Developers-Union/assistant/config.json`。MCP 凭据独立于管理、reviewer、merge 和 tea 凭据。评审会话由 dispatcher 显式注入 `GITEA_HOST` / `GITEA_ACCESS_TOKEN` / `ASSISTANT_CONFIG`，不走上表的 `mcp_token` 回退。
 
 每个实例登录一次，assistant 用密码认证创建专用长期令牌（隐藏输入密码，不保存密码）：
 
@@ -341,7 +341,7 @@ assistant login https://gitea-b.example.com --mcp --user bob
 assistant login https://gitea-a.example.com --mcp --token-file /path/to/mcp-token
 ```
 
-`--user` 缺省可取同站点 tea 登录里的用户名；不安装 tea 时直接指定即可。非交互环境支持 `--password-stdin`，双因素认证使用 `--totp`。也支持 `--token` 手动录入。录入与密码创建参数互斥；身份校验通过后只更新目标实例的 `mcp_token`。
+`--user` 缺省可取同站点 tea 登录里的用户名；不安装 tea 时直接指定即可。非交互环境支持 `--password-stdin`，双因素认证使用 `--totp`。也支持 `--token` / `--token-file` 手动录入（与 `--password-stdin`、`--totp`、`--token-name` 互斥）。登录后用令牌调用 `/api/v1/user` 校验身份并落盘为 `mcp_token` + `mcp_user`：录入时给出 `--user` 即身份断言，令牌属于别的账号会报错且不写配置；只更新目标实例的这两个字段。
 
 新建令牌名默认为 `assistant-mcp-<随机后缀>`（`--token-name` 可覆盖），权限为 `write:repository`、`write:issue`、`write:organization`、`write:package`、`read:user`，覆盖默认 MCP 工具。不删除账号已有令牌；重新创建后旧令牌需要自行在 Gitea Applications 页面撤销。创建成功但本地保存失败会提示新令牌名称。
 
@@ -445,12 +445,14 @@ assistant triage <n>      立即分诊单个 Issue
 
 ### 访问令牌的作用
 
-`--token` / `GITEA_ACCESS_TOKEN` 一处配置、两处消费，且**决定评审身份**：
+调度引擎与评审会话使用**同一条 reviewer 令牌**，并且这条绑定是显式注入的：
 
 1. **dispatcher 自身**：按标签检测待办、完成判定验证（读 review 与标签），只需读权限。
-2. **评审会话**：gitea MCP 子进程继承同一组 `GITEA_HOST` / `GITEA_ACCESS_TOKEN`，会话提交的 Pull Request Review 以该令牌的账号身份落库——「reviewer 名下出现新 review」正是完成判定的依据。
+2. **评审会话**：启动会话时 dispatcher 把 `GITEA_HOST`、`GITEA_ACCESS_TOKEN`（reviewer 令牌）与 `ASSISTANT_CONFIG`（当前 `config.json` 路径；环境变量单实例模式为空）显式写入会话进程环境。会话内 `assistant mcp gitea` 因此始终以 reviewer 账号（默认 `ai`）提交 review——完成判定只承认 `--reviewer` 名下的 review。docker 形态按 `-e` 键把这三项透传进容器（值由宿主进程环境继承）。
 
-因此令牌必须是 reviewer 账号（默认 `ai`）的令牌：换成其他账号，检测与验证照常工作，但提交的 review 不再匹配 `--reviewer`，PR 会被反复重开会话。令牌无法自动检测，必须显式提供（命令行传参可见于进程列表，推荐环境变量或 `config.json`）；`assistant setup` 会自动生成。
+这条绑定不能靠环境继承：`config.json` 模式下 daemon 进程环境通常没有 Gitea 变量，会话 MCP 会退回开发者的 `mcp_token`（`assistant login --mcp` 写入），评审就不再以 reviewer 身份落库，PR 会被反复重开会话。`mcp_token` 只服务本地交互会话（开发者自己在编辑器/CLI 里读写 Issue/PR）。
+
+因此 reviewer 令牌必须是 reviewer 账号的令牌：换成其他账号，检测与验证照常工作，但提交的 review 不再匹配 `--reviewer`。令牌由 `assistant setup` 自动生成；环境变量单实例模式下由 `--token` / `GITEA_ACCESS_TOKEN` 提供。
 
 ### 部署（专用开发机）
 

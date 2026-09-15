@@ -90,7 +90,10 @@ type Instance struct {
 	// refresh token 长期有效，运行期按需换取（用 OAuth 初始化时写入）。
 	AdminOAuth *OAuthCredential `json:"admin_oauth,omitempty"`
 	// MCPToken 是独立的 MCP 长期个人令牌，不复用管理或 tea 令牌。
-	MCPToken string  `json:"mcp_token,omitempty"`
+	MCPToken string `json:"mcp_token,omitempty"`
+	// MCPUser 是 MCPToken 所属的 Gitea 账号名：登录时以站点身份校验后落盘，
+	// 使令牌与账号绑定（换账号必须重新登录，不靠文件位置或环境推断）。
+	MCPUser  string  `json:"mcp_user,omitempty"`
 	Reviewer Account `json:"reviewer,omitempty"`
 	Merger   Account `json:"merger,omitempty"`
 	Repos    []Repo  `json:"repos"`

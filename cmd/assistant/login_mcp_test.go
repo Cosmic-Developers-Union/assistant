@@ -96,7 +96,8 @@ func TestMCPPasswordLogin(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if file.Instances[0].MCPToken != "new-mcp-token" || file.Instances[0].AdminToken != "admin-token" || file.Instances[1].MCPToken != "other-mcp-token" {
+			if file.Instances[0].MCPToken != "new-mcp-token" || file.Instances[0].MCPUser != "developer" ||
+				file.Instances[0].AdminToken != "admin-token" || file.Instances[1].MCPToken != "other-mcp-token" {
 				t.Fatal("MCP login did not isolate target instance and credential")
 			}
 			for _, secret := range []string{"new-mcp-token", " password ", "123456", "tea-token"} {
@@ -130,12 +131,46 @@ func TestMCPTokenFileLogin(t *testing.T) {
 	}
 	cmd := newLoginCommand(&path)
 	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetArgs([]string{server.URL, "--mcp", "--token-file", tokenPath})
+	cmd.SetArgs([]string{server.URL, "--mcp", "--token-file", tokenPath, "--user", "developer"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
 	}
 	file, err := instances.Load(path)
-	if err != nil || file.Instances[0].MCPToken != "file-token" {
+	if err != nil || file.Instances[0].MCPToken != "file-token" || file.Instances[0].MCPUser != "developer" {
 		t.Fatalf("failed to import: %v", err)
+	}
+}
+
+// 录入令牌时 --user 是身份断言：令牌实际属于别的账号必须拒绝并保持配置不变。
+func TestMCPLoginRejectsIdentityMismatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"login":"someone-else"}`)
+	}))
+	defer server.Close()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := instances.Save(path, &instances.File{Instances: []instances.Instance{
+		{Host: server.URL, MCPToken: "old-mcp-token", MCPUser: "alice"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := newLoginCommand(&path)
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{server.URL, "--mcp", "--token", "other-token", "--user", "alice"})
+	err = cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "someone-else") {
+		t.Fatalf("身份不符应报错并指出实际账号，got %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("身份不符时不应改动配置")
 	}
 }

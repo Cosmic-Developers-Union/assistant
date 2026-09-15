@@ -42,7 +42,7 @@ func TestLoginMCPCredentialIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	i := file.Instances[0]
-	if i.MCPToken != "mcp-private-token" || i.AdminToken != "admin-token" ||
+	if i.MCPToken != "mcp-private-token" || i.MCPUser != "developer" || i.AdminToken != "admin-token" ||
 		i.Reviewer.Token != "reviewer-token" || i.Merger.Token != "merger-token" {
 		t.Fatal("MCP login changed an unrelated credential or retained stale OAuth")
 	}

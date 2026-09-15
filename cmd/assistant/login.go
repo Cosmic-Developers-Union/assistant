@@ -56,7 +56,7 @@ func newLoginCommand(configFlag *string) *cobra.Command {
 	}
 	flags := command.Flags()
 	flags.BoolVar(&options.MCP, "mcp", false, "独立 MCP 长期令牌：密码认证创建或手动录入，不复用 tea/管理令牌")
-	flags.StringVar(&options.User, "user", "", "MCP 个人账号用户名（缺省取同站点 tea 登录的 user）")
+	flags.StringVar(&options.User, "user", "", "MCP 个人账号用户名（密码认证缺省取同站点 tea 登录 user；录入令牌时作为身份断言）")
 	flags.BoolVar(&options.PasswordStdin, "password-stdin", false, "从标准输入读取 MCP 登录密码；否则在终端中隐藏输入")
 	flags.StringVar(&options.TokenFile, "token-file", "", "从文件录入 MCP 专用长期令牌")
 	flags.StringVar(&options.TOTP, "totp", "", "密码认证需要的双因素验证码")
@@ -237,7 +237,10 @@ func newLoginListCommand(configFlag *string) *cobra.Command {
 					admin = "token"
 				}
 				mcp := "none"
-				if instance.MCPToken != "" {
+				switch {
+				case instance.MCPToken != "" && instance.MCPUser != "":
+					mcp = "token@" + instance.MCPUser
+				case instance.MCPToken != "":
 					mcp = "token"
 				}
 				fmt.Fprintf(stdout, "%s\trepos=%d\tadmin=%s\treviewer=%s\tmerger=%s\tmcp=%s\n",
