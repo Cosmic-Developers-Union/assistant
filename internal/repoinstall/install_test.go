@@ -365,41 +365,6 @@ func TestInstallSkipsSkillsWithNoneSource(t *testing.T) {
 	}
 }
 
-func TestDetectTokenOrder(t *testing.T) {
-	configDir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", configDir)
-	t.Setenv("TEA_CONFIG", filepath.Join(configDir, "tea-config.yml"))
-	t.Setenv("GITEA_ACCESS_TOKEN", "env-token")
-	if token, source, ok := DetectToken("https://gitea.example.com", os.Getenv); !ok || token != "env-token" || source != "GITEA_ACCESS_TOKEN" {
-		t.Errorf("DetectToken() = %q %q %v, want env token", token, source, ok)
-	}
-	t.Setenv("GITEA_ACCESS_TOKEN", "")
-	ours := filepath.Join(configDir, "Cosmic-Developers-Union", "assistant", "token")
-	if err := os.MkdirAll(filepath.Dir(ours), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(ours, []byte("file-token\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if token, source, ok := DetectToken("https://gitea.example.com", os.Getenv); !ok || token != "file-token" || source != ours {
-		t.Errorf("DetectToken() = %q %q %v, want file token", token, source, ok)
-	}
-
-	// 兜底：tea CLI 配置里的同站点登录
-	if err := os.Remove(ours); err != nil {
-		t.Fatal(err)
-	}
-	teaConfig := t.TempDir() + "/config.yml"
-	if err := os.WriteFile(teaConfig, []byte("logins:\n  - name: gitea\n    url: https://gitea.example.com\n    token: tea-token\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("TEA_CONFIG", teaConfig)
-	if token, source, ok := DetectToken("https://gitea.example.com", os.Getenv); !ok ||
-		token != "tea-token" || !strings.Contains(source, "tea config") {
-		t.Errorf("DetectToken() = %q %q %v, want tea token", token, source, ok)
-	}
-}
-
 // tea CLI 登录检测：按站点匹配第一条 URL 且令牌非空的登录。
 func TestDetectTeaToken(t *testing.T) {
 	dir := t.TempDir()

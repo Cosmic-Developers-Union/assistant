@@ -89,9 +89,11 @@ type Instance struct {
 	// AdminOAuth 是 OAuth 登录留下的刷新凭据：access token 短期有效不落盘，
 	// refresh token 长期有效，运行期按需换取（用 OAuth 初始化时写入）。
 	AdminOAuth *OAuthCredential `json:"admin_oauth,omitempty"`
-	Reviewer   Account          `json:"reviewer,omitempty"`
-	Merger     Account          `json:"merger,omitempty"`
-	Repos      []Repo           `json:"repos"`
+	// MCPToken 是独立的 MCP 长期个人令牌，不复用管理或 tea 令牌。
+	MCPToken string  `json:"mcp_token,omitempty"`
+	Reviewer Account `json:"reviewer,omitempty"`
+	Merger   Account `json:"merger,omitempty"`
+	Repos    []Repo  `json:"repos"`
 }
 
 // OAuthCredential 是 OAuth2 刷新凭据。

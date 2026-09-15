@@ -2,13 +2,60 @@ package main
 
 import (
 	"bytes"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"assistant/internal/instances"
+	"assistant/internal/repoinstall"
 )
+
+func TestLoginMCPCredentialIsolation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/user" || !strings.Contains(r.Header.Get("Authorization"), "mcp-private-token") {
+			t.Errorf("unexpected authentication request: %s", r.URL.Path)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		fmt.Fprint(w, `{"login":"developer"}`)
+	}))
+	defer server.Close()
+	path := filepath.Join(t.TempDir(), "config.json")
+	savePlatform(t, path, instances.Instance{
+		Host: server.URL, AdminToken: "admin-token",
+		Reviewer: instances.Account{Name: "ai", Token: "reviewer-token"},
+		Merger:   instances.Account{Name: "merge", Token: "merger-token"},
+	})
+	var out bytes.Buffer
+	command := newLoginCommand(&path)
+	command.SetOut(&out)
+	command.SetArgs([]string{server.URL, "--mcp", "--token", "mcp-private-token"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	file, err := instances.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := file.Instances[0]
+	if i.MCPToken != "mcp-private-token" || i.AdminToken != "admin-token" ||
+		i.Reviewer.Token != "reviewer-token" || i.Merger.Token != "merger-token" {
+		t.Fatal("MCP login changed an unrelated credential or retained stale OAuth")
+	}
+	if strings.Contains(out.String(), "mcp-private-token") {
+		t.Fatal("login output leaked token")
+	}
+	spec, err := repoinstall.ResolveMCP(command.Context(), repoinstall.MCPOptions{
+		Host: server.URL, ConfigPath: path, Getenv: func(string) string { return "" },
+	})
+	if err != nil || spec.Token != "mcp-private-token" {
+		t.Fatalf("MCP cannot use registered credential: %v", err)
+	}
+}
 
 func savePlatform(t *testing.T, path string, instance instances.Instance) {
 	t.Helper()

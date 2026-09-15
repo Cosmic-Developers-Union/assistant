@@ -22,6 +22,7 @@ func teaConfigPath(getenv func(string) string) string {
 }
 
 type teaLogin struct {
+	User       string `yaml:"user"`
 	Name       string `yaml:"name"`
 	URL        string `yaml:"url"`
 	Token      string `yaml:"token"`
@@ -59,8 +60,9 @@ type TeaLoginStatus struct {
 	Found bool
 	// HasToken 表示存在可用（令牌非空）的登录条目。
 	HasToken bool
-	// Name/AuthMethod 是第一条匹配登录的名称与认证方式（诊断提示用）。
+	// Name/User/AuthMethod 是第一条匹配登录的名称、用户名与认证方式。
 	Name       string
+	User       string
 	AuthMethod string
 }
 
@@ -79,6 +81,7 @@ func InspectTeaLogin(host string, getenv func(string) string) TeaLoginStatus {
 		if !status.Found {
 			status.Found = true
 			status.Name = login.Name
+			status.User = login.User
 			status.AuthMethod = login.AuthMethod
 		}
 		if strings.TrimSpace(login.Token) != "" {

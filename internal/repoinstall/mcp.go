@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"assistant/internal/dispatcher"
@@ -23,6 +22,8 @@ const (
 type MCPOptions struct {
 	// Dir 是项目目录（默认 cwd），用于从 git remote 推导站点。
 	Dir string
+	// ConfigPath 指定 assistant login 的实例配置；缺省 ASSISTANT_CONFIG / 标准目录。
+	ConfigPath string
 	// Host / Token 显式覆盖自动检测。
 	Host  string
 	Token string
@@ -49,12 +50,10 @@ type MCPSpec struct {
 
 // ResolveMCP 自动检测项目的 Gitea 实例与当前开发者的访问令牌：
 //
-// host：--host > GITEA_HOST > origin remote 推导；
+// host：--host > GITEA_HOST > Gitea remote 推导；
 // token：--token > GITEA_ACCESS_TOKEN > GITEA_ACCESS_TOKEN_FILE >
-// <UserConfigDir>/Cosmic-Developers-Union/assistant/token >
-// <UserConfigDir>/mmc/gitea-token。
-//
-// 全部与当前开发者绑定，与管理员/实例配置无关。
+// assistant login --mcp 同站点独立凭据。
+// 不自动读取未绑定站点的历史全局 token 文件。
 func ResolveMCP(ctx context.Context, options MCPOptions) (MCPSpec, error) {
 	getenv := options.Getenv
 	if getenv == nil {
@@ -65,6 +64,7 @@ func ResolveMCP(ctx context.Context, options MCPOptions) (MCPSpec, error) {
 		dir = "."
 	}
 	spec := MCPSpec{}
+	var err error
 	// host：显式参数/环境变量优先；否则在多个 remote 中探测 Gitea（origin 优先，
 	// GitHub/GitLab 等会被跳过）
 	if options.Host != "" {
@@ -87,48 +87,16 @@ func ResolveMCP(ctx context.Context, options MCPOptions) (MCPSpec, error) {
 	// token
 	if options.Token != "" {
 		spec.Token, spec.TokenSource = strings.TrimSpace(options.Token), "--token"
-	} else if token, source, ok := DetectToken(spec.Host, getenv); ok {
-		spec.Token, spec.TokenSource = token, source
+	} else {
+		spec.Token, spec.TokenSource, err = resolveMCPToken(spec.Host, options.ConfigPath, getenv)
+		if err != nil {
+			return MCPSpec{}, err
+		}
 	}
 	if spec.Token == "" {
-		return MCPSpec{}, fmt.Errorf(
-			"无法检测访问令牌：设置 GITEA_ACCESS_TOKEN / GITEA_ACCESS_TOKEN_FILE，" +
-				"或写入 ~/.config/Cosmic-Developers-Union/assistant/token、~/.config/mmc/gitea-token、" +
-				"或用 tea CLI 登录对应站点")
+		return MCPSpec{}, fmt.Errorf("站点 %s 没有匹配的登录凭据：请运行 assistant login %s --mcp；也可显式设置 GITEA_ACCESS_TOKEN / GITEA_ACCESS_TOKEN_FILE（不再自动读取历史全局 token 文件）", spec.Host, spec.Host)
 	}
 	return spec, nil
-}
-
-// DetectToken 按候选顺序探测当前开发者的令牌，返回令牌与来源描述。
-// host 用于匹配 tea CLI 配置里的登录站点。
-func DetectToken(host string, getenv func(string) string) (token, source string, ok bool) {
-	if value := strings.TrimSpace(getenv("GITEA_ACCESS_TOKEN")); value != "" {
-		return value, "GITEA_ACCESS_TOKEN", true
-	}
-	candidates := []string{}
-	if path := strings.TrimSpace(getenv("GITEA_ACCESS_TOKEN_FILE")); path != "" {
-		candidates = append(candidates, path)
-	}
-	if configDir, err := os.UserConfigDir(); err == nil {
-		candidates = append(candidates,
-			filepath.Join(configDir, "Cosmic-Developers-Union", "assistant", "token"),
-			filepath.Join(configDir, "mmc", "gitea-token"),
-		)
-	}
-	for _, path := range candidates {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		if value := strings.TrimSpace(string(data)); value != "" {
-			return value, path, true
-		}
-	}
-	// 兜底：tea CLI 已登录同站点时复用其令牌
-	if token, source, ok := DetectTeaToken(host, getenv); ok {
-		return token, "tea config (" + source + ")", true
-	}
-	return "", "", false
 }
 
 // RunMCPGitea 解析凭据后启动 gitea-mcp（stdio），并把子进程退出码透传。

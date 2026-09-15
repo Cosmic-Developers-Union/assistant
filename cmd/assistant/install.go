@@ -89,7 +89,7 @@ func newUninstallCommand() *cobra.Command {
 
 // newMCPCommand 是 MCP 包装层：`assistant mcp gitea` 自动检测当前开发者在本
 // 项目的 Gitea 实例与访问令牌，然后拉起 gitea-mcp（stdio）。
-func newMCPCommand() *cobra.Command {
+func newMCPCommand(configFlag *string) *cobra.Command {
 	mcpCommand := &cobra.Command{
 		Use:   "mcp",
 		Short: "MCP 包装层（供各 AI CLI 的 MCP 配置调用）",
@@ -108,15 +108,15 @@ func newMCPCommand() *cobra.Command {
 			"指已安装的二进制）。检测顺序：\n" +
 			"  host：--host > GITEA_HOST > origin remote 推导；\n" +
 			"  token：--token > GITEA_ACCESS_TOKEN > GITEA_ACCESS_TOKEN_FILE >\n" +
-			"         ~/.config/Cosmic-Developers-Union/assistant/token >\n" +
-			"         ~/.config/mmc/gitea-token。\n" +
-			"与当前开发者绑定，与管理员/实例配置无关。",
+			"         assistant login --mcp 同站点独立凭据。\n" +
+			"使用 --config / ASSISTANT_CONFIG 选择登录配置；不自动读取历史全局 token 文件。",
 		Args: cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			return repoinstall.RunMCPGitea(command.Context(), repoinstall.MCPOptions{
-				Dir:   giteaOptions.Dir,
-				Host:  giteaOptions.Host,
-				Token: giteaOptions.Token,
+				Dir:        giteaOptions.Dir,
+				ConfigPath: *configFlag,
+				Host:       giteaOptions.Host,
+				Token:      giteaOptions.Token,
 				Log: func(format string, arguments ...any) {
 					fmt.Fprintf(command.ErrOrStderr(), format+"\n", arguments...)
 				},

@@ -119,7 +119,7 @@ func newRootCommand(stdout, stderr io.Writer, checker, syncer, merger managerRun
 	command.AddCommand(newInitCommand(&options.ConfigPath), newDeinitCommand(&options.ConfigPath))
 	command.AddCommand(newSetupCommand(&options.ConfigPath))
 	command.AddCommand(newActionsCommand(&options.ConfigPath))
-	command.AddCommand(newInstallCommand(), newUninstallCommand(), newMCPCommand(), newDoctorCommand())
+	command.AddCommand(newInstallCommand(), newUninstallCommand(), newMCPCommand(&options.ConfigPath), newDoctorCommand())
 	return command
 }
 

@@ -16,6 +16,12 @@ import (
 )
 
 type loginOptions struct {
+	MCP           bool
+	User          string
+	PasswordStdin bool
+	TokenFile     string
+	TOTP          string
+	TokenName     string
 	Host          string
 	Token         string
 	OAuthClientID string
@@ -32,6 +38,7 @@ func newLoginCommand(configFlag *string) *cobra.Command {
 		Use:   "login [host]",
 		Short: "登录并登记平台（优先复用 tea CLI 登录，其次 OAuth）；list/remove 管理平台",
 		Long: "平台登记与管理：\n" +
+			"  assistant login <host> --mcp  独立 MCP 长期令牌（--user 密码认证，或 --token / --token-file 录入）\n" +
 			"  assistant login <host>       优先复用 tea CLI 的登录令牌（--token 可显式指定），\n" +
 			"                               否则 OAuth 登录并把 refresh 凭据写入 config.json\n" +
 			"  assistant login list         列出已登记平台（凭据类型/仓库数/账号名）\n" +
@@ -48,6 +55,12 @@ func newLoginCommand(configFlag *string) *cobra.Command {
 		},
 	}
 	flags := command.Flags()
+	flags.BoolVar(&options.MCP, "mcp", false, "独立 MCP 长期令牌：密码认证创建或手动录入，不复用 tea/管理令牌")
+	flags.StringVar(&options.User, "user", "", "MCP 个人账号用户名（缺省取同站点 tea 登录的 user）")
+	flags.BoolVar(&options.PasswordStdin, "password-stdin", false, "从标准输入读取 MCP 登录密码；否则在终端中隐藏输入")
+	flags.StringVar(&options.TokenFile, "token-file", "", "从文件录入 MCP 专用长期令牌")
+	flags.StringVar(&options.TOTP, "totp", "", "密码认证需要的双因素验证码")
+	flags.StringVar(&options.TokenName, "token-name", "", "创建的 MCP 令牌名（缺省自动生成唯一名称）")
 	flags.StringVar(&options.Host, "host", "", "平台地址（与位置参数二选一）")
 	flags.StringVar(&options.Token, "token", "", "访问令牌（跳过 OAuth；缺省先尝试复用 tea CLI 在站点的登录）")
 	flags.StringVar(&options.OAuthClientID, "oauth-client-id", "",
@@ -75,6 +88,13 @@ func runLogin(command *cobra.Command, configPath, argHost string, options *login
 	}
 	if file == nil {
 		file = &instances.File{}
+	}
+
+	if options.MCP {
+		return runMCPLogin(command, host, writePath, file, options)
+	}
+	if options.User != "" || options.PasswordStdin || options.TokenFile != "" || options.TOTP != "" || options.TokenName != "" {
+		return fmt.Errorf("--user / --password-stdin / --token-file / --totp / --token-name 仅用于 --mcp")
 	}
 
 	// 令牌登录：显式 --token，或复用 tea CLI 在本站点的登录（本地配置，只读）
@@ -216,8 +236,12 @@ func newLoginListCommand(configFlag *string) *cobra.Command {
 				case instance.AdminToken != "":
 					admin = "token"
 				}
-				fmt.Fprintf(stdout, "%s\trepos=%d\tadmin=%s\treviewer=%s\tmerger=%s\n",
-					instance.Host, len(instance.Repos), admin, instance.Reviewer.Name, instance.Merger.Name)
+				mcp := "none"
+				if instance.MCPToken != "" {
+					mcp = "token"
+				}
+				fmt.Fprintf(stdout, "%s\trepos=%d\tadmin=%s\treviewer=%s\tmerger=%s\tmcp=%s\n",
+					instance.Host, len(instance.Repos), admin, instance.Reviewer.Name, instance.Merger.Name, mcp)
 			}
 			return nil
 		},

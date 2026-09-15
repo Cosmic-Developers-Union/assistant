@@ -329,9 +329,27 @@ Claude 的项目级 `.claude/settings.json` 是**增量托管**：只写下面�
 所有 MCP 配置都指向 `assistant mcp gitea`（不写死 token）：
 
 - host：`--host` > `GITEA_HOST` > 多 remote 探测（origin 优先，`/api/v1/version` 判定 Gitea）；
-- token：`--token` > `GITEA_ACCESS_TOKEN` > `GITEA_ACCESS_TOKEN_FILE` > `~/.config/Cosmic-Developers-Union/assistant/token` > `~/.config/mmc/gitea-token` > tea CLI 配置（`~/.config/tea/config.yml` 中同站点登录）。
+- token：`--token` > `GITEA_ACCESS_TOKEN` > `GITEA_ACCESS_TOKEN_FILE` > 当前实例的 `mcp_token`。显式 token 文件缺失或为空时直接报错。
+- 实例配置：`--config` > `ASSISTANT_CONFIG` > `~/.config/Cosmic-Developers-Union/assistant/config.json`。MCP 凭据独立于管理、reviewer、merge 和 tea 凭据。
 
-与当前开发者绑定，与管理员/实例配置无关：换项目自动换 host，换人自动换 token。gitea-mcp 默认以 `go run gitea.com/gitea/gitea-mcp@latest -t stdio -S ...` 启动，可用 `GITEA_MCP_BIN` 指已安装的二进制、`GITEA_MCP_SCOPES` 调整 scope 列表。
+每个实例登录一次，assistant 用密码认证创建专用长期令牌（隐藏输入密码，不保存密码）：
+
+```sh
+assistant login https://gitea-a.example.com --mcp --user alice
+assistant login https://gitea-b.example.com --mcp --user bob
+# 已有专用个人令牌也可从文件录入
+assistant login https://gitea-a.example.com --mcp --token-file /path/to/mcp-token
+```
+
+`--user` 缺省可取同站点 tea 登录里的用户名；不安装 tea 时直接指定即可。非交互环境支持 `--password-stdin`，双因素认证使用 `--totp`。也支持 `--token` 手动录入。录入与密码创建参数互斥；身份校验通过后只更新目标实例的 `mcp_token`。
+
+新建令牌名默认为 `assistant-mcp-<随机后缀>`（`--token-name` 可覆盖），权限为 `write:repository`、`write:issue`、`write:organization`、`write:package`、`read:user`，覆盖默认 MCP 工具。不删除账号已有令牌；重新创建后旧令牌需要自行在 Gitea Applications 页面撤销。创建成功但本地保存失败会提示新令牌名称。
+
+普通 `assistant login` 保持兼容 tea / OAuth 的平台登记流程；MCP 只使用自己的长期个人令牌，不复制 tea、管理员、reviewer 或 merge 凭据。MCP 未配置专用令牌时提示登录命令，stdio 启动不交互式等待密码或浏览器。Gitea 密码认证不支持的账号（例如部分 SSO 配置）可在 Applications 页面创建专用令牌后录入。
+
+历史全局文件 `~/.config/Cosmic-Developers-Union/assistant/token` 和 `~/.config/mmc/gitea-token` 不再自动读取。迁移时分别登录每个实例；临时兼容可显式指定 `GITEA_ACCESS_TOKEN_FILE`。环境变量/命令行覆盖需由调用者确保与目标站点匹配。
+
+凭据与当前开发者和实例绑定：换项目自动匹配站点与登录，换人使用各自的本地配置。gitea-mcp 默认以 `go run gitea.com/gitea/gitea-mcp@latest -t stdio -S ...` 启动，可用 `GITEA_MCP_BIN` 指已安装的二进制、`GITEA_MCP_SCOPES` 调整 scope 列表。
 
 ## 评审会话调度引擎
 
