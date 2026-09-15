@@ -300,10 +300,15 @@ func TestProviderValidation(t *testing.T) {
 	}
 }
 
-// 仓库自带的示例配置必须始终可加载（providers 等字段的回归护栏）。
+// 仓库自带的示例配置必须始终可加载（providers 等字段的回归护栏），并且示范
+// $schema（编辑器补全的来源）。
 func TestConfigExampleLoads(t *testing.T) {
-	if _, err := Load(filepath.Join("..", "..", "config.example.json")); err != nil {
+	file, err := Load(filepath.Join("..", "..", "config.example.json"))
+	if err != nil {
 		t.Fatalf("config.example.json 无法加载：%v", err)
+	}
+	if file.Schema == "" {
+		t.Error("示例配置应当带上 $schema")
 	}
 }
 

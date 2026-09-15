@@ -18,6 +18,13 @@
 
 provider 只有 `config.json` 这一个落点（`<配置目录>/providers/*.json` 已不再读取）。
 
+写不动 JSON 的话，命令可以代劳（provider 桩 + 默认 provider + 密钥一次写全，密钥从
+stdin 读、终端下隐藏输入）：
+
+```bash
+assistant config init --provider minimax --api-key-stdin
+```
+
 内置预设一览（别名同样可用；`api_key`/`auth_token` 写哪个都行）：
 
 | provider 名（别名） | 端点 | 令牌写入 | 预设附带的默认 | 备注 |

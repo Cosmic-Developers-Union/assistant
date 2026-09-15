@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gitea.mms.vincentge.top/Ge/assistant/raw/branch/main/schema/config.schema.json",
+  "title": "assistant config.json",
+  "description": "assistant 的用户配置：管理哪些 Gitea 平台与仓库、各会话用哪个 AI 供应商、微信对话桥。凭据不在这个文件里——助手派生与机器人令牌由 assistant 管理在 credentials.json。编辑器认得 $schema 键，因此本文件同时是补全与悬停文档的来源；语义校验以 `assistant validate` 为准。",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "本文件的 JSON Schema 位置（编辑器用）。默认 ./config.schema.json：`assistant config init` 会把 schema 写到 config.json 旁边，离线可用。"
+    },
+    "instances": {
+      "type": "array",
+      "description": "要管理的 Gitea 平台。至少一个平台；只配微信桥（weixin）时可以留空。",
+      "items": { "$ref": "#/$defs/instance" }
+    },
+    "providers": {
+      "type": "object",
+      "description": "AI 供应商定义（名字 → 定义）：直接写在这里，没有第二个落点。内置预设（zhipu/kimi/minimax/opencode/anthropic/openai 等）会补齐端点、令牌变量、模型档位，多数情况只写 api_key。详见 providers.md。",
+      "additionalProperties": { "$ref": "#/$defs/provider" }
+    },
+    "default_provider": {
+      "type": "string",
+      "description": "未在 repo/instance/weixin 指定时的兜底供应商名；留空表示内置缺省（Anthropic 官方）。引用了未定义的名字会直接报错。"
+    },
+    "optimizations": {
+      "$ref": "#/$defs/provider",
+      "description": "跨供应商通用的全局优化点（env/settings/mcp 同 provider 形态）：对所有会话打底，选中的 provider 同名取值覆盖其上。适合放时长、上下文窗口、遥测开关、子 agent 模型。"
+    },
+    "weixin": {
+      "$ref": "#/$defs/weixin",
+      "description": "微信对话桥（openclaw ilink 协议）。通常由 `assistant weixin login` 写入，不需要手写。"
+    }
+  },
+  "$defs": {
+    "account": {
+      "type": "object",
+      "description": "机器人账号（只写名字，令牌在 credentials.json）。",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "description": "账号名，如 ai / merge。" }
+      },
+      "required": ["name"]
+    },
+    "repo": {
+      "description": "一个被管理的仓库：可以写 \"owner/name\" 简写，也可以写对象。",
+      "oneOf": [
+        { "type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$" },
+        { "$ref": "#/$defs/repoObject" }
+      ]
+    },
+    "repoObject": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$", "description": "owner/name。" },
+        "dir": {
+          "type": "string",
+          "description": "本地检出路径（评审/分诊会话需要）。留空表示用受管克隆：assistant 自己在数据目录里 clone 并每轮对齐 origin/基线分支。"
+        },
+        "provider": { "type": "string", "description": "本仓库专属供应商名（优先级最高）。" }
+      },
+      "required": ["name"]
+    },
+    "instance": {
+      "type": "object",
+      "description": "一台 Gitea 站点及其仓库。",
+      "additionalProperties": false,
+      "properties": {
+        "host": {
+          "type": "string",
+          "pattern": "^https?://",
+          "description": "站点根地址（绝对 HTTP(S) URL，如 https://gitea.example.com）。"
+        },
+        "provider": { "type": "string", "description": "本平台仓库使用的供应商名（仓库自身 provider 优先）。" },
+        "reviewer": { "$ref": "#/$defs/account", "description": "内容评审机器人账号（缺省 ai）。" },
+        "merger": { "$ref": "#/$defs/account", "description": "状态评审/合并机器人账号（缺省 merge）。" },
+        "repos": {
+          "type": "array",
+          "description": "仓库清单；缺省用简写 owner/name。",
+          "items": { "$ref": "#/$defs/repo" }
+        }
+      },
+      "required": ["host", "repos"]
+    },
+    "provider": {
+      "type": "object",
+      "description": "AI 供应商：env/settings/mcp 三段原样透传合并进入运行时会话配置（不写仓库文件），api_key/auth_token 是令牌简写，由内置预设决定落到哪个环境变量。未识别的键原样保留（便于手写扩展）。",
+      "properties": {
+        "api_key": {
+          "type": "string",
+          "description": "令牌简写（优先于 auth_token）。内置预设决定落到 ANTHROPIC_API_KEY（官方/kimi）或 ANTHROPIC_AUTH_TOKEN（多数第三方网关）。"
+        },
+        "auth_token": { "type": "string", "description": "令牌简写（api_key 未写时使用）。" },
+        "env": {
+          "type": "object",
+          "description": "注入会话的环境变量（可含密钥）。取值为空串表示删除内置预设的同名默认；ANTHROPIC_BASE_URL / ANTHROPIC_MODEL / CLAUDE_CODE_AUTO_COMPACT_WINDOW 等都在这里覆盖。",
+          "additionalProperties": { "type": ["string", "number", "boolean"] }
+        },
+        "settings": {
+          "type": "object",
+          "description": "Claude Code 原生 settings 片段（如 model、apiKeyHelper、awsAuthRefresh），合并进会话 --settings。"
+        },
+        "mcp": {
+          "type": "object",
+          "description": "原生 MCP server 定义（.mcp.json 形态），合并进会话 --mcp-config：同名 server 由 provider 覆盖，给 null 可关闭预设自带的 server。"
+        }
+      },
+      "additionalProperties": true
+    },
+    "weixin": {
+      "type": "object",
+      "description": "微信对话桥配置（`assistant weixin login` 扫码写入）。",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean", "description": "true 时 assistant run 启动对话桥（--weixin 亦可强制开启）。" },
+        "base_url": { "type": "string", "description": "ilink API 根地址（缺省官方地址）。" },
+        "bot_token": { "type": "string", "description": "扫码登录得到的 Bot token。" },
+        "login_user_id": { "type": "string", "description": "扫码登录的用户 ID（诊断用）。" },
+        "ilink_bot_id": { "type": "string", "description": "Bot ID（诊断用）。" },
+        "bot_agent": { "type": "string", "description": "观测标识（缺省 OpenClaw）。" },
+        "channel_version": { "type": "string", "description": "声明的渠道版本（缺省取 assistant 自身版本）。" },
+        "route_tag": { "type": "string", "description": "可选的路由标签（SKRouteTag）。" },
+        "admin_users": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "允许对话的用户 ID 白名单；留空表示只允许扫码登录的用户。"
+        },
+        "provider": { "type": "string", "description": "对话会话使用的供应商名（缺省回退 default_provider）。" },
+        "claude_bin": { "type": "string", "description": "对话会话的 claude 可执行文件（PATH 名或绝对路径）。" },
+        "model": { "type": "string", "description": "对话会话的模型覆盖。" },
+        "session_timeout_ms": { "type": "integer", "minimum": 0, "description": "单轮对话超时（毫秒，缺省 180000）。" }
+      }
+    }
+  }
+}

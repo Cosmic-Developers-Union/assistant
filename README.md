@@ -21,6 +21,7 @@
 | `assistant uninstall` | 开发者 | 移除 `install` 写入的内容（只触碰带 marker 的） |
 | `assistant doctor` | 开发者 | 两级体检：本地 install 产物 + 服务端（分支保护/标签/协作者/merge 令牌），只读 |
 | `assistant validate` | 部署 | 校验用户配置：config.json（平台/仓库/provider/微信桥）与 credentials.json（身份与用途令牌），只读不联网 |
+| `assistant config init` | 部署 | 模板补全 config.json：补 `$schema`、按登录身份预填平台、指定 provider 与密钥；旧文件备份为 `.bak` |
 | `assistant mcp gitea` | 开发者 | MCP 包装层：自动检测项目站点与开发者令牌后拉起 gitea-mcp |
 | `assistant mcp daemon` | 开发者 | 自举的 daemon 状态 MCP：自动发现运行中的 `assistant run`，只读查询队列/会话/结果 |
 | `assistant weixin` | 初始化 | 微信对话桥（openclaw ilink 协议）：`login` 扫码、`status` 查看 |
@@ -59,6 +60,19 @@ assistant completion fish > ~/.config/fish/completions/assistant.fish
 不指定配置文件时，所有命令维持环境变量单实例模式（`GITEA_HOST` / `GITEA_ACCESS_TOKEN` / `GITEA_REPOSITORY`）。要同时管理多台 Gitea、多个仓库，写一份 `config.json`。查找顺序：`--config` > `ASSISTANT_CONFIG` > 平台标准配置目录 `<UserConfigDir>/Cosmic-Developers-Union/assistant/config.json`（Linux `~/.config`、macOS `~/Library/Application Support`、Windows `%AppData%`）；**不读当前目录 `config.json`**（避免检出里的同名文件被误当运行配置），示例见 `config.example.json`。机器人命令与调度命令都会按 instance × repo 迭代：
 
 凭据**不在** `config.json` 里：本地身份与用途令牌写在同目录的 `credentials.json`（0600，位置可用 `ASSISTANT_CREDENTIALS` 覆盖；`assistant login list` 查看），`config.json` 只描述管理哪些实例与仓库。
+
+配置辅助（`assistant config init`）——**只补缺失项，绝不覆盖你已经写下的值**：
+
+1. 写 `$schema: ./config.schema.json`，并把随二进制分发的 schema 放到 `config.json` 旁边（编辑器补全与悬停文档，离线可用；私有站点拉不到仓库 URL，所以就近落地）；
+2. 用 `credentials.json` 里已登录的平台预填 `instances`（`reviewer: ai` / `merger: merge` 是约定值）；
+3. `--provider minimax --api-key-stdin` 写入 provider 与 `default_provider`，密钥从 stdin 读（终端下隐藏输入，不进 shell 历史）；
+4. 旧文件备份为 `config.json.bak`，原子写入 0600，写完立即跑一遍校验；重复执行无改动，`--dry-run` 只打印差异与合并结果。
+
+```bash
+assistant config init                                        # 补 $schema + 预填平台
+assistant config init --provider minimax --api-key-stdin     # 顺带写入供应商与密钥
+assistant config init --dry-run                              # 先看会改什么
+```
 
 ```json
 {
@@ -400,7 +414,8 @@ assistant validate                 # 用默认配置；--config / ASSISTANT_CONF
 
 - `config.json` 本身：JSON 合法性、平台与仓库、`default_provider`、微信桥状态；
 - **provider**：被引用的 provider 能否解析、有没有凭据（`api_key`/`auth_token`）、端点与模型、MCP 数量，以及**定义了却没被任何地方引用**的 provider（配了但没生效，最常见的失误）；
-- **credentials.json**：每个平台是否有登录身份，`review`/`merge`/`admin`/`mcp` 用途令牌是否齐（缺 review/merge 会指向 `assistant setup --host <host>`）。
+- **credentials.json**：每个平台是否有登录身份，`review`/`merge`/`admin`/`mcp` 用途令牌是否齐（缺 review/merge 会指向 `assistant setup --host <host>`）；
+- **`$schema`**：相对路径（`./config.schema.json`）指向的文件是否真的存在——缺失只提示，`assistant config init` 会补上。
 
 ```
 $ assistant validate

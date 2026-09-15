@@ -51,7 +51,12 @@ func runValidate(stdout io.Writer, configPath string) error {
 	if file == nil {
 		return fmt.Errorf("没有 config.json（--config / ASSISTANT_CONFIG / 平台标准配置目录）：先 assistant login <host>")
 	}
-	findings := validateConfigFile(path, file)
+	return reportValidate(stdout, validateConfigFile(path, file), "", path)
+}
+
+// reportValidate 打印校验结论：有 ERROR 时返回错误（written 非空表示配置刚刚写入，
+// 措辞里说明「已写入但有问题」）。WARN/SKIP 只提示，不影响退出码。
+func reportValidate(stdout io.Writer, findings []validateFinding, written, path string) error {
 	problems, warnings := 0, 0
 	for _, finding := range findings {
 		switch finding.status {
@@ -63,9 +68,12 @@ func runValidate(stdout io.Writer, configPath string) error {
 		printValidateFinding(stdout, finding)
 	}
 	if problems > 0 {
+		if written != "" {
+			return fmt.Errorf("配置已写入 %s，但校验发现 %d 处问题（见上面的 ERROR 行）", written, problems)
+		}
 		return fmt.Errorf("发现 %d 处配置问题（见上面的 ERROR 行）", problems)
 	}
-	summary := "校验通过：config.json 与 credentials.json 可用于 assistant run"
+	summary := fmt.Sprintf("校验通过：%s 与 credentials.json 可用于 assistant run", path)
 	if warnings > 0 {
 		summary += fmt.Sprintf("（另有 %d 条提示，不阻断启动）", warnings)
 	}
@@ -173,6 +181,18 @@ func validateConfigFile(path string, file *instances.File) []validateFinding {
 						fmt.Sprintf("dir=%s 不是 git 检出（评审需要能 fetch/worktree 的检出）", dir)})
 				}
 			}
+		}
+	}
+
+	// $schema：相对路径按 config.json 自身位置解析（编辑器也这么解析）
+	if reference := strings.TrimSpace(file.Schema); reference != "" {
+		if strings.Contains(reference, "://") {
+			findings = append(findings, validateFinding{"OK", "$schema", reference})
+		} else if _, err := os.Stat(filepath.Join(filepath.Dir(path), reference)); err != nil {
+			findings = append(findings, validateFinding{"WARN", "$schema",
+				reference + " 指向的 schema 文件不存在：编辑器补全与悬停文档不可用（assistant config init 会写一份）"})
+		} else {
+			findings = append(findings, validateFinding{"OK", "$schema", reference + "（编辑器补全与悬停文档）"})
 		}
 	}
 

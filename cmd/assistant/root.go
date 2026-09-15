@@ -121,6 +121,7 @@ func newRootCommand(stdout, stderr io.Writer, checker, syncer, merger managerRun
 	command.AddCommand(newActionsCommand(&options.ConfigPath))
 	command.AddCommand(newInstallCommand(), newUninstallCommand(), newMCPCommand(&options.ConfigPath), newDoctorCommand(&options.ConfigPath))
 	command.AddCommand(newValidateCommand(&options.ConfigPath))
+	command.AddCommand(newConfigCommand(&options.ConfigPath))
 	return command
 }
 

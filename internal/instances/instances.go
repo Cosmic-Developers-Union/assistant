@@ -27,6 +27,11 @@ const (
 
 // File 是 config.json 的根。
 type File struct {
+	// Schema 是配置文件里的 $schema（JSON Schema 位置，编辑器用来补全与悬停文档）。
+	// 它由 `assistant config init` 写成同目录的 ./config.schema.json；这里是用户
+	// 配置的一部分，原样保留、不解释。加载器开了 DisallowUnknownFields，所以它必须
+	// 有显式字段，否则带 $schema 的配置会被判为未知键。
+	Schema    string     `json:"$schema,omitempty"`
 	Instances []Instance `json:"instances"`
 	// Weixin 是微信（openclaw ilink）对话桥配置：可选；未配置时 daemon 不启动
 	// 对话能力。
@@ -348,6 +353,7 @@ func Save(path string, file *File) error {
 
 // Normalize 填充默认值并清理空白，幂等。
 func (f *File) Normalize() {
+	f.Schema = strings.TrimSpace(f.Schema)
 	f.DefaultProvider = strings.TrimSpace(f.DefaultProvider)
 	f.Optimizations = f.Optimizations.normalized()
 	if len(f.Providers) > 0 {
