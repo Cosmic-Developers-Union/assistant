@@ -253,7 +253,12 @@ func runInitBranchProtection(command *cobra.Command, configPath string, options 
 		}
 	}
 	if !hasMerger {
-		return fmt.Errorf("协作者中没有 %s 账号：它持有一票批准并执行会签合并，先运行 assistant init merge", options.Merger)
+		seen := make([]string, 0, len(collaborators))
+		for _, collaborator := range collaborators {
+			seen = append(seen, collaborator.Name+"("+collaborator.Permission+")")
+		}
+		return fmt.Errorf("协作者中没有 %s 账号：它持有一票批准并执行会签合并，先运行 assistant init merge（当前协作者: %s）",
+			options.Merger, strings.Join(seen, ", "))
 	}
 	info, exists, err := client.GetRepo(ctx, target.FullName)
 	if err != nil {

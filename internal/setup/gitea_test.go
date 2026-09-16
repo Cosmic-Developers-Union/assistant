@@ -116,6 +116,36 @@ func testAdmin(t *testing.T, store *tokenStore) *giteaAdmin {
 
 // Gitea 协作者列表端点的权限是对象（admin/push/pull 布尔）而不是字符串：
 // 归一化必须正确，否则 branch-protection 的推导直接失效。
+// 部分 Gitea 版本的列表条目权限是字符串（permission: "admin"）而非对象。
+func TestListCollaboratorsAcceptsStringPermission(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/repos/acme/repo/collaborators", func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Query().Get("page") != "1" {
+			_ = json.NewEncoder(writer).Encode([]any{})
+			return
+		}
+		_ = json.NewEncoder(writer).Encode([]map[string]any{
+			{"login": "merge", "permission": "admin"},
+			{"login": "ai", "permission": "write"},
+		})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	admin := &giteaAdmin{host: server.URL, http: server.Client(), token: "t", log: func(string, ...any) {}}
+
+	collaborators, err := admin.ListCollaborators(context.Background(), "acme/repo")
+	if err != nil {
+		t.Fatalf("ListCollaborators() error = %v", err)
+	}
+	want := []Collaborator{
+		{Name: "merge", Permission: "admin"},
+		{Name: "ai", Permission: "write"},
+	}
+	if !slices.Equal(collaborators, want) {
+		t.Errorf("collaborators = %+v, want %+v", collaborators, want)
+	}
+}
+
 func TestListCollaboratorsNormalizesPermissions(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/repos/acme/repo/collaborators", func(writer http.ResponseWriter, request *http.Request) {

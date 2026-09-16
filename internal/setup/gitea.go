@@ -302,8 +302,10 @@ type Collaborator struct {
 	Permission string // admin / write / read
 }
 
-// ListCollaborators 列出仓库协作者及其权限（需要仓库管理员权限）。列表端点的
-// 权限是对象（{"admin","push","pull"} 布尔），这里归一化为 admin/write/read。
+// ListCollaborators 列出仓库协作者及其权限（需要仓库管理员权限）。不同 Gitea
+// 版本的列表条目权限字段不同：新版本是对象 {"admin","push","pull"} 布尔
+// （permissions），部分版本是字符串（permission）；两种都解，归一化为
+// admin/write/read。
 func (a *giteaAdmin) ListCollaborators(ctx context.Context, fullName string) ([]Collaborator, error) {
 	owner, name, err := instances.ParseRepoName(fullName)
 	if err != nil {
@@ -313,6 +315,7 @@ func (a *giteaAdmin) ListCollaborators(ctx context.Context, fullName string) ([]
 	for page := 1; ; page++ {
 		var batch []struct {
 			Login       string `json:"login"`
+			Permission  string `json:"permission"`
 			Permissions *struct {
 				Admin bool `json:"admin"`
 				Push  bool `json:"push"`
@@ -325,14 +328,16 @@ func (a *giteaAdmin) ListCollaborators(ctx context.Context, fullName string) ([]
 			return nil, fmt.Errorf("列出 %s 的协作者: %w", fullName, err)
 		}
 		for _, item := range batch {
-			permission := "read"
+			permission := item.Permission
 			switch {
 			case item.Permissions == nil:
-				permission = ""
+				// 保留字符串字段（可能是空串）
 			case item.Permissions.Admin:
 				permission = "admin"
 			case item.Permissions.Push:
 				permission = "write"
+			default:
+				permission = "read"
 			}
 			result = append(result, Collaborator{Name: item.Login, Permission: permission})
 		}
