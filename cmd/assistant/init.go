@@ -20,10 +20,11 @@ import (
 )
 
 type initOptions struct {
-	Reviewer string
-	Merger   string
-	Image    string
-	DryRun   bool
+	Reviewer       string
+	Merger         string
+	Image          string
+	ExtraApprovals int64
+	DryRun         bool
 }
 
 // repoSetupTarget 是当前仓库初始化的解析结果。
@@ -120,9 +121,10 @@ func newInitBranchProtectionCommand(configFlag *string, options *initOptions) *c
 	command := &cobra.Command{
 		Use:   "branch-protection",
 		Short: "按当前协作者自动生成分支保护规则",
-		Long: "读取当前仓库的协作者清单，自动生成分支保护规则（可重复执行，幂等）：\n" +
-			"  - required approvals = 可投票协作者数：merge 始终持有一票（检查通过后\n" +
-			"    自动批准并合并）；只有 merge 时为 1，加入 ai 协作者后升为 2；\n" +
+		Long: "生成分支保护规则（可重复执行，幂等）。票数不随协作者数量增长：\n" +
+			"  - merge 恒有一票（检查通过后自动批准并合并）——只有 merge 时为 1；\n" +
+			"  - ai 协作者存在时 +1（内容批准）；\n" +
+			"  - --extra-approvals 显式附加额外票数（默认 0）；\n" +
 			"  - 合并白名单只含 merge 账号（开发者 @merge 触发批准，自动合并）；\n" +
 			"  - 驳回阻塞、未回应评审请求阻塞、过期批准作废、落后分支阻塞；\n" +
 			"  - 管理员须遵守分支保护规则。\n\n" +
@@ -133,6 +135,8 @@ func newInitBranchProtectionCommand(configFlag *string, options *initOptions) *c
 		},
 	}
 	command.Flags().StringVar(&options.Merger, "merger", instances.DefaultMergerName, "merge 账号名（合并白名单）")
+	command.Flags().StringVar(&options.Reviewer, "reviewer", instances.DefaultReviewerName, "ai 账号名（存在时票数 +1）")
+	command.Flags().Int64Var(&options.ExtraApprovals, "extra-approvals", 0, "在 merge/ai 之上附加的批准数")
 	return command
 }
 
@@ -235,21 +239,22 @@ func runInitBranchProtection(command *cobra.Command, configPath string, options 
 	if err != nil {
 		return err
 	}
-	// 以当前协作者推导：merge 始终持有一票（检查通过后自动批准并合并），
-	// 因此 required approvals = 可投票协作者总数——只有 merge 时为 1，加入 ai 后为 2
+	// 票数不随协作者数量增长：merge 恒有一票，ai 协作者存在时 +1，其余用
+	// --extra-approvals 显式附加
 	collaborators, err := client.ListCollaborators(ctx, target.FullName)
 	if err != nil {
 		return err
 	}
-	approvals := 0
-	hasMerger := false
+	hasMerger, hasReviewer := false, false
 	for _, collaborator := range collaborators {
 		if collaborator.Permission != "admin" && collaborator.Permission != "write" {
 			continue
 		}
-		approvals++
-		if collaborator.Name == options.Merger {
+		switch collaborator.Name {
+		case options.Merger:
 			hasMerger = true
+		case options.Reviewer:
+			hasReviewer = true
 		}
 	}
 	if !hasMerger {
@@ -260,6 +265,10 @@ func runInitBranchProtection(command *cobra.Command, configPath string, options 
 		return fmt.Errorf("协作者中没有 %s 账号：它持有一票批准并执行会签合并，先运行 assistant init merge（当前协作者: %s）",
 			options.Merger, strings.Join(seen, ", "))
 	}
+	approvals := 1 + options.ExtraApprovals
+	if hasReviewer {
+		approvals++
+	}
 	info, exists, err := client.GetRepo(ctx, target.FullName)
 	if err != nil {
 		return err
@@ -267,8 +276,8 @@ func runInitBranchProtection(command *cobra.Command, configPath string, options 
 	if !exists || info.DefaultBranch == "" || info.Empty {
 		return fmt.Errorf("仓库为空或无默认分支，无法配置分支保护")
 	}
-	logf("按协作者推导：required approvals=%d（merge 恒有一票），合并白名单=%s，分支=%s",
-		approvals, options.Merger, info.DefaultBranch)
+	logf("required approvals=%d（merge 恒 1 票，ai 协作者在否=%v，附加 %d），合并白名单=%s，分支=%s",
+		approvals, hasReviewer, options.ExtraApprovals, options.Merger, info.DefaultBranch)
 	if options.DryRun {
 		logf("dry-run：未触碰服务端")
 		return nil

@@ -36,8 +36,13 @@ assistant init ai # 邀请 ai 加入协作者, 配置可写权限
 assistant init branch-protection # required approvals 从 1 升为 2
 ```
 
-批准规则: 协作者中每个可投票账号一票, merge 恒有一票。只有 merge 时 required
-approvals 为 1; 加入 ai 后为 2——ai 提交内容批准, merge 检查通过后批准并自动合并。
+批准规则: 票数不随协作者数量增长。merge 恒有一票——只有 merge 时 required
+approvals 为 1; 加入 ai 后为 2——ai 提交内容批准, merge 检查通过后批准并自动
+合并。需要更高门槛时用 `--extra-approvals` 显式附加, 例如:
+
+```shell
+assistant init branch-protection --extra-approvals 1 # merge+ai 之外再要求 1 票
+```
 
 ## Action
 
