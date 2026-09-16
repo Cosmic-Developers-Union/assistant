@@ -145,7 +145,8 @@ func newDoctorCommand(configFlag *string) *cobra.Command {
 			"    .gitea/workflows/assistant.yml 与 MCP 配置；\n" +
 			"  - 服务端：按 origin remote/--repo 定位实例，检查分支保护策略、标签体系、\n" +
 			"    协作者权限（ai 写 / merge 管理员）与 MERGE_TOKEN secret。\n" +
-			"发现问题时以退出码 1 结束；本地问题重新 install、服务端问题重新 setup/actions。",
+			"发现问题时以退出码 1 结束；本地问题重新 install / init actions；服务端问题\n" +
+			"重新 setup（dev 侧协作者/分支保护用 assistant init merge / branch-protection）。",
 		Args: cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			return runDoctor(command, *configFlag, options, requiredApprovals, allowAdminOverride)

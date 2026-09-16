@@ -1,15 +1,18 @@
+// init 是 dev 专用的仓库级初始化：以开发者自己的令牌（purpose=mcp，要求目标
+// 仓库的管理员权限）工作，与站点管理员的 assistant setup（admin 令牌）严格
+// 区分。Actions 密钥（MERGE_TOKEN）完全由 setup 扫描分发，init 不写服务端密钥。
 package main
 
 import (
 	"context"
 	"fmt"
 	"os"
-	"slices"
 	"strings"
 
 	"assistant/internal/credentials"
 	"assistant/internal/dispatcher"
 	"assistant/internal/instances"
+	"assistant/internal/repoinstall"
 	"assistant/internal/setup"
 	"assistant/internal/status"
 
@@ -17,13 +20,13 @@ import (
 )
 
 type initOptions struct {
-	RequiredApprovals  int64
-	AllowAdminOverride bool
-	CreateRepos        bool
-	DryRun             bool
+	Reviewer string
+	Merger   string
+	Image    string
+	DryRun   bool
 }
 
-// repoSetupTarget 是当前仓库初始化/撤离的解析结果。
+// repoSetupTarget 是当前仓库初始化的解析结果。
 type repoSetupTarget struct {
 	Path     string
 	FullName string
@@ -32,178 +35,298 @@ type repoSetupTarget struct {
 	File     *instances.File
 }
 
-// newInitCommand 只初始化当前仓库：复用平台（login/setup）的管理员凭据与 ai/
-// merge 账号，配好协作者/分支保护/标签，把仓库自动登记进 config.json，并写入
-// 仓库级 Actions secret。
+// newInitCommand 初始化当前仓库的 assistant 集成，三个子命令各管一件事：
+//
+//   - init actions：写本地 Actions workflow（.gitea/workflows/assistant.yml）；
+//   - init merge：把 merge 账号加为仓库协作者（admin 权限）；
+//   - init branch-protection：按当前协作者自动生成分支保护规则。
 func newInitCommand(configFlag *string) *cobra.Command {
 	options := &initOptions{}
 	command := &cobra.Command{
-		Use:   "init [owner/name]",
-		Short: "初始化当前仓库并自动登记进 config.json（复用平台凭据与 ai/merge 账号）",
-		Long: "只处理当前仓库，不重建平台：\n" +
-			"  1. 按 remote/--repo/位置参数确定仓库，定位 config.json 中的平台；\n" +
-			"  2. 复用或补齐 ai/merge 账号与令牌，配协作者、分支保护（同 setup 口径）、标签；\n" +
-			"  3. 写入仓库级 Actions secret（MERGE_TOKEN）；\n" +
-			"  4. 把仓库条目自动加入 config.json。\n\n" +
-			"平台不在配置中时先运行 assistant login <host>。",
-		Args: cobra.MaximumNArgs(1),
-		RunE: func(command *cobra.Command, args []string) error {
-			return runInit(command, *configFlag, args, options)
-		},
+		Use:   "init",
+		Short: "初始化当前仓库（dev 专用）：actions workflow / merge 协作者 / branch-protection",
+		Long: "只处理当前仓库的 dev 侧初始化，需要**目标仓库的管理员权限**（用开发者\n" +
+			"自己的 purpose=mcp 令牌，先 assistant login）。与站点管理员的 assistant\n" +
+			"setup（admin 令牌：建号、令牌、MERGE_TOKEN 密钥分发）严格区分。\n\n" +
+			"子命令：\n" +
+			"  actions             写本地 Actions workflow（.gitea/workflows/assistant.yml）；\n" +
+			"  merge               把 merge 账号加为仓库协作者（admin 权限）；\n" +
+			"  ai                  邀请 ai 账号加入协作者（write 权限，内容评审）；\n" +
+			"  labels              把标签收敛为规范体系（与 setup/sync 同一口径）；\n" +
+			"  branch-protection   读取当前协作者，自动生成分支保护规则。\n\n" +
+			"MERGE_TOKEN secret 由 setup 扫描「merge 为管理员协作者」的仓库自动分发。",
+		Args: cobra.NoArgs,
 	}
-	flags := command.Flags()
-	flags.Int64Var(&options.RequiredApprovals, "required-approvals", 2, "分支保护要求的批准数")
-	flags.BoolVar(&options.AllowAdminOverride, "allow-admin-override", false, "允许管理员绕过分支保护")
-	flags.BoolVar(&options.CreateRepos, "create-repos", false, "仓库不存在时自动创建（私有，auto_init）")
-	flags.BoolVar(&options.DryRun, "dry-run", false, "只输出将要做的操作，不做任何修改")
+	command.PersistentFlags().String("repo", "", "仓库 owner/name（缺省从 origin remote 识别）")
+	command.PersistentFlags().BoolVar(&options.DryRun, "dry-run", false, "只输出将要做的操作，不做任何修改")
+	command.AddCommand(
+		newInitActionsCommand(options),
+		newInitMergeCommand(configFlag, options),
+		newInitReviewerCommand(configFlag, options),
+		newInitLabelsCommand(configFlag, options),
+		newInitBranchProtectionCommand(configFlag, options),
+	)
 	return command
 }
 
-// newDeinitCommand 是 init 的反命令：把当前仓库从 config.json 移除；--purge
-// 同时清理服务端该仓库的助手配置（分支保护、ai/merge 协作者、MERGE_TOKEN）。
-func newDeinitCommand(configFlag *string) *cobra.Command {
-	var purge bool
-	var dryRun bool
+// newInitActionsCommand 写本地 Actions workflow：不需要任何凭据与服务端访问。
+func newInitActionsCommand(options *initOptions) *cobra.Command {
 	command := &cobra.Command{
-		Use:     "deinit [owner/name]",
-		Aliases: []string{"uninit"},
-		Short:   "撤离当前仓库：从 config.json 移除；--purge 同时清理服务端配置",
-		Long: "只处理当前仓库：\n" +
-			"  默认仅从 config.json 的 repos[] 移除（不触碰服务端）；\n" +
-			"  --purge 额外删除分支保护、移除 ai/merge 协作者、删除 MERGE_TOKEN secret。\n" +
-			"本地安装产物（skills/AGENTS.md/workflow/MCP）用 assistant uninstall 清理。",
-		Args: cobra.MaximumNArgs(1),
-		RunE: func(command *cobra.Command, args []string) error {
-			return runDeinit(command, *configFlag, args, purge, dryRun)
+		Use:   "actions",
+		Short: "写本地 Actions workflow（.gitea/workflows/assistant.yml）",
+		Long: "在当前目录写/更新 assistant 托管的 Actions workflow（sync 与 automerge\n" +
+			"两个 job）。带 marker 防覆盖用户手写文件；MERGE_TOKEN secret 不在这里配——\n" +
+			"由站点管理员运行 assistant setup 自动分发到 merge 为管理员协作者的仓库。",
+		Args: cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			logf := commandLogger(command, "init actions")
+			dir, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			installOptions := repoinstall.Options{Dir: dir, Image: options.Image, DryRun: options.DryRun, Log: logf}
+			if err := repoinstall.InstallWorkflows(installOptions); err != nil {
+				return err
+			}
+			logf("本地 workflow 就绪；服务端 secret 由 assistant setup 分发")
+			return nil
 		},
 	}
-	flags := command.Flags()
-	flags.BoolVar(&purge, "purge", false, "同时清理服务端：分支保护、ai/merge 协作者、MERGE_TOKEN secret")
-	flags.BoolVar(&dryRun, "dry-run", false, "只输出将要做的操作，不做任何修改")
+	command.Flags().StringVar(&options.Image, "image", "", "workflow 运行的 assistant 镜像（缺省官方镜像）")
 	return command
 }
 
-func runInit(command *cobra.Command, configPath string, args []string, options *initOptions) error {
+// newInitMergeCommand 把 merge 账号加为当前仓库的协作者（admin 权限）：merge
+// 需要仓库管理员权限做分支保护读取、会签与合并。
+func newInitMergeCommand(configFlag *string, options *initOptions) *cobra.Command {
+	command := &cobra.Command{
+		Use:   "merge",
+		Short: "把 merge 账号加为当前仓库协作者（admin 权限）",
+		Long: "把 merge 账号加为当前仓库协作者并授予 admin 权限（分支保护读取、会签、\n" +
+			"合并都需要）。需要你是目标仓库的管理员（或 owner）；平台必须已在\n" +
+			"config.json 中（先 assistant login <host>）。",
+		Args: cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			return runInitMerge(command, *configFlag, options)
+		},
+	}
+	command.Flags().StringVar(&options.Merger, "merger", instances.DefaultMergerName, "merge 账号名")
+	return command
+}
+
+// newInitBranchProtectionCommand 按当前协作者自动生成分支保护规则：required
+// approvals = 协作者中可评审人数（不含 merge），合并白名单只含 merge。
+func newInitBranchProtectionCommand(configFlag *string, options *initOptions) *cobra.Command {
+	command := &cobra.Command{
+		Use:   "branch-protection",
+		Short: "按当前协作者自动生成分支保护规则",
+		Long: "读取当前仓库的协作者清单，自动生成分支保护规则（可重复执行，幂等）：\n" +
+			"  - required approvals = 可投票协作者数：merge 始终持有一票（检查通过后\n" +
+			"    自动批准并合并）；只有 merge 时为 1，加入 ai 协作者后升为 2；\n" +
+			"  - 合并白名单只含 merge 账号（开发者 @merge 触发批准，自动合并）；\n" +
+			"  - 驳回阻塞、未回应评审请求阻塞、过期批准作废、落后分支阻塞；\n" +
+			"  - 管理员须遵守分支保护规则。\n\n" +
+			"需要你是目标仓库的管理员（或 owner）；先运行 assistant init merge。",
+		Args: cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			return runInitBranchProtection(command, *configFlag, options)
+		},
+	}
+	command.Flags().StringVar(&options.Merger, "merger", instances.DefaultMergerName, "merge 账号名（合并白名单）")
+	return command
+}
+
+// newInitReviewerCommand 把 ai 账号加为当前仓库的协作者（write 权限）：ai 做
+// 内容评审，提交 APPROVED / REQUEST_CHANGES。
+func newInitReviewerCommand(configFlag *string, options *initOptions) *cobra.Command {
+	command := &cobra.Command{
+		Use:   "ai",
+		Short: "邀请 ai 账号加入协作者（write 权限，内容评审）",
+		Long: "把 ai 账号加为当前仓库协作者并授予 write 权限：ai 是内容评审者，可以\n" +
+			"读代码、提交 review（APPROVED / REQUEST_CHANGES），不做合并。加入后重跑\n" +
+			"assistant init branch-protection，required approvals 会从 1 升为 2。\n" +
+			"需要你是目标仓库的管理员（或 owner）。",
+		Args: cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			return runInitReviewer(command, *configFlag, options)
+		},
+	}
+	command.Flags().StringVar(&options.Reviewer, "reviewer", instances.DefaultReviewerName, "ai 账号名")
+	return command
+}
+
+func runInitReviewer(command *cobra.Command, configPath string, options *initOptions) error {
 	ctx := command.Context()
-	logf := func(format string, arguments ...any) {
-		fmt.Fprintf(command.OutOrStdout(), format+"\n", arguments...)
-	}
-	target, err := resolveRepoSetupTarget(ctx, command, configPath, args)
+	logf := commandLogger(command, "init ai")
+	client, target, err := newRepoClientForTarget(ctx, command, configPath, logf)
 	if err != nil {
 		return err
 	}
-	if err := requireAdminIdentity(configPath, target.Host); err != nil {
-		return err
-	}
-	adminCredential, err := tokenForPurpose(configPath, target.Host, credentials.PurposeAdmin)
-	if err != nil {
-		return err
-	}
-	credentialPath, err := credentials.PathFor(target.Path)
-	if err != nil {
-		return err
-	}
-	store, err := credentials.Load(credentialPath)
-	if err != nil {
-		return err
-	}
-	admin, err := setup.NewAdmin(ctx, setup.Options{Host: target.Host, AdminToken: adminCredential.Token, Log: logf})
-	if err != nil {
-		return err
-	}
-	result, err := setup.Run(ctx, setup.Options{
-		Host:                target.Host,
-		AdminToken:          adminCredential.Token,
-		Repos:               []string{target.FullName},
-		RequiredApprovals:   options.RequiredApprovals,
-		AllowAdminOverride:  options.AllowAdminOverride,
-		CreateRepos:         options.CreateRepos,
-		Existing:            &target.Instance,
-		ExistingCredentials: store.Credentials,
-		DryRun:              options.DryRun,
-		Log:                 logf,
-	}, admin)
-	if err != nil {
-		return err
-	}
-	merged := mergeRepoIntoInstance(target.Instance, result.Instance)
 	if options.DryRun {
-		logf("dry-run：未写入 %s", target.Path)
+		logf("dry-run：将把 %s 加为 %s 的协作者（write）", options.Reviewer, target.FullName)
 		return nil
 	}
-
-	// 仓库级 Actions secret 只针对当前仓库；merge 令牌来自凭据库
-	mergeCredential, err := tokenForPurpose(configPath, target.Host, credentials.PurposeMerge)
-	if err != nil {
+	if err := client.AddCollaborator(ctx, target.FullName, options.Reviewer, "write"); err != nil {
 		return err
 	}
-	actionInstance := merged
-	if repo, ok := merged.FindRepo(target.FullName); ok {
-		actionInstance.Repos = []instances.Repo{repo}
-	}
-	if err := setup.ConfigureActions(ctx, admin, actionInstance, mergeCredential.Token, false, logf); err != nil {
-		return fmt.Errorf("写入仓库 Actions 配置: %w", err)
-	}
-
-	if err := saveInstance(target.File, target.Path, target.Host, merged); err != nil {
-		return err
-	}
-	for _, credential := range result.Credentials {
-		store.SetCredential(credential)
-	}
-	if err := credentials.Save(credentialPath, store); err != nil {
-		return err
-	}
-	logf("仓库 %s 已初始化并登记到 %s（本地文件可用 assistant install 补齐）", target.FullName, target.Path)
+	logf("已把 %s 加为 %s 的协作者（write）", options.Reviewer, target.FullName)
+	logf("重跑 assistant init branch-protection 可把 required approvals 升为 2")
 	return nil
 }
 
-func runDeinit(command *cobra.Command, configPath string, args []string, purge, dryRun bool) error {
-	ctx := command.Context()
-	logf := func(format string, arguments ...any) {
-		fmt.Fprintf(command.OutOrStdout(), format+"\n", arguments...)
+// newInitLabelsCommand 把当前仓库的标签收敛为规范体系：补齐缺失标签、scoped
+// 组内互斥、删除不在体系内的标签（与 setup / sync 同一口径）。
+func newInitLabelsCommand(configFlag *string, options *initOptions) *cobra.Command {
+	command := &cobra.Command{
+		Use:   "labels",
+		Short: "把当前仓库的标签收敛为规范体系（补齐/互斥/删除体系外）",
+		Long: "把当前仓库的标签收敛为 assistant 规范体系：补齐缺失标签、scoped 组内\n" +
+			"互斥、删除不在体系内的标签。口径与 assistant setup / sync 一致，收敛后\n" +
+			"标签完全合规，sync 无需再作修正。需要你是目标仓库的管理员（或 owner）。",
+		Args: cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			return runInitLabels(command, *configFlag, options)
+		},
 	}
-	target, err := resolveRepoSetupTarget(ctx, command, configPath, args)
+	return command
+}
+
+func runInitLabels(command *cobra.Command, configPath string, options *initOptions) error {
+	ctx := command.Context()
+	logf := commandLogger(command, "init labels")
+	client, target, err := newRepoClientForTarget(ctx, command, configPath, logf)
 	if err != nil {
 		return err
 	}
-	index := slices.IndexFunc(target.Instance.Repos, func(repo instances.Repo) bool {
-		return repo.Name == target.FullName
-	})
-	if index < 0 {
-		return fmt.Errorf("仓库 %s 不在配置的 repos[] 中", target.FullName)
-	}
-
-	if purge {
-		if err := requireAdminIdentity(configPath, target.Host); err != nil {
-			return err
-		}
-		adminCredential, credentialErr := tokenForPurpose(configPath, target.Host, credentials.PurposeAdmin)
-		if credentialErr != nil {
-			return fmt.Errorf("--purge 需要管理员凭据: %w", credentialErr)
-		}
-		admin, err := setup.NewAdmin(ctx, setup.Options{Host: target.Host, AdminToken: adminCredential.Token, Log: logf})
-		if err != nil {
-			return err
-		}
-		if dryRun {
-			logf("dry-run：将清理 %s 的服务端配置（分支保护/ai、merge 协作者/%s secret）",
-				target.FullName, setup.ActionsSecretMergeToken)
-		} else if err := purgeRepoServer(ctx, admin, target.Instance, target.FullName, logf); err != nil {
-			return err
-		}
-	}
-	if dryRun {
-		logf("dry-run：未写入 %s", target.Path)
+	if options.DryRun {
+		logf("dry-run：将收敛 %s 的标签体系（补齐缺失、scoped 互斥、删除体系外）", target.FullName)
 		return nil
 	}
-	instance := target.Instance
-	instance.Repos = slices.Delete(slices.Clone(instance.Repos), index, index+1)
-	if err := saveInstance(target.File, target.Path, target.Host, instance); err != nil {
+	if err := client.ReconcileLabels(ctx, target.FullName, client.Token()); err != nil {
+		return fmt.Errorf("收敛标签体系: %w", err)
+	}
+	logf("标签体系已收敛（%s）", target.FullName)
+	return nil
+}
+
+func runInitMerge(command *cobra.Command, configPath string, options *initOptions) error {
+	ctx := command.Context()
+	logf := commandLogger(command, "init merge")
+	client, target, err := newRepoClientForTarget(ctx, command, configPath, logf)
+	if err != nil {
 		return err
 	}
-	logf("仓库 %s 已从 %s 移除（本地文件可用 assistant uninstall 清理）", target.FullName, target.Path)
+	if options.DryRun {
+		logf("dry-run：将把 %s 加为 %s 的协作者（admin）", options.Merger, target.FullName)
+		return nil
+	}
+	if err := client.AddCollaborator(ctx, target.FullName, options.Merger, "admin"); err != nil {
+		return err
+	}
+	logf("已把 %s 加为 %s 的协作者（admin）", options.Merger, target.FullName)
+	logf("MERGE_TOKEN secret 由站点管理员运行 assistant setup 分发")
 	return nil
+}
+
+func runInitBranchProtection(command *cobra.Command, configPath string, options *initOptions) error {
+	ctx := command.Context()
+	logf := commandLogger(command, "init branch-protection")
+	client, target, err := newRepoClientForTarget(ctx, command, configPath, logf)
+	if err != nil {
+		return err
+	}
+	// 以当前协作者推导：merge 始终持有一票（检查通过后自动批准并合并），
+	// 因此 required approvals = 可投票协作者总数——只有 merge 时为 1，加入 ai 后为 2
+	collaborators, err := client.ListCollaborators(ctx, target.FullName)
+	if err != nil {
+		return err
+	}
+	approvals := 0
+	hasMerger := false
+	for _, collaborator := range collaborators {
+		if collaborator.Permission != "admin" && collaborator.Permission != "write" {
+			continue
+		}
+		approvals++
+		if collaborator.Name == options.Merger {
+			hasMerger = true
+		}
+	}
+	if !hasMerger {
+		return fmt.Errorf("协作者中没有 %s 账号：它持有一票批准并执行会签合并，先运行 assistant init merge", options.Merger)
+	}
+	info, exists, err := client.GetRepo(ctx, target.FullName)
+	if err != nil {
+		return err
+	}
+	if !exists || info.DefaultBranch == "" || info.Empty {
+		return fmt.Errorf("仓库为空或无默认分支，无法配置分支保护")
+	}
+	logf("按协作者推导：required approvals=%d（merge 恒有一票），合并白名单=%s，分支=%s",
+		approvals, options.Merger, info.DefaultBranch)
+	if options.DryRun {
+		logf("dry-run：未触碰服务端")
+		return nil
+	}
+	if err := client.EnsureBranchProtection(ctx, target.FullName, setup.ProtectionOptions{
+		Branch:            info.DefaultBranch,
+		MergerName:        options.Merger,
+		RequiredApprovals: int64(approvals),
+	}); err != nil {
+		return err
+	}
+	logf("分支保护已写入 %s（%s）", target.FullName, info.DefaultBranch)
+	return nil
+}
+
+// newRepoClientForTarget 解析当前仓库与平台，并以开发者自己的令牌（purpose=mcp）
+// 构造仓库级操作面；再校验调用者确实是仓库管理员——init 是 dev 专用，与 setup
+// 的站点管理员严格区分。
+func newRepoClientForTarget(
+	ctx context.Context,
+	command *cobra.Command,
+	configPath string,
+	logf func(string, ...any),
+) (*setup.GiteaClient, repoSetupTarget, error) {
+	repo, _ := command.Flags().GetString("repo")
+	var args []string
+	if repo != "" {
+		args = []string{repo}
+	}
+	target, err := resolveRepoSetupTarget(ctx, command, configPath, args)
+	if err != nil {
+		return nil, repoSetupTarget{}, err
+	}
+	credential, err := tokenForPurpose(configPath, target.Host, credentials.PurposeMCP)
+	if err != nil {
+		return nil, repoSetupTarget{}, fmt.Errorf("init 使用开发者自己的令牌（purpose=mcp）: %w", err)
+	}
+	client, err := setup.NewRepoClient(ctx, target.Host, credential.Token, logf)
+	if err != nil {
+		return nil, repoSetupTarget{}, err
+	}
+	collaborators, collaboratorErr := client.ListCollaborators(ctx, target.FullName)
+	if collaboratorErr != nil {
+		return nil, repoSetupTarget{}, fmt.Errorf(
+			"%s: 读取协作者失败（%v）：init 是 dev 专用，需要目标仓库的管理员权限；站点级配置用 assistant setup",
+			target.FullName, collaboratorErr)
+	}
+	self := client.Login()
+	for _, collaborator := range collaborators {
+		if collaborator.Name == self && collaborator.Permission != "admin" {
+			return nil, repoSetupTarget{}, fmt.Errorf(
+				"%s: 你（@%s）只是 %s 协作者：init 需要仓库管理员权限；站点级配置用 assistant setup",
+				target.FullName, self, collaborator.Permission)
+		}
+	}
+	return client, target, nil
+}
+
+// commandLogger 返回带子命令前缀的 stdout 日志函数。
+func commandLogger(command *cobra.Command, prefix string) func(string, ...any) {
+	return func(format string, arguments ...any) {
+		fmt.Fprintf(command.OutOrStdout(), "[%s] %s\n", prefix, fmt.Sprintf(format, arguments...))
+	}
 }
 
 // resolveRepoSetupTarget 定位当前仓库、对应平台与配置：仓库来自位置参数 /
@@ -288,65 +411,7 @@ func resolveRepoSetupTargetWithProbe(
 	}, nil
 }
 
-// mergeRepoIntoInstance 把 setup.Run 返回的单仓库实例合并回原实例：保留原
-// admin 凭据与其他仓库，更新账号令牌与目标仓库条目。
-func mergeRepoIntoInstance(original, updated instances.Instance) instances.Instance {
-	merged := original
-	merged.Reviewer = updated.Reviewer
-	merged.Merger = updated.Merger
-	for _, repo := range updated.Repos {
-		replaced := false
-		for index := range merged.Repos {
-			if merged.Repos[index].Name == repo.Name {
-				merged.Repos[index] = repo
-				replaced = true
-				break
-			}
-		}
-		if !replaced {
-			merged.Repos = append(merged.Repos, repo)
-		}
-	}
-	return merged
-}
-
-// purgeRepoServer 清理服务端该仓库的助手配置。
-func purgeRepoServer(
-	ctx context.Context,
-	admin setup.Admin,
-	instance instances.Instance,
-	fullName string,
-	logf func(string, ...any),
-) error {
-	info, exists, err := admin.GetRepo(ctx, fullName)
-	if err != nil {
-		return err
-	}
-	if !exists {
-		logf("仓库 %s 在服务端不存在，跳过清理", fullName)
-		return nil
-	}
-	if err := admin.DeleteBranchProtection(ctx, fullName, info.DefaultBranch); err != nil {
-		return err
-	}
-	logf("已删除分支保护 %s", info.DefaultBranch)
-	for _, account := range []string{instance.Reviewer.Name, instance.Merger.Name} {
-		if account == "" {
-			continue
-		}
-		if err := admin.RemoveCollaborator(ctx, fullName, account); err != nil {
-			return err
-		}
-		logf("已移除协作者 %s", account)
-	}
-	if err := admin.DeleteRepoSecret(ctx, fullName, setup.ActionsSecretMergeToken); err != nil {
-		return err
-	}
-	logf("已删除 Actions secret %s", setup.ActionsSecretMergeToken)
-	return nil
-}
-
-// saveInstance 用 updated 替换文件中 host 对应的实例并落盘。
+// saveInstance 用 updated 替换文件中 host 对应的实例并落盘（repos add 等共享）。
 func saveInstance(file *instances.File, path, host string, updated instances.Instance) error {
 	replaced := false
 	for index := range file.Instances {

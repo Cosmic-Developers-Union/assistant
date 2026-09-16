@@ -199,6 +199,31 @@ func Install(ctx context.Context, options Options) error {
 	return nil
 }
 
+// InstallWorkflows 只安装/更新仓库 Actions workflow（`assistant init actions`
+// 用）：内容与 Install 的 workflow 部分一致，带 marker 防覆盖用户手写文件，
+// 并清理旧版带 marker 的独立 automerge workflow。
+func InstallWorkflows(options Options) error {
+	if err := options.normalize(); err != nil {
+		return err
+	}
+	data := TemplateData{Reviewer: options.Reviewer, Merger: options.Merger, Image: options.Image}
+	workflow, err := renderTemplate(workflowTemplateName, data)
+	if err != nil {
+		return err
+	}
+	for _, relative := range ManagedWorkflowPaths() {
+		if err := installFile(&options, filepath.Join(options.Dir, relative), workflow); err != nil {
+			return err
+		}
+	}
+	for _, relative := range LegacyWorkflowPaths() {
+		if err := uninstallFile(&options, filepath.Join(options.Dir, relative)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Uninstall 移除 install 写入的内容（技能由 skills CLI 卸载，其余只触碰带
 // marker 的内容）。
 func Uninstall(ctx context.Context, options Options) error {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -113,7 +114,40 @@ func testAdmin(t *testing.T, store *tokenStore) *giteaAdmin {
 	return &giteaAdmin{host: server.URL, http: server.Client(), log: func(string, ...any) {}}
 }
 
-func TestConvergeTokenKeepsMatchingAndDeletesOthers(t *testing.T) {
+// Gitea 协作者列表端点的权限是对象（admin/push/pull 布尔）而不是字符串：
+// 归一化必须正确，否则 branch-protection 的推导直接失效。
+func TestListCollaboratorsNormalizesPermissions(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/repos/acme/repo/collaborators", func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Query().Get("page") != "1" {
+			_ = json.NewEncoder(writer).Encode([]any{})
+			return
+		}
+		_ = json.NewEncoder(writer).Encode([]map[string]any{
+			{"login": "merge", "permissions": map[string]any{"admin": true, "push": true, "pull": true}},
+			{"login": "ai", "permissions": map[string]any{"admin": false, "push": true, "pull": true}},
+			{"login": "dev", "permissions": map[string]any{"admin": false, "push": false, "pull": true}},
+		})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	admin := &giteaAdmin{host: server.URL, http: server.Client(), token: "t", log: func(string, ...any) {}}
+
+	collaborators, err := admin.ListCollaborators(context.Background(), "acme/repo")
+	if err != nil {
+		t.Fatalf("ListCollaborators() error = %v", err)
+	}
+	want := []Collaborator{
+		{Name: "merge", Permission: "admin"},
+		{Name: "ai", Permission: "write"},
+		{Name: "dev", Permission: "read"},
+	}
+	if !slices.Equal(collaborators, want) {
+		t.Errorf("collaborators = %+v, want %+v", collaborators, want)
+	}
+}
+
+func TestConvergeTokenKeepsMatchingAndLeavesOthers(t *testing.T) {
 	store := newTokenStore(
 		tokenEntry(1, "assistant", "old-token-deadbeef"),
 		tokenEntry(2, "stale", "other-token-cafebabe"),
@@ -130,15 +164,19 @@ func TestConvergeTokenKeepsMatchingAndDeletesOthers(t *testing.T) {
 	if store.creates != 0 {
 		t.Errorf("creates = %d, want 0", store.creates)
 	}
-	if names := store.names(); len(names) != 1 || names[0] != "assistant" {
-		t.Errorf("tokens = %v, want only the kept one", names)
+	names := store.names()
+	if len(names) != 2 {
+		t.Fatalf("tokens = %v, want kept one plus untouched others", names)
+	}
+	if !slices.Contains(names, "assistant") || !slices.Contains(names, "stale") {
+		t.Errorf("tokens = %v, want both assistant and stale kept", names)
 	}
 }
 
-func TestConvergeTokenCreatesAndDeletesAll(t *testing.T) {
+func TestConvergeTokenReplacesOnlyOwnedToken(t *testing.T) {
 	store := newTokenStore(
-		tokenEntry(1, "assistant-setup-1", "old-token-deadbeef"),
-		tokenEntry(2, "stale", "other-token-cafebabe"),
+		tokenEntry(1, "assistant", "old-token-deadbeef"),
+		tokenEntry(2, "human-made", "other-token-cafebabe"),
 	)
 	admin := testAdmin(t, store)
 
@@ -149,7 +187,11 @@ func TestConvergeTokenCreatesAndDeletesAll(t *testing.T) {
 	if !created || !strings.HasPrefix(token, "tok-"+ReviewerTokenName+"-") {
 		t.Errorf("token = %q created = %v, want fresh reviewer token", token, created)
 	}
-	if names := store.names(); len(names) != 1 || names[0] != ReviewerTokenName {
-		t.Errorf("tokens = %v, want only the fresh one", names)
+	names := store.names()
+	if len(names) != 2 {
+		t.Fatalf("tokens = %v, want fresh one plus untouched human-made", names)
+	}
+	if !slices.Contains(names, ReviewerTokenName) || !slices.Contains(names, "human-made") {
+		t.Errorf("tokens = %v, want fresh assistant token and human-made kept", names)
 	}
 }

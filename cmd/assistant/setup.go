@@ -34,7 +34,8 @@ func newSetupCommand(configFlag *string) *cobra.Command {
 			"  2. 为它们生成令牌（有效则复用），写入凭据库 purpose=review / merge；\n" +
 			"  3. 把两个账号加为仓库协作者（write/admin），并补齐与 sync 相同口径的标签体系；\n" +
 			"  4. 在默认分支配置分支保护（required approvals、驳回阻塞、过期批准作废、落后分支阻塞）；\n" +
-			"  5. 把实例与仓库写回 config.json（0600）。\n\n" +
+			"  5. 扫描 merge 为管理员协作者的仓库，自动写入 MERGE_TOKEN secret；\n" +
+			"  6. 把实例与仓库写回 config.json（0600）。\n\n" +
 			"不使用任何独立的凭据参数：管理员令牌来自 assistant login 写入凭据库的\n" +
 			"purpose=admin，因此运行前必须先用**管理员账号**登录：\n" +
 			"  assistant login <host> --user <管理员账号>\n\n" +

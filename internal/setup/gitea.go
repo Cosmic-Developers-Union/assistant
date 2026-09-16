@@ -24,6 +24,10 @@ const (
 	httpTimeout = 30 * time.Second
 )
 
+// GiteaClient 是 Admin 的真实实现别名：init（dev 令牌）与 setup（admin 令牌）
+// 共用同一操作面，权限差异由服务端与调用方校验保证。
+type GiteaClient = giteaAdmin
+
 // giteaAdmin 是 Admin 的真实实现：读操作走 raw REST，写操作走 Gitea SDK。
 // 管理员令牌由调用方从凭据库（purpose=admin）解析后传入——setup 不自己获取凭据。
 type giteaAdmin struct {
@@ -36,6 +40,8 @@ type giteaAdmin struct {
 	// passwords 记录本次创建的机器人账号随机密码，用于令牌创建失败时以
 	// Basic Auth 回退（不写盘）。
 	passwords map[string]string
+	// login 是 NewRepoClient 校验时记录的令牌归属账号。
+	login string
 }
 
 // NewAdmin 构造高权限操作面：只接受管理员令牌（assistant login 写入凭据库的
@@ -65,6 +71,7 @@ func NewAdmin(ctx context.Context, options Options) (*giteaAdmin, error) {
 	if !isAdmin {
 		return nil, fmt.Errorf("账号 @%s 不是管理员，setup 需要管理员权限", login)
 	}
+	admin.login = login
 	sdk, err := gitea.NewClient(
 		admin.host,
 		gitea.SetToken(admin.token),
@@ -77,6 +84,53 @@ func NewAdmin(ctx context.Context, options Options) (*giteaAdmin, error) {
 	admin.sdk = sdk
 	return admin, nil
 }
+
+// NewRepoClient 构造仓库级操作面：接受仓库管理员（dev）自己的令牌（凭据库
+// purpose=mcp），不做站点管理员校验。init 子命令（协作者、分支保护）用它；
+// 站点级初始化仍走 NewAdmin（admin 令牌）。
+func NewRepoClient(ctx context.Context, host, token string, logf func(string, ...any)) (*giteaAdmin, error) {
+	host = strings.TrimRight(strings.TrimSpace(host), "/")
+	if parsed, err := url.Parse(host); err != nil || parsed.Host == "" ||
+		(parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return nil, fmt.Errorf("host 必须是绝对 HTTP(S) URL：%q", host)
+	}
+	if token == "" {
+		return nil, fmt.Errorf("缺少访问令牌：先 assistant login %s", host)
+	}
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	httpClient := &http.Client{Timeout: httpTimeout}
+	client := &giteaAdmin{
+		host:      host,
+		token:     token,
+		http:      httpClient,
+		log:       logf,
+		passwords: map[string]string{},
+	}
+	login, _, err := client.AuthenticatedUser(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("校验令牌: %w", err)
+	}
+	client.login = login
+	sdk, err := gitea.NewClient(
+		client.host,
+		gitea.SetToken(client.token),
+		gitea.SetHTTPClient(httpClient),
+		gitea.SetUserAgent("assistant-init/1"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("创建 Gitea 客户端: %w", err)
+	}
+	client.sdk = sdk
+	return client, nil
+}
+
+// Login 返回当前令牌归属的账号名（NewRepoClient 校验时记录）。
+func (a *giteaAdmin) Login() string { return a.login }
+
+// Token 返回构造时使用的访问令牌（供复用同一令牌的其他客户端，如标签管理）。
+func (a *giteaAdmin) Token() string { return a.token }
 
 func (a *giteaAdmin) AuthenticatedUser(ctx context.Context) (string, bool, error) {
 	var payload struct {
@@ -140,9 +194,9 @@ type tokenInfo struct {
 	TokenLastEight string `json:"token_last_eight"`
 }
 
-// ConvergeToken 把账号令牌收敛为唯一一个：保留 keepToken（按末 8 位匹配）或新建
-// tokenName，删除账号下其余所有令牌。review/merge 机器人都用它：一个站点一个
-// 机器人账号只允许一条令牌，避免凭据层面出现多个可用身份。
+// ConvergeToken 保证名为 tokenName 的本工具令牌可用：keepToken（按末 8 位匹配）
+// 命中则直接复用；否则只删除名为 tokenName 的旧条目后新建。账号下**其他命名的
+// 令牌一律不动**——机器人账号可能同时被人工使用，setup 不做服务端密钥清理。
 func (a *giteaAdmin) ConvergeToken(
 	ctx context.Context,
 	name, password, tokenName, keepToken string,
@@ -154,11 +208,11 @@ func (a *giteaAdmin) ConvergeToken(
 	keepID := matchToken(tokens, keepToken)
 	deleted := 0
 	for _, item := range tokens {
-		if item.ID == keepID {
+		if item.ID == keepID || item.Name != tokenName {
 			continue
 		}
 		if err := a.deleteTokenBasic(ctx, name, password, item.ID); err != nil {
-			return "", false, fmt.Errorf("删除 %s 的历史令牌 %s: %w", name, item.Name, err)
+			return "", false, fmt.Errorf("删除 %s 的本工具令牌 %s: %w", name, item.Name, err)
 		}
 		deleted++
 	}
@@ -172,7 +226,7 @@ func (a *giteaAdmin) ConvergeToken(
 		created = true
 	}
 	if deleted > 0 {
-		a.log("已清理 %s 的 %d 个历史令牌（一个机器人账号只保留一条令牌）", name, deleted)
+		a.log("已清理 %s 的 %d 个旧的本工具令牌（其他命名的令牌未触碰）", name, deleted)
 	}
 	return token, created, nil
 }
@@ -242,6 +296,72 @@ func tokenLastEight(token string) string {
 	return token[len(token)-8:]
 }
 
+// Collaborator 是仓库协作者的只读视图。
+type Collaborator struct {
+	Name       string
+	Permission string // admin / write / read
+}
+
+// ListCollaborators 列出仓库协作者及其权限（需要仓库管理员权限）。列表端点的
+// 权限是对象（{"admin","push","pull"} 布尔），这里归一化为 admin/write/read。
+func (a *giteaAdmin) ListCollaborators(ctx context.Context, fullName string) ([]Collaborator, error) {
+	owner, name, err := instances.ParseRepoName(fullName)
+	if err != nil {
+		return nil, err
+	}
+	var result []Collaborator
+	for page := 1; ; page++ {
+		var batch []struct {
+			Login       string `json:"login"`
+			Permissions *struct {
+				Admin bool `json:"admin"`
+				Push  bool `json:"push"`
+				Pull  bool `json:"pull"`
+			} `json:"permissions"`
+		}
+		path := fmt.Sprintf("/api/v1/repos/%s/%s/collaborators?page=%d&limit=50",
+			url.PathEscape(owner), url.PathEscape(name), page)
+		if _, err := a.do(ctx, http.MethodGet, path, a.auth(), nil, &batch); err != nil {
+			return nil, fmt.Errorf("列出 %s 的协作者: %w", fullName, err)
+		}
+		for _, item := range batch {
+			permission := "read"
+			switch {
+			case item.Permissions == nil:
+				permission = ""
+			case item.Permissions.Admin:
+				permission = "admin"
+			case item.Permissions.Push:
+				permission = "write"
+			}
+			result = append(result, Collaborator{Name: item.Login, Permission: permission})
+		}
+		if len(batch) < 50 {
+			return result, nil
+		}
+	}
+}
+
+// ListAllRepos 列出实例上的全部仓库（站点管理员端点）。
+func (a *giteaAdmin) ListAllRepos(ctx context.Context) ([]string, error) {
+	var result []string
+	for page := 1; ; page++ {
+		var batch []struct {
+			FullName string `json:"full_name"`
+		}
+		path := fmt.Sprintf("/api/v1/admin/repos?page=%d&limit=50", page)
+		if _, err := a.do(ctx, http.MethodGet, path, a.auth(), nil, &batch); err != nil {
+			return nil, fmt.Errorf("列出实例仓库: %w", err)
+		}
+		for _, item := range batch {
+			result = append(result, item.FullName)
+		}
+		if len(batch) < 50 {
+			return result, nil
+		}
+	}
+}
+
 // SetRepoSecret 写仓库级 Actions secret（PUT 幂等覆盖；secret 值只写不可读，
 // 无法比对，只能每次覆盖）。
 func (a *giteaAdmin) SetRepoSecret(ctx context.Context, fullName, name, value string) error {
@@ -253,55 +373,6 @@ func (a *giteaAdmin) SetRepoSecret(ctx context.Context, fullName, name, value st
 		url.PathEscape(owner), url.PathEscape(repository), url.PathEscape(name))
 	if _, err := a.do(ctx, http.MethodPut, path, a.auth(), map[string]any{"data": value}, nil); err != nil {
 		return fmt.Errorf("写 %s 的 Actions secret %s: %w", fullName, name, err)
-	}
-	return nil
-}
-
-// RemoveCollaborator 移除仓库协作者（不存在时 no-op）。deinit --purge 用。
-func (a *giteaAdmin) RemoveCollaborator(ctx context.Context, fullName, user string) error {
-	if a.sdk == nil {
-		return fmt.Errorf("缺少管理员令牌，无法移除协作者")
-	}
-	owner, name, err := instances.ParseRepoName(fullName)
-	if err != nil {
-		return err
-	}
-	response, err := a.sdk.Repositories.DeleteCollaborator(ctx, owner, name, user)
-	if err != nil && (response == nil || response.StatusCode != http.StatusNotFound) {
-		return fmt.Errorf("移除 %s 的协作者 %s: %w", fullName, user, err)
-	}
-	return nil
-}
-
-// DeleteBranchProtection 删除分支保护规则（不存在时 no-op）。deinit --purge 用。
-func (a *giteaAdmin) DeleteBranchProtection(ctx context.Context, fullName, branch string) error {
-	if a.sdk == nil {
-		return fmt.Errorf("缺少管理员令牌，无法删除分支保护")
-	}
-	owner, name, err := instances.ParseRepoName(fullName)
-	if err != nil {
-		return err
-	}
-	response, err := a.sdk.Repositories.DeleteBranchProtection(ctx, owner, name, branch)
-	if err != nil && (response == nil || response.StatusCode != http.StatusNotFound) {
-		return fmt.Errorf("删除 %s 的分支保护 %s: %w", fullName, branch, err)
-	}
-	return nil
-}
-
-// DeleteRepoSecret 删除仓库级 Actions secret（不存在时 no-op）。deinit --purge 用。
-func (a *giteaAdmin) DeleteRepoSecret(ctx context.Context, fullName, name string) error {
-	owner, repository, err := instances.ParseRepoName(fullName)
-	if err != nil {
-		return err
-	}
-	path := fmt.Sprintf("/api/v1/repos/%s/%s/actions/secrets/%s",
-		url.PathEscape(owner), url.PathEscape(repository), url.PathEscape(name))
-	if _, err := a.do(ctx, http.MethodDelete, path, a.auth(), nil, nil); err != nil {
-		if isHTTPStatus(err, http.StatusNotFound) {
-			return nil
-		}
-		return fmt.Errorf("删除 %s 的 Actions secret %s: %w", fullName, name, err)
 	}
 	return nil
 }

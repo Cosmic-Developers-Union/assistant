@@ -68,22 +68,18 @@ func (f *fakeAdmin) EnsurePassword(_ context.Context, name string) (string, erro
 	return f.passwords[name], nil
 }
 
-// ConvergeToken 模拟 review/merge 共用语义：账号下只保留一个令牌。
+// ConvergeToken 模拟 review/merge 共用语义：只替换名为 tokenName 的本工具令牌，
+// 其他命名的令牌一律不动。
 func (f *fakeAdmin) ConvergeToken(_ context.Context, name, _ /*password*/, tokenName, keepToken string) (string, bool, error) {
 	if keepToken != "" {
 		for key, value := range f.tokens {
 			if strings.HasPrefix(key, name+"\x00") && value == keepToken {
-				for other := range f.tokens {
-					if strings.HasPrefix(other, name+"\x00") && other != key {
-						delete(f.tokens, other)
-					}
-				}
 				return keepToken, false, nil
 			}
 		}
 	}
 	for key := range f.tokens {
-		if strings.HasPrefix(key, name+"\x00") {
+		if key == tokenKey(name, tokenName) {
 			delete(f.tokens, key)
 		}
 	}
@@ -118,16 +114,6 @@ func (f *fakeAdmin) AddCollaborator(_ context.Context, fullName, user, permissio
 	return nil
 }
 
-func (f *fakeAdmin) RemoveCollaborator(_ context.Context, fullName, user string) error {
-	delete(f.collaborators, fullName+"/"+user)
-	return nil
-}
-
-func (f *fakeAdmin) DeleteBranchProtection(_ context.Context, fullName, _ string) error {
-	delete(f.protections, fullName)
-	return nil
-}
-
 func (f *fakeAdmin) EnsureBranchProtection(_ context.Context, fullName string, options ProtectionOptions) error {
 	f.protections[fullName] = options
 	return nil
@@ -143,58 +129,51 @@ func (f *fakeAdmin) SetRepoSecret(_ context.Context, fullName, name, value strin
 	return nil
 }
 
-func (f *fakeAdmin) DeleteRepoSecret(_ context.Context, fullName, name string) error {
-	delete(f.secrets, fullName+"/"+name)
-	return nil
+func (f *fakeAdmin) ListCollaborators(_ context.Context, fullName string) ([]Collaborator, error) {
+	var result []Collaborator
+	for key, permission := range f.collaborators {
+		index := strings.LastIndex(key, "/")
+		if index > 0 && key[:index] == fullName {
+			result = append(result, Collaborator{Name: key[index+1:], Permission: permission})
+		}
+	}
+	return result, nil
 }
 
-func TestConfigureActionsWritesExpectedRepoConfig(t *testing.T) {
-	admin := newFakeAdmin("acme/repo")
-	instance := instances.Instance{
-		Host:   "https://gitea.example.com",
-		Merger: instances.Account{Name: "merge"},
-		Repos:  []instances.Repo{{Name: "acme/repo"}},
+func (f *fakeAdmin) ListAllRepos(context.Context) ([]string, error) {
+	names := make([]string, 0, len(f.repos))
+	for name := range f.repos {
+		names = append(names, name)
 	}
-	if err := ConfigureActions(context.Background(), admin, instance, "merger-token", false, nil); err != nil {
-		t.Fatalf("ConfigureActions() error = %v", err)
+	return names, nil
+}
+
+func TestSyncMergeSecretsWritesOnlyMergeAdminRepos(t *testing.T) {
+	admin := newFakeAdmin("acme/one", "acme/two", "acme/three")
+	admin.AddCollaborator(context.Background(), "acme/one", "merge", "admin")
+	admin.AddCollaborator(context.Background(), "acme/two", "merge", "write")
+	// acme/three 没有 merge 协作者
+
+	if err := SyncMergeSecrets(context.Background(), admin, "merge", "merger-token", false, nil); err != nil {
+		t.Fatalf("SyncMergeSecrets() error = %v", err)
 	}
-	if got := admin.secrets["acme/repo/"+ActionsSecretMergeToken]; got != "merger-token" {
-		t.Errorf("state secret = %q", got)
+	if got := admin.secrets["acme/one/"+ActionsSecretMergeToken]; got != "merger-token" {
+		t.Errorf("acme/one secret = %q, want merger-token", got)
 	}
 	if len(admin.secrets) != 1 {
-		t.Errorf("secrets = %+v, want only %s", admin.secrets, ActionsSecretMergeToken)
+		t.Errorf("secrets = %+v, want only acme/one", admin.secrets)
 	}
 }
 
-// merge 令牌来自凭据库（setup 的 Result.Credentials），不再从 instance 读取：
-// 缺失/空令牌必须被拒绝。
-func TestConfigureActionsRequiresMergeToken(t *testing.T) {
-	admin := newFakeAdmin("acme/repo")
-	instance := instances.Instance{
-		Host:   "https://gitea.example.com",
-		Merger: instances.Account{Name: "merge"},
-		Repos:  []instances.Repo{{Name: "acme/repo"}},
-	}
-	if err := ConfigureActions(context.Background(), admin, instance, "", false, nil); err == nil {
-		t.Error("ConfigureActions() error = nil, want missing merge token error")
+// merge 令牌来自凭据库（setup 的 Result.Credentials）：缺失/空令牌必须被拒绝。
+func TestSyncMergeSecretsRequiresMergeToken(t *testing.T) {
+	admin := newFakeAdmin("acme/one")
+	admin.AddCollaborator(context.Background(), "acme/one", "merge", "admin")
+	if err := SyncMergeSecrets(context.Background(), admin, "merge", "", false, nil); err == nil {
+		t.Error("SyncMergeSecrets() error = nil, want missing merge token error")
 	}
 	if len(admin.secrets) != 0 {
 		t.Errorf("missing token must not write secrets: %+v", admin.secrets)
-	}
-}
-
-func TestConfigureActionsDryRunMakesNoWrites(t *testing.T) {
-	admin := newFakeAdmin("acme/repo")
-	instance := instances.Instance{
-		Host:   "https://gitea.example.com",
-		Merger: instances.Account{Name: "merge"},
-		Repos:  []instances.Repo{{Name: "acme/repo"}},
-	}
-	if err := ConfigureActions(context.Background(), admin, instance, "merger-token", true, nil); err != nil {
-		t.Fatalf("ConfigureActions() error = %v", err)
-	}
-	if len(admin.secrets) != 0 {
-		t.Errorf("dry-run mutated: %+v", admin.secrets)
 	}
 }
 

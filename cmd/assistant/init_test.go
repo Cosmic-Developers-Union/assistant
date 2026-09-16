@@ -11,41 +11,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func TestMergeRepoIntoInstance(t *testing.T) {
-	original := instances.Instance{
-		Host:     "https://gitea.example.com",
-		Reviewer: instances.Account{Name: "ai"},
-		Merger:   instances.Account{Name: "merge"},
-		Repos:    []instances.Repo{{Name: "acme/one", Dir: "/srv/one"}},
-	}
-	updated := instances.Instance{
-		Host:     "https://gitea.example.com",
-		Reviewer: instances.Account{Name: "ai"},
-		Merger:   instances.Account{Name: "merge"},
-		Repos:    []instances.Repo{{Name: "acme/two"}},
-	}
-	merged := mergeRepoIntoInstance(original, updated)
-	for _, want := range []struct{ name, dir string }{
-		{"acme/one", "/srv/one"},
-		{"acme/two", ""},
-	} {
-		repo, ok := merged.FindRepo(want.name)
-		if !ok || repo.Dir != want.dir {
-			t.Errorf("repo %s = %+v, want dir %q", want.name, repo, want.dir)
-		}
-	}
-
-	// 已登记仓库：条目被更新而不是重复
-	updated.Repos = []instances.Repo{{Name: "acme/one", Dir: "/srv/one-v2"}}
-	merged = mergeRepoIntoInstance(original, updated)
-	if len(merged.Repos) != 1 {
-		t.Fatalf("重复合并应为 1 个仓库：%+v", merged.Repos)
-	}
-	if repo, _ := merged.FindRepo("acme/one"); repo.Dir != "/srv/one-v2" {
-		t.Errorf("repo = %+v, want 更新后的 dir", repo)
-	}
-}
-
 func TestResolveRepoSetupTargetUsesPlatformByHost(t *testing.T) {
 	dir := gitRemoteFixture(t)
 	configPath := filepath.Join(t.TempDir(), "config.json")

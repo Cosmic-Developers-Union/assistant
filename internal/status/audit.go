@@ -177,7 +177,7 @@ func (c *Client) AuditRepository(ctx context.Context, repository Repository, opt
 	case err != nil:
 		return nil, err
 	case !slices.Contains(names, "MERGE_TOKEN"):
-		add("actions secret MERGE_TOKEN", AuditStatusMissing, "未写入 merge 令牌（assistant actions）")
+		add("actions secret MERGE_TOKEN", AuditStatusMissing, "未写入 merge 令牌（assistant setup）")
 	}
 	return findings, nil
 }

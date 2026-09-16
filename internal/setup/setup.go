@@ -6,7 +6,9 @@
 //  3. 把两个账号加为仓库协作者（write），并按统一口径补齐标签体系；
 //  4. 在默认分支上配置分支保护（required approvals、驳回阻塞、过期批准作废、
 //     落后分支阻塞），使「评审 → 批准 → 会签 → 自动合并」闭环成立；
-//  5. 返回可写回 config.json 的 instance 配置。
+//  5. 扫描实例上 merge 为管理员协作者的仓库，幂等写入 Actions secret
+//     MERGE_TOKEN——密钥分发完全由 setup（站点管理员）负责；
+//  6. 返回可写回 config.json 的 instance 配置。
 //
 // 全流程幂等：重复执行不重复建号/建令牌，只收敛配置。
 package setup
@@ -68,25 +70,25 @@ type Admin interface {
 	CreateUser(ctx context.Context, name, email string) error
 	// EnsurePassword 返回账号可用密码（本次创建或管理员重置）。
 	EnsurePassword(ctx context.Context, name string) (string, error)
-	// ConvergeToken 收敛账号令牌为唯一一个：保留 keepToken（末 8 位匹配）
-	// 或新建 tokenName，删除其余全部。review/merge 机器人都用：一个站点
-	// 一个机器人账号只允许一条令牌。
+	// ConvergeToken 保证名为 tokenName 的本工具令牌可用：保留 keepToken（末 8 位
+	// 匹配）或新建 tokenName。只允许删除名为 tokenName 的旧条目，账号下其他命名
+	// 的令牌一律不动。review/merge 机器人都用：一个站点一个机器人账号一条本工具
+	// 令牌；setup 不做服务端密钥清理。
 	ConvergeToken(ctx context.Context, name, password, tokenName, keepToken string) (token string, created bool, err error)
 	// ValidateToken 确认 token 属于 name 账号（用于复用已有令牌）。
 	ValidateToken(ctx context.Context, name, token string) (bool, error)
 	GetRepo(ctx context.Context, fullName string) (RepoInfo, bool, error)
 	CreateRepo(ctx context.Context, fullName string) error
 	AddCollaborator(ctx context.Context, fullName, user, permission string) error
-	// RemoveCollaborator 移除仓库协作者（不存在时 no-op；deinit --purge 用）。
-	RemoveCollaborator(ctx context.Context, fullName, user string) error
 	EnsureBranchProtection(ctx context.Context, fullName string, options ProtectionOptions) error
-	// DeleteBranchProtection 删除分支保护规则（不存在时 no-op；deinit --purge 用）。
-	DeleteBranchProtection(ctx context.Context, fullName, branch string) error
 	ReconcileLabels(ctx context.Context, fullName, reviewerToken string) error
-	// SetRepoSecret / DeleteRepoSecret 写/删仓库级 Actions secret（幂等）。
+	// ListCollaborators 列出仓库协作者及权限（需要仓库管理员权限）。
+	ListCollaborators(ctx context.Context, fullName string) ([]Collaborator, error)
+	// ListAllRepos 列出实例上的全部仓库（站点管理员端点）。
+	ListAllRepos(ctx context.Context) ([]string, error)
+	// SetRepoSecret 写仓库级 Actions secret（幂等）。
 	// 身份名是约定（ai/merge），无需 variable。
 	SetRepoSecret(ctx context.Context, fullName, name, value string) error
-	DeleteRepoSecret(ctx context.Context, fullName, name string) error
 }
 
 // ProtectionOptions 是 setup 统一写入的分支保护配置。
@@ -139,7 +141,7 @@ func Run(ctx context.Context, options Options, admin Admin) (Result, error) {
 		return Result{}, err
 	}
 	if reviewerCreated {
-		logf("已为 %s 生成访问令牌（账号下仅此一个）", options.ReviewerName)
+		logf("已为 %s 生成访问令牌（不触碰账号下其他令牌）", options.ReviewerName)
 	}
 
 	// merger（merge）：同样是账号一个、令牌一条（(host, merge) 唯一）。仓库级
@@ -151,7 +153,7 @@ func Run(ctx context.Context, options Options, admin Admin) (Result, error) {
 		return Result{}, err
 	}
 	if mergerCreated {
-		logf("已为 %s 生成访问令牌（账号下仅此一个）", options.MergerName)
+		logf("已为 %s 生成访问令牌（不触碰账号下其他令牌）", options.MergerName)
 	}
 
 	instance.Reviewer = instances.Account{Name: options.ReviewerName}
@@ -175,6 +177,14 @@ func Run(ctx context.Context, options Options, admin Admin) (Result, error) {
 	if err := instance.Validate(); err != nil {
 		return Result{}, err
 	}
+	// Actions 密钥分发完全由 setup 负责：扫描 merge 为管理员协作者的仓库，
+	// 幂等写入 MERGE_TOKEN（含本次刚加为协作者的仓库）。dry-run 只输出计划。
+	logf("扫描 %s 为管理员协作者的仓库，写入 Actions secret %s", options.MergerName, ActionsSecretMergeToken)
+	if !options.DryRun {
+		if err := SyncMergeSecrets(ctx, admin, options.MergerName, mergerToken, false, logf); err != nil {
+			return Result{}, fmt.Errorf("同步 Actions 密钥: %w", err)
+		}
+	}
 	result := Result{Instance: instance}
 	for _, bot := range []struct {
 		name    string
@@ -197,7 +207,8 @@ func Run(ctx context.Context, options Options, admin Admin) (Result, error) {
 	return result, nil
 }
 
-// ReviewerTokenName 是机器人账号（review/merge）的唯一令牌名。
+// ReviewerTokenName 是机器人账号（review/merge）的本工具令牌名；只收敛这个
+// 名字的令牌，账号下其他命名的令牌不受 setup 影响。
 const ReviewerTokenName = "assistant"
 
 func setupRepository(
@@ -271,9 +282,9 @@ func setupRepository(
 	return nil
 }
 
-// ensureAccount 保证账号与唯一令牌可用：账号缺失则创建；令牌以「保留现有
-// 有效令牌或新建，删除其余全部」的方式收敛——同一账号只允许一个令牌，从
-// 凭据层面保证同一站点只有一个评审主机。dry-run 下只输出计划。
+// ensureAccount 保证账号与本工具令牌可用：账号缺失则创建；令牌以「保留现有
+// 有效令牌或新建同名条目，只替换名为本工具令牌名的旧条目」的方式收敛——账号下
+// 其他命名的令牌一律不动。dry-run 下只输出计划。
 func ensureAccount(
 	ctx context.Context,
 	admin Admin,
@@ -310,9 +321,9 @@ func ensureAccount(
 	}
 	if options.DryRun {
 		if valid {
-			logf("dry-run：保留 %s 的现有令牌，删除账号下其余令牌", name)
+			logf("dry-run：保留 %s 的现有令牌（账号下其他命名的令牌不动）", name)
 		} else {
-			logf("dry-run：为 %s 生成新令牌，删除账号下其余令牌", name)
+			logf("dry-run：为 %s 生成新令牌，只替换本工具旧令牌（其他命名的令牌不动）", name)
 		}
 		return existingToken, false, nil
 	}
@@ -329,9 +340,9 @@ func ensureAccount(
 		return "", false, err
 	}
 	if created {
-		logf("已为 %s 生成访问令牌（账号下仅此一个）", name)
+		logf("已为 %s 生成访问令牌（不触碰账号下其他令牌）", name)
 	} else {
-		logf("%s 的令牌已收敛为唯一一个", name)
+		logf("%s 的本工具令牌已就绪", name)
 	}
 	return token, created, nil
 }

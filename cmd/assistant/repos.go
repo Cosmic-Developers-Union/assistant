@@ -30,8 +30,9 @@ func newReposCommand(configFlag *string) *cobra.Command {
 			"  assistant repos list [--host H]                     列出已登记仓库\n" +
 			"  assistant repos add <owner/name> [--host H] [--dir 路径]  登记仓库（已存在则更新 dir）\n" +
 			"  assistant repos remove <owner/name> [--host H]      移除登记\n\n" +
-			"服务端配置（协作者、分支保护、标签、MERGE_TOKEN）用 `assistant setup --host <H>`\n" +
-			"按配置补齐，或对当前检出用 `assistant init`。",
+			"服务端配置用 `assistant setup --host <H>`：协作者、分支保护、标签，以及\n" +
+			"MERGE_TOKEN secret（setup 扫描 merge 为管理员协作者的仓库自动分发；\n" +
+			"令牌轮换后重跑 setup 即可重发）。dev 侧单仓库操作用 `assistant init`。",
 		Args: cobra.NoArgs,
 	}
 	command.PersistentFlags().StringVar(&options.Host, "host", "",
@@ -216,7 +217,7 @@ func runReposRemove(command *cobra.Command, configPath, repoArg, hostFlag string
 		return err
 	}
 	fmt.Fprintf(stdout, "已移除 %s（%s，剩余 %d 个仓库）\n", repoName, instance.Host, len(updated.Repos))
-	fmt.Fprintln(stdout, "服务端未触碰；需要清理分支保护/协作者/MERGE_TOKEN 时用 assistant deinit --purge")
+	fmt.Fprintln(stdout, "服务端未触碰：分支保护/协作者与 MERGE_TOKEN secret 如需回收，请在 Gitea 服务端手动处理")
 	return nil
 }
 
