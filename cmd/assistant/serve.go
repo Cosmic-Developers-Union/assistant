@@ -24,7 +24,9 @@ import (
 type serveOptions struct {
 	Listen string
 	Root   string
+	Host   string
 	Token  string
+	Force  bool
 	Quiet  bool
 }
 
@@ -51,7 +53,11 @@ func newServeCommand(configFlag *string) *cobra.Command {
 	}
 	flags := command.Flags()
 	flags.StringVar(&options.Listen, "listen", "127.0.0.1:8780", "监听地址")
-	flags.StringVar(&options.Root, "root", "", "记录库目录（缺省 <数据目录>/Cosmic-Developers-Union/assistant/sessions）")
+	flags.StringVar(&options.Root, "root", "",
+		"记录库目录（缺省 <数据目录>/Cosmic-Developers-Union/assistant/sessions；"+
+			"目录名不参与身份判断——库根必须有 manifest.json，非空且无 manifest 的目录会被拒绝）")
+	flags.StringVar(&options.Host, "host", "", "宿主机标签（写进 manifest，便于人工分辨是哪台机器的库；缺省主机名）")
+	flags.BoolVar(&options.Force, "force", false, "接管一个非空但没有 manifest 的目录（确认它不是别人的数据再开）")
 	flags.StringVar(&options.Token, "token", "", "访问令牌（缺省随机生成并写入 serve.json）")
 	flags.BoolVar(&options.Quiet, "quiet", false, "不打印每条请求日志")
 	return command
@@ -66,7 +72,7 @@ func runServe(command *cobra.Command, configPath string, options *serveOptions) 
 		}
 		root = defaultRoot
 	}
-	store, err := sessionstore.NewStore(root)
+	store, err := sessionstore.Open(root, sessionstore.OpenOptions{Host: options.Host, Force: options.Force})
 	if err != nil {
 		return err
 	}
@@ -113,7 +119,9 @@ func runServe(command *cobra.Command, configPath string, options *serveOptions) 
 		return err
 	}
 	defer os.Remove(endpointPath)
-	fmt.Fprintf(stdout, "记录库：%s\n", root)
+	manifest := store.Manifest()
+	fmt.Fprintf(stdout, "记录库：%s（格式 %s v%d，host=%s，布局 %s）\n",
+		store.Root(), manifest.Format, manifest.Version, manifest.Host, manifest.Layout)
 	fmt.Fprintf(stdout, "监听：  http://%s\n", address)
 	fmt.Fprintf(stdout, "端点凭据：%s（0600，退出即删）\n", endpointPath)
 	fmt.Fprintf(stdout, "客户端：assistant session push（同机自动发现）；远端见 sessions-remote.json\n")
@@ -162,7 +170,14 @@ func writeServeEndpoint(configDir string, endpoint serveEndpoint) (string, error
 func serveHandler(store *sessionstore.Store, token string, logf func(string, ...any)) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) {
-		writeJSON(writer, http.StatusOK, map[string]any{"status": "ok", "sessions": store.Root()})
+		manifest := store.Manifest()
+		writeJSON(writer, http.StatusOK, map[string]any{
+			"status":  "ok",
+			"root":    store.Root(),
+			"format":  manifest.Format,
+			"version": manifest.Version,
+			"host":    manifest.Host,
+		})
 	})
 	authorize := func(writer http.ResponseWriter, request *http.Request) bool {
 		provided := strings.TrimSpace(strings.TrimPrefix(request.Header.Get("authorization"), "Bearer "))

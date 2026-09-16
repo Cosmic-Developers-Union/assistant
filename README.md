@@ -37,7 +37,7 @@ Gitea 上的例行事务与评审自动化，两块能力：
 | `<配置目录>/serve.json` | 记录库服务端端点与令牌 | `serve` 启动时写、退出删 | 0600，同机客户端自举 |
 | `<配置目录>/sessions-remote.json` | 远端记录库地址与令牌（服务端在别的机器时手写） | 你 | 0600 |
 | `<配置目录>/session-push.json` | 增量推送状态（大小/修改时间） | `session push` | 可删（会重推一次） |
-| `<数据目录>/sessions/<host>/<项目>/<会话>.jsonl` | **记录库**：原样 jsonl + 同名 `.meta.json` | `serve`（收 push） | 可随会话记录一起备份 |
+| `<数据目录>/sessions/` | **记录库根**：`manifest.json`（身份：格式/版本/布局/宿主机）+ `<host>/<项目>/<会话>.jsonl` + 同名 `.meta.json` | `serve`（收 push） | 可随会话记录一起备份 |
 | `<配置目录>/daemon.json` | 状态 API 端点与令牌 | `run` 启动时写、退出删 | 0600，`mcp daemon` 靠它自举 |
 | `<数据目录>/repos/<host>/<owner>/<name>/` | 受管克隆（评审数据源） | `run`（每轮 fetch 并强制对齐 `origin/<基线>`） | 可删除重建 |
 | `<数据目录>/state/<host>/<owner>/<name>/logs/` | 每个待办一个会话日志（进度、`[debug]`、结果、验证结论） | 调度器 | 排障第一现场 |
@@ -98,7 +98,8 @@ assistant session push --dry-run       # 先看会推什么
 # 也可用 ASSISTANT_SESSIONS_URL / ASSISTANT_SESSIONS_TOKEN
 ```
 
-- `host` 是宿主机标签（缺省主机名）：区分不同机器上的同名项目；记录库目录缺省 `<数据目录>/sessions`（`serve --root` 可改）。
+- `host` 是宿主机标签（缺省主机名）：区分不同机器上的同名项目；记录库缺省在 `<数据目录>/Cosmic-Developers-Union/assistant/sessions`（`serve --root` 可改）。
+- **目录名不参与身份判断**：库根必须有 `manifest.json`（`{"format":"assistant.sessions","version":1,…}`）。`serve` 打开一个非空、却没有（或格式不符）manifest 的目录会直接拒绝——所以 `/srv/sessions` 这种名字被别的程序占用时不会互相写坏；确认是空目录或你的库才初始化，要接管已有目录用 `--force`。远端示例：`--root /srv/cosmic-developers-union/assistant/sessions`（短名 `/srv/cdu/assistant/sessions` 也行，安全由 manifest 保证）。`GET /healthz` 会回 format/version/host/root，便于确认连的是哪个库。
 - 微信对话桥在配置了记录库时**每轮结束自动归档**该会话（日志 `已归档会话 …`），所以同一轮里 agent 就能查到自己被压缩掉的历史；聊天会话已自动注入 sessions MCP（`mcp__sessions__*` 已放行）。
 - 评审会话用 `assistant session push` 定时归档即可（增量，重复执行无副作用）；接口细节看 `--help`。
 

@@ -122,24 +122,109 @@ func (f Filter) match(meta Meta) bool {
 	return true
 }
 
-// Store 是落在本地目录里的记录库。
-type Store struct {
-	root string
+// 记录库的身份标记：目录名不能作为身份（/srv/sessions 这种名字任何程序都可能用），
+// 所以库根必须有 manifest.json；非空且没有它的目录一律拒绝接管。
+const (
+	// ManifestFile 是记录库的身份文件。
+	ManifestFile = "manifest.json"
+	// Format 是本记录库的格式标识；不是这个值的目录不属于 assistant。
+	Format = "assistant.sessions"
+	// FormatVersion 是布局版本，破坏性调整时递增。
+	FormatVersion = 1
+)
+
+// Manifest 是记录库的身份文件内容。
+type Manifest struct {
+	Format    string `json:"format"`
+	Version   int    `json:"version"`
+	Layout    string `json:"layout"`
+	Host      string `json:"host,omitempty"`
+	CreatedAt string `json:"created_at"`
+	App       string `json:"app,omitempty"`
 }
 
-// NewStore 打开（必要时创建）记录库根目录。
+// OpenOptions 控制打开记录库的行为。
+type OpenOptions struct {
+	// Host 是写进 manifest 的宿主机标签（便于人工分辨这是哪台机器的库）
+	Host string
+	// Force 允许接管一个非空、但没有（或格式不符）manifest 的目录
+	Force bool
+}
+
+// Store 是落在本地目录里的记录库。
+type Store struct {
+	root     string
+	manifest Manifest
+}
+
+// NewStore 打开（必要时创建）记录库根目录（不接管无关目录）。
 func NewStore(root string) (*Store, error) {
-	if strings.TrimSpace(root) == "" {
+	return Open(root, OpenOptions{})
+}
+
+// Open 打开记录库：目录不存在则创建并写 manifest；已存在则校验 manifest，
+// 非空且身份不符时拒绝（避免把别人的目录当成记录库，或反过来）。
+func Open(root string, options OpenOptions) (*Store, error) {
+	root = strings.TrimSpace(root)
+	if root == "" {
 		return nil, fmt.Errorf("缺少记录库目录")
+	}
+	manifestPath := filepath.Join(root, ManifestFile)
+	if data, err := os.ReadFile(manifestPath); err == nil {
+		var manifest Manifest
+		if err := json.Unmarshal(data, &manifest); err != nil {
+			return nil, fmt.Errorf("%s 不是合法的记录库 manifest：%w", manifestPath, err)
+		}
+		if manifest.Format != Format {
+			return nil, fmt.Errorf("%s 的格式是 %q（需要 %q）：换一个目录，或确认没有指错库",
+				manifestPath, manifest.Format, Format)
+		}
+		return &Store{root: root, manifest: manifest}, nil
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+
+	// 没有 manifest：空目录可以直接初始化；非空目录必须先确认它不是别人的地盘
+	entries, err := os.ReadDir(root)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	if len(entries) > 0 && !options.Force {
+		return nil, fmt.Errorf("目录 %s 已存在且非空，也不是 assistant 记录库（缺 %s）：换一个目录，或加 --force 接管",
+			root, ManifestFile)
 	}
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, err
 	}
-	return &Store{root: root}, nil
+	host := strings.TrimSpace(options.Host)
+	if host == "" {
+		if name, err := os.Hostname(); err == nil {
+			host = name
+		}
+	}
+	manifest := Manifest{
+		Format:    Format,
+		Version:   FormatVersion,
+		Layout:    "<host>/<project>/<session>.jsonl（同名 .meta.json 是元数据）",
+		Host:      host,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		App:       "assistant",
+	}
+	encoded, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(manifestPath, append(encoded, '\n'), 0o644); err != nil {
+		return nil, err
+	}
+	return &Store{root: root, manifest: manifest}, nil
 }
 
 // Root 返回记录库根目录。
 func (s *Store) Root() string { return s.root }
+
+// Manifest 返回记录库身份信息。
+func (s *Store) Manifest() Manifest { return s.manifest }
 
 func (s *Store) sessionPath(key Key) string {
 	return filepath.Join(s.root, key.Host, key.Project, key.Session+".jsonl")

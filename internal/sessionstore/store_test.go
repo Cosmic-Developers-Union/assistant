@@ -242,3 +242,56 @@ func TestCollectAndSessionFor(t *testing.T) {
 		t.Error("不存在的会话应返回 ok=false")
 	}
 }
+
+// 记录库的身份：目录名不算身份，manifest.json 才算。非空且无 manifest 的目录被拒绝，
+// --force 才能接管；格式不符也拒绝（避免把别人的目录当记录库）。
+func TestStoreIdentityGuard(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+
+	// 空目录/不存在：直接初始化并写 manifest
+	store, err := Open(root, OpenOptions{Host: "node-1"})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	manifest := store.Manifest()
+	if manifest.Format != Format || manifest.Version != FormatVersion || manifest.Host != "node-1" || manifest.Layout == "" {
+		t.Errorf("manifest = %+v", manifest)
+	}
+	data, err := os.ReadFile(filepath.Join(root, ManifestFile))
+	if err != nil || !json.Valid(data) {
+		t.Fatalf("manifest 未写出：%v", err)
+	}
+
+	// 再次打开：读回同一身份
+	again, err := Open(root, OpenOptions{})
+	if err != nil || again.Manifest().Host != "node-1" {
+		t.Fatalf("重新打开失败：%+v err=%v", again, err)
+	}
+
+	// 非空、无 manifest：拒绝（这正是 /srv/sessions 被别的程序占用的场景）
+	foreign := filepath.Join(t.TempDir(), "sessions")
+	if err := os.MkdirAll(foreign, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(foreign, "something-else.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(foreign, OpenOptions{}); err == nil || !strings.Contains(err.Error(), "非空") || !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("非空无 manifest 的目录应被拒绝：%v", err)
+	}
+	if _, err := Open(foreign, OpenOptions{Host: "node-2", Force: true}); err != nil {
+		t.Fatalf("--force 应能接管：%v", err)
+	}
+
+	// 格式不符：即使有 manifest 也拒绝
+	mismatched := filepath.Join(t.TempDir(), "other")
+	if err := os.MkdirAll(mismatched, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mismatched, ManifestFile), []byte(`{"format":"someone.else","version":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(mismatched, OpenOptions{Force: true}); err == nil || !strings.Contains(err.Error(), "someone.else") {
+		t.Fatalf("格式不符应被拒绝（--force 也不行）：%v", err)
+	}
+}
