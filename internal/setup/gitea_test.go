@@ -152,12 +152,9 @@ func TestListCollaboratorsNormalizesPermissions(t *testing.T) {
 	}
 }
 
-// 实例不提供 /admin/repos 时回退到仓库搜索（管理员令牌覆盖私有仓库）。
-func TestListAllReposFallsBackToSearch(t *testing.T) {
+// 仓库枚举只走 /repos/search（/admin/repos 已在 Gitea 1.27 移除）。
+func TestListAllReposUsesSearch(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/admin/repos", func(writer http.ResponseWriter, _ *http.Request) {
-		http.NotFound(writer, nil)
-	})
 	mux.HandleFunc("/api/v1/repos/search", func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Query().Get("private") != "true" {
 			http.Error(writer, "want private=true", http.StatusBadRequest)

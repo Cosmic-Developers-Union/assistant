@@ -84,7 +84,7 @@ type Admin interface {
 	ReconcileLabels(ctx context.Context, fullName, reviewerToken string) error
 	// ListCollaborators 列出仓库协作者及权限（需要仓库管理员权限）。
 	ListCollaborators(ctx context.Context, fullName string) ([]Collaborator, error)
-	// ListAllRepos 列出实例上的全部仓库（站点管理员端点）。
+	// ListAllRepos 列出实例上的全部仓库（/repos/search，管理员令牌覆盖私有仓库）。
 	ListAllRepos(ctx context.Context) ([]string, error)
 	// SetRepoSecret 写仓库级 Actions secret（幂等）。
 	// 身份名是约定（ai/merge），无需 variable。
