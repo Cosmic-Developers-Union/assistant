@@ -152,6 +152,37 @@ func TestListCollaboratorsNormalizesPermissions(t *testing.T) {
 	}
 }
 
+// 实例不提供 /admin/repos 时回退到仓库搜索（管理员令牌覆盖私有仓库）。
+func TestListAllReposFallsBackToSearch(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/admin/repos", func(writer http.ResponseWriter, _ *http.Request) {
+		http.NotFound(writer, nil)
+	})
+	mux.HandleFunc("/api/v1/repos/search", func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Query().Get("private") != "true" {
+			http.Error(writer, "want private=true", http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]any{
+			"ok":   true,
+			"data": []map[string]any{{"full_name": "xwh/AI-video"}, {"full_name": "xwh/other"}},
+		})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	admin := &giteaAdmin{host: server.URL, http: server.Client(), token: "t",
+		log: func(string, ...any) {}}
+
+	repos, err := admin.ListAllRepos(context.Background())
+	if err != nil {
+		t.Fatalf("ListAllRepos() error = %v", err)
+	}
+	want := []string{"xwh/AI-video", "xwh/other"}
+	if !slices.Equal(repos, want) {
+		t.Errorf("repos = %v, want %v", repos, want)
+	}
+}
+
 // newSDKAdmin 构造带官方 SDK 客户端的 giteaAdmin（ListCollaborators 需要）。
 func newSDKAdmin(t *testing.T, server *httptest.Server) *giteaAdmin {
 	t.Helper()
