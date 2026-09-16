@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	gitea "gitea.dev/sdk"
 )
 
 // tokenStore 模拟 Gitea 的账号令牌端点（列出/创建/删除，Basic Auth）。
@@ -114,24 +116,27 @@ func testAdmin(t *testing.T, store *tokenStore) *giteaAdmin {
 	return &giteaAdmin{host: server.URL, http: server.Client(), log: func(string, ...any) {}}
 }
 
-// Gitea 协作者列表端点的权限是对象（admin/push/pull 布尔）而不是字符串：
-// 归一化必须正确，否则 branch-protection 的推导直接失效。
-// 部分 Gitea 版本的列表条目权限是字符串（permission: "admin"）而非对象。
-func TestListCollaboratorsAcceptsStringPermission(t *testing.T) {
+// ListCollaborators 走官方 SDK：列表拿用户名，CollaboratorPermission 服务端
+// 计算有效权限（owner 归一化为 admin）。
+func TestListCollaboratorsNormalizesPermissions(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/repos/acme/repo/collaborators", func(writer http.ResponseWriter, request *http.Request) {
-		if request.URL.Query().Get("page") != "1" {
-			_ = json.NewEncoder(writer).Encode([]any{})
-			return
-		}
 		_ = json.NewEncoder(writer).Encode([]map[string]any{
-			{"login": "merge", "permission": "admin"},
-			{"login": "ai", "permission": "write"},
+			{"login": "merge"}, {"login": "ai"}, {"login": "dev"},
 		})
+	})
+	mux.HandleFunc("/api/v1/repos/acme/repo/collaborators/merge/permission", func(writer http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(writer).Encode(map[string]any{"permission": "admin"})
+	})
+	mux.HandleFunc("/api/v1/repos/acme/repo/collaborators/ai/permission", func(writer http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(writer).Encode(map[string]any{"permission": "write"})
+	})
+	mux.HandleFunc("/api/v1/repos/acme/repo/collaborators/dev/permission", func(writer http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(writer).Encode(map[string]any{"permission": "owner"})
 	})
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
-	admin := &giteaAdmin{host: server.URL, http: server.Client(), token: "t", log: func(string, ...any) {}}
+	admin := newSDKAdmin(t, server)
 
 	collaborators, err := admin.ListCollaborators(context.Background(), "acme/repo")
 	if err != nil {
@@ -140,41 +145,25 @@ func TestListCollaboratorsAcceptsStringPermission(t *testing.T) {
 	want := []Collaborator{
 		{Name: "merge", Permission: "admin"},
 		{Name: "ai", Permission: "write"},
+		{Name: "dev", Permission: "admin"},
 	}
 	if !slices.Equal(collaborators, want) {
 		t.Errorf("collaborators = %+v, want %+v", collaborators, want)
 	}
 }
 
-func TestListCollaboratorsNormalizesPermissions(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/repos/acme/repo/collaborators", func(writer http.ResponseWriter, request *http.Request) {
-		if request.URL.Query().Get("page") != "1" {
-			_ = json.NewEncoder(writer).Encode([]any{})
-			return
-		}
-		_ = json.NewEncoder(writer).Encode([]map[string]any{
-			{"login": "merge", "permissions": map[string]any{"admin": true, "push": true, "pull": true}},
-			{"login": "ai", "permissions": map[string]any{"admin": false, "push": true, "pull": true}},
-			{"login": "dev", "permissions": map[string]any{"admin": false, "push": false, "pull": true}},
-		})
-	})
-	server := httptest.NewServer(mux)
-	t.Cleanup(server.Close)
-	admin := &giteaAdmin{host: server.URL, http: server.Client(), token: "t", log: func(string, ...any) {}}
-
-	collaborators, err := admin.ListCollaborators(context.Background(), "acme/repo")
+// newSDKAdmin 构造带官方 SDK 客户端的 giteaAdmin（ListCollaborators 需要）。
+func newSDKAdmin(t *testing.T, server *httptest.Server) *giteaAdmin {
+	t.Helper()
+	sdk, err := gitea.NewClient(server.URL,
+		gitea.SetToken("t"),
+		gitea.SetHTTPClient(server.Client()),
+		gitea.SetUserAgent("assistant-test/1"),
+	)
 	if err != nil {
-		t.Fatalf("ListCollaborators() error = %v", err)
+		t.Fatalf("NewClient() error = %v", err)
 	}
-	want := []Collaborator{
-		{Name: "merge", Permission: "admin"},
-		{Name: "ai", Permission: "write"},
-		{Name: "dev", Permission: "read"},
-	}
-	if !slices.Equal(collaborators, want) {
-		t.Errorf("collaborators = %+v, want %+v", collaborators, want)
-	}
+	return &giteaAdmin{host: server.URL, http: server.Client(), token: "t", sdk: sdk, log: func(string, ...any) {}}
 }
 
 func TestConvergeTokenKeepsMatchingAndLeavesOthers(t *testing.T) {

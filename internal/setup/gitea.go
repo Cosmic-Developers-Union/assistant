@@ -302,48 +302,48 @@ type Collaborator struct {
 	Permission string // admin / write / read
 }
 
-// ListCollaborators 列出仓库协作者及其权限（需要仓库管理员权限）。不同 Gitea
-// 版本的列表条目权限字段不同：新版本是对象 {"admin","push","pull"} 布尔
-// （permissions），部分版本是字符串（permission）；两种都解，归一化为
-// admin/write/read。
+// ListCollaborators 列出仓库协作者及其有效权限（需要仓库管理员权限）。权限由
+// 服务端计算（官方 SDK 的 CollaboratorPermission，owner 归一化为 admin），
+// 不依赖列表端点在不同 Gitea 版本间漂移的权限字段格式。
 func (a *giteaAdmin) ListCollaborators(ctx context.Context, fullName string) ([]Collaborator, error) {
 	owner, name, err := instances.ParseRepoName(fullName)
 	if err != nil {
 		return nil, err
 	}
-	var result []Collaborator
-	for page := 1; ; page++ {
-		var batch []struct {
-			Login       string `json:"login"`
-			Permission  string `json:"permission"`
-			Permissions *struct {
-				Admin bool `json:"admin"`
-				Push  bool `json:"push"`
-				Pull  bool `json:"pull"`
-			} `json:"permissions"`
+	if a.sdk == nil {
+		return nil, fmt.Errorf("缺少 Gitea 客户端，无法列出协作者")
+	}
+	users, _, err := a.sdk.Repositories.ListCollaborators(ctx, owner, name, gitea.ListCollaboratorsOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("列出 %s 的协作者: %w", fullName, err)
+	}
+	result := make([]Collaborator, 0, len(users))
+	for _, user := range users {
+		permission, err := a.collaboratorPermission(ctx, owner, name, user.UserName)
+		if err != nil {
+			return nil, err
 		}
-		path := fmt.Sprintf("/api/v1/repos/%s/%s/collaborators?page=%d&limit=50",
-			url.PathEscape(owner), url.PathEscape(name), page)
-		if _, err := a.do(ctx, http.MethodGet, path, a.auth(), nil, &batch); err != nil {
-			return nil, fmt.Errorf("列出 %s 的协作者: %w", fullName, err)
-		}
-		for _, item := range batch {
-			permission := item.Permission
-			switch {
-			case item.Permissions == nil:
-				// 保留字符串字段（可能是空串）
-			case item.Permissions.Admin:
-				permission = "admin"
-			case item.Permissions.Push:
-				permission = "write"
-			default:
-				permission = "read"
-			}
-			result = append(result, Collaborator{Name: item.Login, Permission: permission})
-		}
-		if len(batch) < 50 {
-			return result, nil
-		}
+		result = append(result, Collaborator{Name: user.UserName, Permission: permission})
+	}
+	return result, nil
+}
+
+// collaboratorPermission 查询单个协作者的有效权限并归一化（官方 SDK 的
+// CollaboratorPermission：服务端返回规范 AccessMode，owner 视作 admin）。
+func (a *giteaAdmin) collaboratorPermission(ctx context.Context, owner, name, user string) (string, error) {
+	result, _, err := a.sdk.Repositories.CollaboratorPermission(ctx, owner, name, user)
+	if err != nil {
+		return "", fmt.Errorf("读取 %s/%s 协作者 %s 的权限: %w", owner, name, user, err)
+	}
+	switch result.Permission {
+	case gitea.AccessModeOwner, gitea.AccessModeAdmin:
+		return "admin", nil
+	case gitea.AccessModeWrite:
+		return "write", nil
+	case gitea.AccessModeRead:
+		return "read", nil
+	default:
+		return string(result.Permission), nil
 	}
 }
 
