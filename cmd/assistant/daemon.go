@@ -13,6 +13,7 @@ import (
 	"assistant/internal/instances"
 	"assistant/internal/provider"
 	"assistant/internal/sessionstore"
+	"assistant/internal/statestore"
 	"assistant/internal/weixin"
 
 	"github.com/spf13/cobra"
@@ -180,6 +181,7 @@ func startDaemonServices(
 	configPath string,
 	options *dispatcherOptions,
 	store *daemon.Store,
+	stateStore *statestore.Store,
 ) error {
 	logf := func(format string, arguments ...any) {
 		fmt.Fprintf(command.OutOrStdout(), "[daemon %s] %s\n",
@@ -187,7 +189,7 @@ func startDaemonServices(
 	}
 	listen := strings.TrimSpace(options.APIListen)
 	if listen != "" && !strings.EqualFold(listen, "none") && !strings.EqualFold(listen, "off") {
-		if _, err := daemon.Serve(command.Context(), listen, store, version, logf); err != nil {
+		if _, err := daemon.Serve(command.Context(), listen, store, version, logf, stateStore); err != nil {
 			return err
 		}
 	}

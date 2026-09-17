@@ -126,6 +126,14 @@ func (f *fakeAPI) ListIssueCommentsSince(
 	return result, nil
 }
 
+func (f *fakeAPI) CreateIssueComment(_ context.Context, _ Repository, _ int64, _ string) error {
+	return nil
+}
+
+func (f *fakeAPI) ListIssuesMentioning(_ context.Context, _ Repository, _ string, _ string) ([]Issue, error) {
+	return nil, nil
+}
+
 func (f *fakeAPI) GetCombinedStatus(_ context.Context, _ Repository, sha string) ([]CheckStatus, error) {
 	return f.statuses[sha], nil
 }

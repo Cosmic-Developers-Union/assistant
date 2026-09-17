@@ -611,3 +611,93 @@ func TestReviewProtocolPrompt(t *testing.T) {
 		t.Errorf("追加项目约定后内置协议不该丢：%s", prompt)
 	}
 }
+
+func int64Ptr(v int64) *int64 { return &v }
+
+// thinking 帧不再逐条上日志：一段思考只报一条汇总（tokens / 时长 / t/s / 帧数），
+// 其余事件的时间线保持原样。
+func TestStreamWriterAggregatesThinkingTokenFrames(t *testing.T) {
+	var progress []string
+	outcome := NewSessionOutcome()
+	collect := func(line string) { progress = append(progress, line) }
+	stream := &streamWriter{outcome: &outcome, onProgress: collect, debug: true,
+		thinking: thinkingTracker{onProgress: collect, debug: true}}
+	lines := []string{
+		`{"type":"system","subtype":"init","session_id":"s-1"}`,
+		`{"type":"system","subtype":"thinking_tokens","estimated_tokens":10,"estimated_tokens_delta":10}`,
+		`{"type":"system","subtype":"thinking_tokens","estimated_tokens":25,"estimated_tokens_delta":15}`,
+		`{"type":"system","subtype":"thinking_tokens","estimated_tokens":40,"estimated_tokens_delta":15}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"结论"}]}}`,
+		`{"type":"system","subtype":"thinking_tokens","estimated_tokens":5,"estimated_tokens_delta":5}`,
+		`{"type":"result","subtype":"success"}`,
+	}
+	for _, line := range lines {
+		if _, err := stream.Write([]byte(line + "\n")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stream.thinking.finish()
+
+	var summaries []string
+	for _, line := range progress {
+		switch {
+		case strings.Contains(line, "thinking_tokens"):
+			t.Errorf("thinking 帧被逐条上报：%q", line)
+		case strings.Contains(line, "thinking"):
+			summaries = append(summaries, line)
+		}
+	}
+	if len(summaries) != 3 {
+		t.Fatalf("thinking 汇总 = %v, want 段汇总×2 + 合计×1", summaries)
+	}
+	if !strings.Contains(summaries[0], "40 tokens") || !strings.Contains(summaries[0], "3 帧") {
+		t.Errorf("第一段汇总 = %q, want 40 tokens / 3 帧", summaries[0])
+	}
+	if !strings.Contains(summaries[0], "t/s") {
+		t.Errorf("段汇总 = %q, want 含 t/s", summaries[0])
+	}
+	if !strings.Contains(summaries[2], "45 tokens") || !strings.Contains(summaries[2], "2 段") {
+		t.Errorf("合计 = %q, want 45 tokens / 2 段", summaries[2])
+	}
+}
+
+// 流以 thinking 帧结尾（如超时截断）时，收尾冲刷仍会报出段汇总与合计。
+func TestThinkingTrackerFlushesTrailingBurst(t *testing.T) {
+	var progress []string
+	outcome := NewSessionOutcome()
+	collect := func(line string) { progress = append(progress, line) }
+	stream := &streamWriter{outcome: &outcome, onProgress: collect, debug: true,
+		thinking: thinkingTracker{onProgress: collect, debug: true}}
+	for i := 0; i < 3; i++ {
+		line := `{"type":"system","subtype":"thinking_tokens","estimated_tokens":7,"estimated_tokens_delta":7}`
+		if _, err := stream.Write([]byte(line + "\n")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stream.thinking.finish()
+
+	for _, line := range progress {
+		if strings.Contains(line, "事件") {
+			t.Errorf("thinking 帧被逐条上报：%q", line)
+		}
+	}
+	if len(progress) != 2 {
+		t.Fatalf("progress = %v, want 段汇总 + 合计", progress)
+	}
+	if !strings.Contains(progress[0], "21 tokens") || !strings.Contains(progress[1], "21 tokens") {
+		t.Errorf("汇总 = %v, want 各含 21 tokens", progress)
+	}
+}
+
+// 增量缺失的帧按累计值差值补算（兼容只报 estimated_tokens 的生产者）：段内
+// 首帧作基线不计数，防止跨思考段的重复累计。
+func TestThinkingTrackerFallsBackToCumulative(t *testing.T) {
+	var progress []string
+	tracker := thinkingTracker{onProgress: func(line string) { progress = append(progress, line) }, debug: true}
+	tracker.observe(streamEvent{EstimatedTokens: int64Ptr(10)})
+	tracker.observe(streamEvent{EstimatedTokens: int64Ptr(25)})
+	tracker.flush()
+	if len(progress) != 1 || !strings.Contains(progress[0], "15 tokens") {
+		t.Fatalf("progress = %v, want 汇总含 15 tokens（25-10 基线差值）", progress)
+	}
+}

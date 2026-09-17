@@ -89,7 +89,10 @@ type Issue struct {
 	// IsPull 表示条目实际是 PR（issues API 的 pull_request 字段非空）。按
 	// type=pulls 检索时 Gitea 偶发混入纯 Issue，调用方据此剔除。
 	IsPull bool
-	Labels []Label
+	// Updated 是条目最近活动时刻（Gitea 服务端时钟）：mention 水位线预检用——
+	// 未变化条目跳过新评论细查，常态下检测轮零额外请求。
+	Updated time.Time
+	Labels  []Label
 }
 
 type PullRequest struct {
@@ -168,6 +171,8 @@ type Comment struct {
 	ID      int64
 	Body    string
 	Created time.Time
+	// User 是评论者账号名（后续消息检测用：assistant 自身的评论不算新消息）
+	User string
 }
 
 type API interface {
@@ -182,6 +187,11 @@ type API interface {
 	ListPullReviews(context.Context, Repository, int64) ([]Review, error)
 	// ListIssueCommentsSince 返回条目（Issue 或 PR）上 since 之后的评论；since 为零值时返回全部。
 	ListIssueCommentsSince(context.Context, Repository, int64, time.Time) ([]Comment, error)
+	// CreateIssueComment 在条目上发一条评论（追问说明等系统消息）。
+	CreateIssueComment(context.Context, Repository, int64, string) error
+	// ListIssuesMentioning 返回 mention 了指定账号的 open 条目（Gitea 原生
+	// mentioned_by 过滤）：mention 即请求信号，供 sync 兜底检测。
+	ListIssuesMentioning(ctx context.Context, repository Repository, user string, issueType string) ([]Issue, error)
 	GetCombinedStatus(context.Context, Repository, string) ([]CheckStatus, error)
 	ListBranchProtections(context.Context, Repository) ([]BranchProtection, error)
 	ListRepositoryLabels(context.Context, Repository) ([]Label, error)
@@ -201,8 +211,49 @@ type API interface {
 	AuthenticatedUser(context.Context) (string, error)
 }
 
+// CreateIssueComment 在条目上发一条评论（追问说明等系统消息）。
+func (c *Client) CreateIssueComment(ctx context.Context, repository Repository, index int64, body string) error {
+	if strings.TrimSpace(body) == "" {
+		return fmt.Errorf("评论内容为空")
+	}
+	_, _, err := c.sdk.Issues.CreateIssueComment(
+		ctx, repository.Owner, repository.Name, index, gitea.CreateIssueCommentOption{Body: body})
+	if err != nil {
+		return fmt.Errorf("create comment on #%d: %w", index, err)
+	}
+	return nil
+}
+
 func (c *Client) ListTriageIssues(ctx context.Context, repository Repository) ([]Issue, error) {
 	return c.listIssues(ctx, repository, gitea.IssueTypeIssue, []string{triageLabelName})
+}
+
+// ListIssuesMentioning 返回 mention 了指定账号的 open 条目（Issue 或 PR）：
+// Gitea 原生的 mentioned_by 过滤（服务端按 mention 语法解析正文与评论）。
+// 用于「@ai 无标签」场景的兜底检测——事件驱动 sync 不可用时（runner 离线），
+// mention 本身就是请求信号。
+func (c *Client) ListIssuesMentioning(ctx context.Context, repository Repository, user string, issueType string) ([]Issue, error) {
+	var result []Issue
+	for page := 1; ; {
+		issues, response, err := c.sdk.Issues.ListRepoIssues(ctx, repository.Owner, repository.Name, gitea.ListIssueOption{
+			ListOptions: gitea.ListOptions{Page: page, PageSize: pageSize},
+			State:       gitea.StateOpen,
+			Type:        gitea.IssueType(issueType),
+			MentionedBy: user,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("list issues mentioning @%s page %d (type=%s): %w", user, page, issueType, err)
+		}
+		for _, issue := range issues {
+			result = append(result, issueFromSDK(issue))
+		}
+		next, ok := nextPage(response, page, len(issues))
+		if !ok {
+			break
+		}
+		page = next
+	}
+	return result, nil
 }
 
 func (c *Client) ListReviewPullRequests(ctx context.Context, repository Repository) ([]Issue, error) {
@@ -285,6 +336,7 @@ func issueFromSDK(issue *gitea.Issue) Issue {
 		Title:   issue.Title,
 		HTMLURL: issue.HTMLURL,
 		IsPull:  issue.PullRequest != nil,
+		Updated: issue.Updated,
 	}
 	for _, label := range issue.Labels {
 		result.Labels = append(result.Labels, labelFromSDK(label))
@@ -297,6 +349,9 @@ type Client struct {
 	host        string
 	accessToken string
 	httpClient  *http.Client
+	// requestLog 是 debug 级请求日志回调（方法、路径、状态码、耗时）；nil 静默。
+	// 由命令层在 --debug 时注入——操作者借此观测系统对 Gitea 的全部外部调用。
+	requestLog func(method, url string, status int, duration time.Duration)
 
 	// branchProtectionSDK 仅在配置了 GITEA_BRANCH_PROTECTION_TOKEN 时非空：
 	// 分支保护端点要求 repo admin（Gitea Actions 内置令牌无法授予该权限），
@@ -315,6 +370,36 @@ func NewClient(host, accessToken string) (*Client, error) {
 		return nil, err
 	}
 	return &Client{sdk: sdk, host: strings.TrimRight(host, "/"), accessToken: accessToken, httpClient: httpClient}, nil
+}
+
+// EnableRequestLog 开启 debug 级请求日志：后续所有经该 client 的 Gitea 调用
+// 都会回调（方法、URL、状态码、耗时）。令牌不落日志——URL 不含凭据。
+func (c *Client) EnableRequestLog(log func(method, url string, status int, duration time.Duration)) {
+	c.requestLog = log
+	transport := c.httpClient.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	c.httpClient.Transport = &loggingTransport{base: transport, client: c}
+}
+
+// loggingTransport 包装底层 RoundTripper：每次 Gitea 请求记一行 debug 日志。
+type loggingTransport struct {
+	base   http.RoundTripper
+	client *Client
+}
+
+func (t *loggingTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	started := time.Now()
+	response, err := t.base.RoundTrip(request)
+	if t.client != nil && t.client.requestLog != nil {
+		status := 0
+		if response != nil {
+			status = response.StatusCode
+		}
+		t.client.requestLog(request.Method, request.URL.String(), status, time.Since(started))
+	}
+	return response, err
 }
 
 // UseBranchProtectionToken 为分支保护读取配置独立令牌。token 为空时保持现状
@@ -525,7 +610,7 @@ func (c *Client) ListIssueCommentsSince(
 			return nil, fmt.Errorf("list comments for #%d page %d: %w", index, page, err)
 		}
 		for _, comment := range comments {
-			result = append(result, Comment{ID: comment.ID, Body: comment.Body, Created: comment.Created})
+			result = append(result, Comment{ID: comment.ID, Body: comment.Body, Created: comment.Created, User: comment.Poster.UserName})
 		}
 		next, ok := nextPage(response, page, len(comments))
 		if !ok {

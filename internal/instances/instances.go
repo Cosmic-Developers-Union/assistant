@@ -576,11 +576,20 @@ func (f *File) EffectiveOverrides(providerName string) (claudecfg.Overrides, err
 	return provider.Resolve(providerName, f.Optimizations.Overrides(), user.Overrides(), user.Token())
 }
 
+// ValidateHost 校验站点地址必须是绝对 HTTP(S) URL（instance 与 run.yaml 的
+// monitor 共用）。
+func ValidateHost(host string) error {
+	parsed, err := url.Parse(host)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return fmt.Errorf("host 必须是绝对 HTTP(S) URL：%q", host)
+	}
+	return nil
+}
+
 // Validate 校验单个 instance。必须在 Normalize 之后调用。
 func (i Instance) Validate() error {
-	parsed, err := url.Parse(i.Host)
-	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return fmt.Errorf("host 必须是绝对 HTTP(S) URL：%q", i.Host)
+	if err := ValidateHost(i.Host); err != nil {
+		return err
 	}
 	if i.Reviewer.Name == i.Merger.Name {
 		return fmt.Errorf("reviewer 与 merger 不能是同一账号（%s）", i.Reviewer.Name)

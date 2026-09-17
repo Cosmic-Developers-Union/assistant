@@ -117,25 +117,6 @@ func TestDryRunPassWithSyncMirror(t *testing.T) {
 	}
 }
 
-func TestPruneSettledFiltersHandledAndReleasesWhenGone(t *testing.T) {
-	work := []WorkItem{{Kind: KindPull, Number: 67}, {Kind: KindIssue, Number: 66}}
-	settled := map[string]bool{"pull#67": true}
-
-	filtered := pruneSettled(work, settled)
-	if len(filtered) != 1 || filtered[0] != (WorkItem{Kind: KindIssue, Number: 66}) {
-		t.Errorf("filtered = %+v, want only issue#66", filtered)
-	}
-	if !settled["pull#67"] {
-		t.Error("settled entry for a still-present request must be kept")
-	}
-
-	// 标签被 sync 收敛（待办从列表消失）后守卫解除：新请求可以重新入队
-	pruneSettled(nil, settled)
-	if len(settled) != 0 {
-		t.Errorf("settled = %v, want released", settled)
-	}
-}
-
 func TestProcessItemRoutesProgressToConsoleAndLog(t *testing.T) {
 	logDir := t.TempDir()
 	var logs []string

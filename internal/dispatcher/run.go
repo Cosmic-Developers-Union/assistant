@@ -47,6 +47,9 @@ type SessionOutcome struct {
 	SessionID string `json:"sessionId"`
 	// TranscriptPath 是持久化的文本记录路径（未持久化时为空）
 	TranscriptPath string `json:"transcriptPath,omitempty"`
+	// ArchivePath 是原始 stream-json 行的归档文件（run.yaml sessions-dir；
+	// 未配置归档时为空）
+	ArchivePath string `json:"archivePath,omitempty"`
 	// Resumed 为真表示本次是续接已存在的会话记录
 	Resumed           bool     `json:"resumed,omitempty"`
 	Result            string   `json:"result"`
@@ -142,12 +145,94 @@ type streamEvent struct {
 	Errors            []string          `json:"errors"`
 	PermissionDenials []json.RawMessage `json:"permission_denials"`
 	Message           *struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-			Name string `json:"name"`
-		} `json:"content"`
+		Content []streamContentBlock `json:"content"`
 	} `json:"message"`
+	// thinking_tokens 帧载荷：EstimatedTokens 是本段思考的累计估计词元，
+	// EstimatedTokensDelta 是相对上一帧的增量（二选一出现；词元数是 CLI 的
+	// 估计值，非计费精确值）。
+	EstimatedTokens      *int64 `json:"estimated_tokens"`
+	EstimatedTokensDelta *int64 `json:"estimated_tokens_delta"`
+}
+
+// streamContentBlock 是 message.content 里的一个块：assistant 消息（text /
+// tool_use）与 user 消息里的 tool_result 共用此视图。
+type streamContentBlock struct {
+	Type  string          `json:"type"`
+	Text  string          `json:"text"`
+	Name  string          `json:"name"`
+	ID    string          `json:"id"`
+	Input json.RawMessage `json:"input"`
+	// tool_result 块
+	ToolUseID string          `json:"tool_use_id"`
+	Content   json.RawMessage `json:"content"`
+	IsError   *bool           `json:"is_error"`
+}
+
+// describeToolInput 提炼工具调用入参里最有判断价值的一段（路径/编号/命令/
+// 标题等），让日志读者不打开原始记录也能感知「这一步在干什么」。只取摘要，
+// 长值截断，密钥类字段打码。
+func describeToolInput(name string, raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var input map[string]any
+	if err := json.Unmarshal(raw, &input); err != nil {
+		return ""
+	}
+	// 按工具常见的关键字段优先取；取不到就汇总前两个键
+	keys := []string{"command", "file_path", "path", "pattern", "url", "query", "description",
+		"repository", "repo", "owner", "number", "index", "title", "body", "state", "name", "prompt"}
+	var parts []string
+	for _, key := range keys {
+		value, ok := input[key]
+		if !ok {
+			continue
+		}
+		text := strings.TrimSpace(fmt.Sprintf("%v", value))
+		if text == "" {
+			continue
+		}
+		text = strings.ReplaceAll(text, "\n", " ")
+		if runes := []rune(text); len(runes) > 120 {
+			text = string(runes[:120]) + "…"
+		}
+		switch key {
+		case "body", "prompt":
+			// 长文本只报长度语义，不刷屏
+			parts = append(parts, fmt.Sprintf("%s(%d 字)", key, len([]rune(text))))
+		default:
+			parts = append(parts, text)
+		}
+		if len(parts) >= 3 {
+			break
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, " · ")
+}
+
+// describeToolResult 折叠 tool_result：错误要显出来，长输出只报规模。
+func describeToolResult(block *streamContentBlock) string {
+	if block.IsError != nil && *block.IsError {
+		text := strings.TrimSpace(block.Text)
+		if text == "" && len(block.Content) > 0 {
+			text = strings.TrimSpace(string(block.Content))
+		}
+		text = strings.ReplaceAll(text, "\n", " ")
+		if runes := []rune(text); len(runes) > 160 {
+			text = string(runes[:160]) + "…"
+		}
+		return "✗ " + text
+	}
+	if len(block.Content) > 0 {
+		return fmt.Sprintf("（返回 %d 字）", len(block.Content))
+	}
+	if block.Text != "" {
+		return fmt.Sprintf("（返回 %d 字）", len([]rune(block.Text)))
+	}
+	return "（完成）"
 }
 
 // FeedStreamLine 折叠一条 stream-json 输出行，返回它是否为 result 消息。
@@ -185,9 +270,24 @@ func feedStreamEvent(outcome *SessionOutcome, event *streamEvent, onProgress fun
 					}
 				case block.Type == "tool_use" && block.Name != "":
 					if onProgress != nil {
-						onProgress("🔧 " + block.Name)
+						// 工具调用带出入参摘要：读者能判断「当前步在干什么」
+						if detail := describeToolInput(block.Name, block.Input); detail != "" {
+							onProgress(fmt.Sprintf("🔧 %s: %s", block.Name, detail))
+						} else {
+							onProgress("🔧 " + block.Name)
+						}
 					}
 				}
+			}
+		}
+		return false
+	}
+	// user 事件承载 tool_result：把每个工具的回执折成一行（错误显式标红），
+	// 会话时间线在日志里完整可读
+	if event.Type != nil && *event.Type == "user" && event.Message != nil && onProgress != nil {
+		for _, block := range event.Message.Content {
+			if block.Type == "tool_result" {
+				onProgress("  ↳ " + describeToolResult(&block))
 			}
 		}
 		return false
@@ -541,7 +641,20 @@ func RunSession(options SessionOptions) SessionOutcome {
 	if len(env) > 0 {
 		command.Env = append(os.Environ(), env...)
 	}
-	stream := &streamWriter{outcome: &outcome, onProgress: options.OnProgress, debug: config.Debug}
+	stream := &streamWriter{outcome: &outcome, onProgress: options.OnProgress, debug: config.Debug,
+		thinking: thinkingTracker{onProgress: options.OnProgress, debug: config.Debug}}
+	// 会话记录归档（run.yaml sessions-dir + 命名模板）：原始 stream-json 每行
+	// 落盘，外部工具（sqlite3 cli/编辑器）无需经 daemon 即可内省完整会话
+	if archiveDir := strings.TrimSpace(config.SessionArchiveDir); archiveDir != "" {
+		archivePath := filepath.Join(archiveDir, outcome.SessionID+".jsonl")
+		if err := os.MkdirAll(archiveDir, 0o755); err == nil {
+			if file, err := os.OpenFile(archivePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
+				stream.archiveFile = file
+				defer file.Close()
+				outcome.ArchivePath = archivePath
+			}
+		}
+	}
 	stderr := &tailWriter{}
 	command.Stdout = stream
 	command.Stderr = stderr
@@ -559,13 +672,15 @@ func RunSession(options SessionOptions) SessionOutcome {
 		if container != "" {
 			_ = exec.Command("docker", "kill", container).Run()
 		}
-		_ = command.Process.Signal(syscall.SIGTERM)
+		_ = terminateProcess(command.Process)
 		time.AfterFunc(killGrace, func() { _ = command.Process.Kill() })
 	})
 	waitErr := command.Wait()
 	timer.Stop()
 	// Wait 已等待 stdio 拷贝完成，冲刷无换行结尾的残余行
 	stream.flush()
+	// 残留的思考段（流以 thinking 帧结尾时）冲刷 + 全会话合计
+	stream.thinking.finish()
 
 	switch {
 	case waitErr != nil && command.ProcessState == nil:
@@ -580,8 +695,8 @@ func RunSession(options SessionOptions) SessionOutcome {
 			how := ""
 			if exitCode > 0 {
 				how = fmt.Sprintf("退出码 %d", exitCode)
-			} else if status, ok := command.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() {
-				how = fmt.Sprintf("被信号 %s 终止", signalName(status.Signal()))
+			} else if signaled, name := processSignaled(command.ProcessState); signaled {
+				how = fmt.Sprintf("被信号 %s 终止", name)
 			} else {
 				how = "异常终止"
 			}
@@ -619,6 +734,11 @@ type streamWriter struct {
 	sawResult  bool
 	// debug 为真时把每行原始 stream 事件也交给 onProgress（排查「会话在干什么」）
 	debug bool
+	// thinking 聚合 system/thinking_tokens 帧（仅 debug 下喂入）
+	thinking thinkingTracker
+	// archiveFile 是会话原始 stream-json 行的归档文件（可选；每行原样追加，
+	// daemon 重启不丢，外部工具可直接内省）
+	archiveFile *os.File
 }
 
 func (w *streamWriter) Write(chunk []byte) (int, error) {
@@ -631,6 +751,9 @@ func (w *streamWriter) Write(chunk []byte) (int, error) {
 		line := string(w.buffer[:newline])
 		w.buffer = w.buffer[newline+1:]
 		w.reportDebug(line)
+		if w.archiveFile != nil {
+			_, _ = w.archiveFile.WriteString(line + "\n")
+		}
 		if FeedStreamLine(w.outcome, line, w.onProgress) {
 			w.sawResult = true
 		}
@@ -643,6 +766,9 @@ func (w *streamWriter) flush() {
 		return
 	}
 	w.reportDebug(string(w.buffer))
+	if w.archiveFile != nil {
+		_, _ = w.archiveFile.WriteString(string(w.buffer) + "\n")
+	}
 	if FeedStreamLine(w.outcome, string(w.buffer), w.onProgress) {
 		w.sawResult = true
 	}
@@ -657,8 +783,19 @@ func debugProgress(onProgress func(string), line string) {
 	onProgress("[debug] " + line)
 }
 
+// parseStreamEvent 提炼 stream-json 单行的头部（解析失败 ok=false）。
+func parseStreamEvent(line string) (streamEvent, bool) {
+	var event streamEvent
+	if err := json.Unmarshal([]byte(line), &event); err != nil {
+		return streamEvent{}, false
+	}
+	return event, true
+}
+
 // reportDebug 在 --debug 下报一行事件时间线：只写 type/subtype，不堆原始 JSON
-// （base64 与长 diff 会把日志淹掉；原文在会话文本记录里）。
+// （base64 与长 diff 会把日志淹掉；原文在会话文本记录里）。例外是
+// system/thinking_tokens 帧：思考期间每约 10ms 一帧，逐帧上报会把时间线淹掉，
+// 改由 thinkingTracker 累计、段结束时报一条汇总（含 t/s）。
 func (w *streamWriter) reportDebug(line string) {
 	if !w.debug || w.onProgress == nil {
 		return
@@ -667,27 +804,119 @@ func (w *streamWriter) reportDebug(line string) {
 	if trimmed == "" {
 		return
 	}
-	w.onProgress("[debug] 事件 " + describeStreamEvent(trimmed))
+	event, ok := parseStreamEvent(trimmed)
+	if ok && event.Type != nil && event.Subtype != nil &&
+		*event.Type == "system" && *event.Subtype == "thinking_tokens" {
+		w.thinking.observe(event)
+		return
+	}
+	w.thinking.flush()
+	w.onProgress("[debug] 事件 " + describeStreamEvent(event, ok, trimmed))
 }
 
-// describeStreamEvent 提炼 stream-json 单行的事件类型（解析失败只报长度）。
-func describeStreamEvent(line string) string {
-	var event struct {
-		Type    string `json:"type"`
-		Subtype string `json:"subtype"`
-	}
-	if err := json.Unmarshal([]byte(line), &event); err != nil {
+// describeStreamEvent 由已解析的事件给出类型标注；非 JSON 行只报长度。
+func describeStreamEvent(event streamEvent, ok bool, line string) string {
+	if !ok {
 		return fmt.Sprintf("（非 JSON 行，%d 字）", len([]rune(line)))
 	}
+	typeText, subtypeText := "", ""
+	if event.Type != nil {
+		typeText = *event.Type
+	}
+	if event.Subtype != nil {
+		subtypeText = *event.Subtype
+	}
 	switch {
-	case event.Type != "" && event.Subtype != "":
-		return event.Type + "/" + event.Subtype
-	case event.Type != "":
-		return event.Type
-	case event.Subtype != "":
-		return "subtype/" + event.Subtype
+	case typeText != "" && subtypeText != "":
+		return typeText + "/" + subtypeText
+	case typeText != "":
+		return typeText
+	case subtypeText != "":
+		return "subtype/" + subtypeText
 	}
 	return "（未标注类型）"
+}
+
+// thinkingTracker 把 system/thinking_tokens 帧折成段级汇总：思考期间 CLI 每约
+// 10ms 一帧（估计词元的累计值与增量），逐帧上报毫无信息量。这里只累计，一段
+// 思考结束（下一个非 thinking 事件到达或会话收尾）时报一条——词元数、时长、
+// t/s（评估思考速度）、帧数；会话收尾再给全会话合计。
+type thinkingTracker struct {
+	onProgress func(string)
+	debug      bool
+	// 当前思考段（burst）的累计；flush 后归零
+	burstTokens int64
+	burstFrames int
+	burstStart  time.Time
+	burstLast   time.Time
+	// 全会话合计（跨段保留）
+	totalTokens int64
+	totalFrames int
+	totalBursts int
+	prevCum     int64
+	hasPrev     bool
+}
+
+// observe 记录一帧 thinking_tokens：优先取增量，缺失时按累计值差值补算。
+func (t *thinkingTracker) observe(event streamEvent) {
+	now := time.Now()
+	if t.burstStart.IsZero() {
+		t.burstStart = now
+		t.totalBursts++
+	}
+	switch {
+	case event.EstimatedTokensDelta != nil:
+		if delta := *event.EstimatedTokensDelta; delta > 0 {
+			t.burstTokens += delta
+		}
+	case event.EstimatedTokens != nil:
+		if t.hasPrev && *event.EstimatedTokens > t.prevCum {
+			t.burstTokens += *event.EstimatedTokens - t.prevCum
+		}
+		t.prevCum = *event.EstimatedTokens
+		t.hasPrev = true
+	}
+	t.burstFrames++
+	t.totalFrames++
+	t.burstLast = now
+}
+
+// flush 报出当前思考段的汇总并归零段计数；无进行中的思考段时不动。
+func (t *thinkingTracker) flush() {
+	if t.burstStart.IsZero() {
+		return
+	}
+	segment := struct {
+		tokens, frames int64
+		elapsed        time.Duration
+	}{tokens: t.burstTokens, frames: int64(t.burstFrames), elapsed: t.burstLast.Sub(t.burstStart)}
+	t.totalTokens += segment.tokens
+	t.resetBurst()
+	if !t.debug || t.onProgress == nil {
+		return
+	}
+	rate := 0.0
+	if segment.elapsed > 0 {
+		rate = float64(segment.tokens) / segment.elapsed.Seconds()
+	}
+	t.onProgress(fmt.Sprintf("[debug] thinking 段汇总：≈%d tokens / %.1fs（%.0f t/s，%d 帧）",
+		segment.tokens, segment.elapsed.Seconds(), rate, segment.frames))
+}
+
+// finish 在会话收尾时冲刷残留思考段，并报全会话合计。
+func (t *thinkingTracker) finish() {
+	t.flush()
+	if t.debug && t.onProgress != nil && t.totalFrames > 0 {
+		t.onProgress(fmt.Sprintf("[debug] thinking 合计：≈%d tokens（%d 段，%d 帧）",
+			t.totalTokens, t.totalBursts, t.totalFrames))
+	}
+}
+
+func (t *thinkingTracker) resetBurst() {
+	t.burstTokens = 0
+	t.burstFrames = 0
+	t.burstStart = time.Time{}
+	t.burstLast = time.Time{}
 }
 
 // describeSessionMCP 读取生成的会话 MCP 配置并展开成逐行说明（debug 日志用；密钥打码）。

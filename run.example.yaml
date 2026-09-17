@@ -1,0 +1,30 @@
+# `assistant run`（daemon 部署形态）的运行配置：存在时 run 完全按它运行——
+# 站点（monitor）、AI 供应商（provider）、数据落点（root/repos-dir）、评审
+# 工作区（review-root 与命名模板）；config.json 退为账号身份层
+# （weixin 等）。完整文档见 docs/run.md。
+#
+# 落点：config.json 同目录（随配置目录一起挂载/备份），或 --run / ASSISTANT_RUN
+# 显式指定。字段支持 ${VAR:-default} 环境变量展开与 $root 自引用（XDG Base
+# Directory Specification / Windows Known Folders / macOS Library Directory
+# conventions）。
+monitor:
+  http://gitea.example:1234:
+    token: ... # 站点访问令牌；缺省回退凭据库 purpose=review（assistant setup 写入）
+    repos:
+      - user/repo1
+      - user/repo2
+# 目前只支持 minimax（国内站点用 minimax-cn）
+provider:
+  type: minimax
+  token: $MINIMAX_TOKEN # 支持 $VAR / ${VAR} 环境变量引用；空值回退进程环境
+root: ${XDG_DATA_HOME:-$HOME/.local/share}/Cosmic-Developers-Union/assistant
+# $root/repos/{instance-name}/{username-or-org}/{name}
+repos-dir: $root/repos
+review-root: /tmp
+review-name-template: "${instance-name}-{username-or-org}--{name}-{pr|issue}-{index}"
+# Use jsonl 记录 calude 的 session 记录
+sessions-dir: $root/sessions
+sessions-name-template: "${instance-name}-{username-or-org}--{name}/{session-id}.jsonl"
+# Use sqlite 作为状态记录和同步的模式, use sqlite3 WAL
+state-dir: ${XDG_STATE_HOME:-$HOME/.local/state}//Cosmic-Developers-Union/assistant
+state-file: $state-dir/state.sqlite3

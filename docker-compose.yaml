@@ -46,10 +46,13 @@ services:
     environment:
       HOME: ${HOME}
       TZ: ${TZ:-Asia/Shanghai}
-      # 工具链缓存改到挂载的 HOME 下（镜像内默认在 /root，非 root 不可写）
+      # 工具链缓存改到挂载的 HOME 下（镜像内默认在 /root，非 root 不可写）。
+      # GOPATH 必须落在**已挂载**的路径：gitea MCP 由 `go run <module>` 拉起，
+      # 首次要写模块缓存——GOPATH 指向未挂载的 $HOME/go 时（$HOME 根归 root）
+      # 直接 mkdir permission denied，会话里 MCP 全部起不来
       GOCACHE: ${HOME}/.cache/go-build
-      GOMODCACHE: ${HOME}/go/pkg/mod
-      GOPATH: ${HOME}/go
+      GOMODCACHE: ${HOME}/.cache/go/pkg/mod
+      GOPATH: ${HOME}/.cache/go
       BUN_INSTALL_CACHE_DIR: ${HOME}/.cache/bun
       npm_config_cache: ${HOME}/.cache/npm
       PIP_CACHE_DIR: ${HOME}/.cache/pip
@@ -63,10 +66,25 @@ services:
       CARGO_HOME: ${HOME}/.cargo
       RUSTUP_HOME: ${HOME}/.rustup
       PATH: /usr/local/go/bin:${HOME}/go/bin:${HOME}/.bun/bin:/usr/local/bin:/usr/bin:/bin
-      # AI 凭据走 assistant 配置（config.json 的 providers/optimizations）；
-      # 这里只在确实想用进程环境兜底时才打开（会话不读 ~/.claude 登录态）
+      # AI 凭据走 assistant 配置（config.json 的 providers/optimizations）或
+      # run.yaml 的 provider.token：env_file 注入 .env 全部变量（MINIMAX_TOKEN
+      # 等），run.yaml 的 $MINIMAX_TOKEN 引用由此获得真实值；.env 不存在时注释
+      # env_file 即可（会话不读 ~/.claude 登录态）
       # ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       # ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:-}
+    # compose 原生 env_file：.env（与 compose 文件同目录）里的键值整体注入容器
+    # 环境（不覆盖 environment 段的显式键）。run.yaml 的 provider.token 用
+    # $VAR 引用这些变量，令牌不落 run.yaml。
+    env_file:
+      - path: .env
+        required: false
+    # 容器内 DNS：宿主 /etc/resolv.conf 指向 127.0.0.53（systemd-resolved stub），
+    # 该地址在 bridge 网络的容器内不可达（docker 不代理 lo 上的 stub），显式
+    # 指向宿主真实上游（NetworkManager 报告的 DNS），否则 gitea 域名解析失败
+    dns:
+      - 192.168.49.6
+      - 192.168.49.1
+      - 192.168.1.1
     volumes:
       # 宿主最新二进制（make build 产物）：只读覆盖镜像同名路径，升级 = 重新构建
       # + 重建容器（文件必须已存在，否则 docker 会把它建成目录；ASSISTANT_BINARY 可换路径）
@@ -77,6 +95,9 @@ services:
       - ${HOME}/.config/Cosmic-Developers-Union/assistant:${HOME}/.config/Cosmic-Developers-Union/assistant
       # 受管克隆与状态：repos/（基线检出）+ state/（日志、单飞锁）
       - ${HOME}/.local/share/Cosmic-Developers-Union/assistant:${HOME}/.local/share/Cosmic-Developers-Union/assistant
+      # SQLite 共享状态库（run.yaml 的 state-dir，XDG_STATE_HOME）：WAL 内省
+      # 与跨进程互斥都落这里；目录须先在宿主存在（容器内不可写 $HOME 根）
+      - ${XDG_STATE_HOME:-${HOME}/.local/state}/Cosmic-Developers-Union/assistant:${XDG_STATE_HOME:-${HOME}/.local/state}/Cosmic-Developers-Union/assistant
       # 工具链与 MCP 缓存（go/npm/uv/pip/bun）：npx/uvx 首次拉取供应商 MCP
       # 需要可写 HOME 缓存（非 root 且镜像里无 /home/<user>）
       - ${HOME}/.cache:${HOME}/.cache

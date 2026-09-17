@@ -6,6 +6,9 @@
 //     立即返回、当前待办处理完即退出；二次信号由 main 强杀。
 //   - 验证失败重试一次（每待办至多两个会话），仍失败则记录并放行，等待下一轮
 //     检测（标签未变意味着待办仍在列表里，循环天然重试）。
+//   - 双通道守卫（guardState）：标签通道 settled 吸收同一请求的重复信号，
+//     mention 通道水位线吸收同一消息的重复信号、放行新消息（追问轮）——两类
+//     行为分离，见 detect.go 头注释与 selectDispatch。
 package dispatcher
 
 import (
@@ -18,7 +21,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"assistant/internal/claudecfg"
@@ -26,11 +28,21 @@ import (
 )
 
 // Deps 是主循环的依赖：CLI 注入真实实现，测试注入桩。
+//
+// 日志三级（default/verbose/debug，见 internal/logcfg）：
+//   - Log = default（What happened）：状态、结果、警告、错误——启动横幅、
+//     会话结果、完成判定、失败原因；
+//   - LogVerbose = verbose（What is happening）：步骤、目标、外部调用——
+//     worktree 准备、镜像同步 sha、检测清单、工具调用时间线；
+//   - LogDebug = debug（Why is it happening）：内部决策与诊断——互斥跳过、
+//     head 钉定、重试分支、配置细节。未传时降级为 Log（行为不变）。
 type Deps struct {
 	Config      Config
 	API         API
 	RepoDir     string
 	Log         func(string)
+	LogVerbose  func(string)
+	LogDebug    func(string)
 	BuildPrompt func(kind string, number int64, extra PromptContext) string
 	// CurrentLogin 查询令牌所属账号（启动横幅展示 + reviewer 不一致警告）；
 	// 未传则横幅省略账户行
@@ -43,13 +55,38 @@ type Deps struct {
 	PrepareIssue   func(worktreeDir string) (string, error)
 	RemoveWorktree func(dir string) error
 	RunSession     func(request SessionRequest) SessionOutcome
+	// FollowUpMessages 返回 since 之后他人（非 assistant 账号）在条目上的新评论；
+	// 未传时跳过「确认 ai 读到后续消息」的追问轮
+	FollowUpMessages func(ctx context.Context, item WorkItem, since time.Time) ([]string, error)
+	// PostFollowUpNote 给条目发一条系统评论（说明 ai 正在读取后续消息）；
+	// 未传时跳过
+	PostFollowUpNote func(ctx context.Context, item WorkItem, count int) error
 	// 运行态上报（daemon API / MCP 状态查询用；均可为 nil）
 	// OnQueue 每轮检测后上报当前待办清单（含空清单：队列已清空）
 	OnQueue func(items []WorkItem)
-	// OnStart 会话开始前上报（进入活跃列表）
-	OnStart func(item WorkItem)
+	// OnStart 会话开始前上报（进入活跃列表）；返回 false 表示该待办已被互斥
+	// 拒绝（同一待办同一时刻只允许一个会话），ProcessItem 直接放行
+	OnStart func(item WorkItem) bool
 	// OnFinish 会话结束后上报（移出活跃列表并归档结果）
 	OnFinish func(item WorkItem, outcome SessionOutcome)
+}
+
+// logVerbose 是 verbose 级日志（What is happening）；未注入时降级为 Log。
+func (d Deps) logVerbose(line string) {
+	if d.LogVerbose != nil {
+		d.LogVerbose(line)
+		return
+	}
+	d.Log(line)
+}
+
+// logDebug 是 debug 级日志（Why is it happening）；未注入时降级为 Log。
+func (d Deps) logDebug(line string) {
+	if d.LogDebug != nil {
+		d.LogDebug(line)
+		return
+	}
+	d.Log(line)
 }
 
 // SessionRequest 是一次会话的输入：待办上下文（稳定会话 ID/标题用）+ 起始
@@ -136,12 +173,6 @@ func ReleaseLock(lockFile string) {
 	_ = os.Remove(lockFile)
 }
 
-// pidAlive 探测进程存活（signal 0 不实际发送）。
-func pidAlive(pid int) bool {
-	err := syscall.Kill(pid, 0)
-	return err == nil || err == syscall.EPERM
-}
-
 func stamp(now time.Time) string {
 	return now.Format("20060102-150405")
 }
@@ -174,15 +205,6 @@ func RunLoop(ctx context.Context, deps Deps) error {
 	}
 	defer ReleaseLock(config.LockFile)
 
-	sleep := func(duration time.Duration) {
-		timer := time.NewTimer(duration)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-		case <-ctx.Done():
-		}
-	}
-
 	// 启动横幅：一眼确认「谁在跑、写哪里、按什么规则」
 	if deps.CurrentLogin != nil {
 		account, err := deps.CurrentLogin(ctx)
@@ -190,8 +212,8 @@ func RunLoop(ctx context.Context, deps Deps) error {
 			deps.Log(fmt.Sprintf("账户查询失败：%v", err))
 		} else {
 			deps.Log(
-				fmt.Sprintf("dispatcher 启动：host=%s repo=%s 账户=@%s reviewer=%s 并发=%d interval=%dms",
-					config.Host, config.Repository.FullName(), account, config.Reviewer, config.Concurrency, config.Interval.Milliseconds()),
+				fmt.Sprintf("dispatcher 启动：host=%s repo=%s 账户=@%s reviewer=%s 并发=%d 检测间隔=%dms",
+					config.Host, config.Repository.FullName(), account, config.Reviewer, config.Concurrency, mentionPollInterval(config.Interval).Milliseconds()),
 			)
 			if account != config.Reviewer {
 				deps.Log(fmt.Sprintf(
@@ -203,114 +225,147 @@ func RunLoop(ctx context.Context, deps Deps) error {
 	}
 	if deps.CurrentLogin == nil {
 		deps.Log(
-			fmt.Sprintf("dispatcher 启动：host=%s repo=%s reviewer=%s 并发=%d interval=%dms",
-				config.Host, config.Repository.FullName(), config.Reviewer, config.Concurrency, config.Interval.Milliseconds()),
+			fmt.Sprintf("dispatcher 启动：host=%s repo=%s reviewer=%s 并发=%d 检测间隔=%dms",
+				config.Host, config.Repository.FullName(), config.Reviewer, config.Concurrency, mentionPollInterval(config.Interval).Milliseconds()),
 		)
 	}
 	model := ""
 	if config.Model != "" {
 		model = " model=" + config.Model
 	}
-	deps.Log(fmt.Sprintf(
+	deps.logVerbose(fmt.Sprintf(
 		"  会话：claude=%s%s timeout=%dms（%s）",
 		config.ClaudeBin, model, config.SessionTimeout.Milliseconds(), humanDuration(config.SessionTimeout),
 	))
-	deps.Log(fmt.Sprintf("  落点：logs=%s worktrees=%s lock=%s", config.LogDir, config.WorktreeRoot, config.LockFile))
+	deps.logVerbose(fmt.Sprintf("  落点：logs=%s worktrees=%s lock=%s", config.LogDir, config.WorktreeRoot, config.LockFile))
 	mirror := "关"
 	if config.SyncMirror {
 		mirror = "开"
 	}
-	deps.Log(fmt.Sprintf(
+	deps.logVerbose(fmt.Sprintf(
 		"  基线：origin/%s（镜像同步%s） 漂移规则：head 推进即本轮作废",
 		config.BaseBranch, mirror,
 	))
 
-	// settled 是请求唯一键守卫（本进程内）：键为 kind#number，一个键同时只允许
-	// 一个未完成请求；处理完成后置位，直到标签被 sync 收敛（键从待办列表消失）
-	// 才解除——连续 @ai / /review 不会重复拉起同一待办。
-	settled := map[string]bool{}
+	// guards 是双通道守卫（本进程内，键 kind#number）。标签与 mention 是两类
+	// 行为，守卫语义随之分离（完整说明见 detect.go 头注释）：
+	//   - 标签通道 settled：处理后压制，标签清单收敛才解除——吸收同一请求的
+	//     重复信号；
+	//   - mention 通道 handled（水位线）：记录最后回应时刻，只吸收同一消息的
+	//     重复信号，水位线后的他人新评论会以追问轮重新触发。
+	guards := newGuardState()
 
-	for !ctxDone(ctx) {
-		// 镜像同步先行（fail-closed）：检出是评审标准与分诊的数据源，与其带着
-		// 陈旧基线评审，不如跳过本轮等待重试
-		if deps.SyncMirror != nil {
-			sha, err := deps.SyncMirror()
-			if err != nil {
-				deps.Log(fmt.Sprintf(
-					"镜像同步失败：%v（跳过本轮，%dms 后重试）",
-					err, config.Interval.Milliseconds(),
-				))
-				sleep(config.Interval)
+	// 主循环 = 高频 mention 检测 + 常驻 worker 池，两个 loop 各司其职：
+	//   - detector：mention/ticket 检测，默认 5s 一轮（run.yaml interval 可调），
+	//     不做任何 sync——它只该回答「有没有新请求」；
+	//   - worker：消费待办并起 claude 会话。镜像同步在**每次起会话前**执行
+	//     （ProcessItem 的 PrepareWorktree 之前），保证评审基线新鲜，且不占用
+	//     检测 loop 的频率。
+	// 此前检测 loop 内嵌镜像同步且频率 30s：一是 @ 响应慢（最坏等一整个
+	// interval + 会话 barrier），二是 sync 失败会卡住检测。
+	workChannel := make(chan WorkItem)
+	// inFlight 记录在跑/排队中的待办（防同一待办被重复派发）；会话结束即清理
+	inFlight := map[string]bool{}
+	var dispatchMutex sync.Mutex
+	var workerWG sync.WaitGroup
+	worker := func() {
+		for item := range workChannel {
+			result := ProcessItem(ctx, deps, item)
+			// 会话结束即出队：下一轮检测若仍有 mention（用户追加了消息）可以
+			// 重新入队；守卫按结果更新（Settled 置 settled，Responded 推进
+			// mention 水位线）
+			dispatchMutex.Lock()
+			delete(inFlight, item.key())
+			dispatchMutex.Unlock()
+			guards.apply(item.key(), result, time.Now())
+		}
+	}
+	for range config.Concurrency {
+		workerWG.Go(worker)
+	}
+	defer close(workChannel)
+
+	mentionInterval := mentionPollInterval(config.Interval)
+	detect := func() {
+		work, err := ListWork(ctx, deps.API, config.Repository, config.Reviewer)
+		if err != nil {
+			deps.Log(fmt.Sprintf("检测失败：%v（%dms 后重试）", err, mentionInterval.Milliseconds()))
+			return
+		}
+		// 守卫解除先行：条目从各自清单消失（标签收敛 / mention 条目关闭或
+		// mention 移除）后，同键的新请求可以重新入队
+		guards.release(work, deps.logDebug)
+		// 逐条目按通道判定派发模式。已回应 mention 条目的新评论细查可能发起
+		// Gitea 调用，放在互斥区外，不阻塞 worker 的 inFlight 登记
+		var candidates []WorkItem
+		for _, item := range work {
+			if dispatch, ok := deps.selectDispatch(ctx, guards, item); ok {
+				candidates = append(candidates, dispatch)
+			}
+		}
+		dispatchMutex.Lock()
+		var queue []WorkItem
+		for _, item := range candidates {
+			if inFlight[item.key()] {
 				continue
 			}
-			deps.Log(fmt.Sprintf("镜像同步：%s @ %s", config.BaseBranch, sha))
+			queue = append(queue, item)
+			inFlight[item.key()] = true
 		}
-		work, err := ListWork(ctx, deps.API, config.Repository)
-		if err != nil {
-			deps.Log(fmt.Sprintf(
-				"检测失败：%v（%dms 后重试）",
-				err, config.Interval.Milliseconds(),
-			))
-			sleep(config.Interval)
-			continue
-		}
-		// 请求唯一键守卫：已在本进程内处理过（review 已提交/triage 已移除）但
-		// 标签尚未被 sync 收敛的待办不再重复拉起——连续 @ai / /review 只会
-		// 形成一个未完成的请求。标签消失（sync 收敛）后自动解除守卫，之后
-		// 的新请求可以重新入队。
-		work = pruneSettled(work, settled)
+		dispatchMutex.Unlock()
+		// OnQueue 上报「尚未派发」的清单（状态 API 的队列视图）
 		if deps.OnQueue != nil {
-			deps.OnQueue(append([]WorkItem(nil), work...))
+			deps.OnQueue(queue)
 		}
-		if len(work) == 0 {
-			sleep(config.Interval)
-			continue
+		if len(queue) == 0 {
+			return
 		}
-		labels := make([]string, 0, len(work))
-		for _, item := range work {
-			labels = append(labels, fmt.Sprintf("%s#%d", item.Kind, item.Number))
+		labels := make([]string, 0, len(queue))
+		for _, item := range queue {
+			labels = append(labels, item.label())
 		}
-		deps.Log(fmt.Sprintf("检测到 %d 个待办（并发 %d）：%s", len(work), config.Concurrency, strings.Join(labels, " ")))
-
-		// 有界并发：轮内至多 concurrency 个会话，轮与轮之间天然是 barrier——
-		// 同一待办同一时刻至多一个会话
-		var wg sync.WaitGroup
-		var next int
-		var mutex sync.Mutex
-		worker := func() {
-			defer wg.Done()
-			for !ctxDone(ctx) {
-				mutex.Lock()
-				if next >= len(work) {
-					mutex.Unlock()
-					return
-				}
-				index := next
-				next++
-				mutex.Unlock()
-				result := ProcessItem(ctx, deps, work[index])
-				if result.Settled {
-					mutex.Lock()
-					settled[work[index].key()] = true
-					mutex.Unlock()
-				}
+		deps.Log(fmt.Sprintf("检测到 %d 个待办（并发 %d）：%s", len(queue), config.Concurrency, strings.Join(labels, " ")))
+		for _, item := range queue {
+			select {
+			case workChannel <- item:
+			case <-ctx.Done():
+				return
 			}
 		}
-		workers := config.Concurrency
-		if workers > len(work) {
-			workers = len(work)
-		}
-		for range workers {
-			wg.Add(1)
-			go worker()
-		}
-		wg.Wait()
-		// 一轮处理后歇一个间隔再重新检测：等 gitea-assistant 的标签收敛，
-		// 也避免卡死待办（验证不通过但标签未变）被连续重开会话
-		sleep(config.Interval)
 	}
+
+	detect()
+	detectorTicker := time.NewTicker(mentionInterval)
+	defer detectorTicker.Stop()
+	for !ctxDone(ctx) {
+		select {
+		case <-ctx.Done():
+		case <-detectorTicker.C:
+			detect()
+		}
+	}
+	// 退出：detector 停止后等在跑的会话处理完（channel 已 close，worker 自然
+	// 收尾）
+	workerWG.Wait()
 	deps.Log("已退出主循环")
 	return nil
+}
+
+// mentionPollInterval 是 mention 检测的轮询间隔：默认 5s（@ 触发要高频）；
+// 配置的 interval 小于该值时取 interval（尊重更激进的配置），大于时取
+// interval 的五分之一（下限 5s），保证检测始终快于旧节奏。
+func mentionPollInterval(configured time.Duration) time.Duration {
+	const base = 5 * time.Second
+	if configured <= 0 {
+		return base
+	}
+	if configured <= base {
+		return configured
+	}
+	if configured/5 < base {
+		return base
+	}
+	return configured / 5
 }
 
 // humanDuration 把时长折成人类可读形式（1800000ms → '30 分钟'），演练输出用。
@@ -425,28 +480,6 @@ func planSteps(deps Deps, item WorkItem) []string {
 	}
 }
 
-// pruneSettled 过滤掉已处理但仍留在待办列表里的条目（请求标签尚未被 sync
-// 收敛），并清除已从列表消失的键（请求已收敛或关闭）——之后的重新请求可以
-// 再次入队。
-func pruneSettled(work []WorkItem, settled map[string]bool) []WorkItem {
-	present := make(map[string]bool, len(work))
-	filtered := work[:0]
-	for _, item := range work {
-		key := item.key()
-		present[key] = true
-		if settled[key] {
-			continue
-		}
-		filtered = append(filtered, item)
-	}
-	for key := range settled {
-		if !present[key] {
-			delete(settled, key)
-		}
-	}
-	return filtered
-}
-
 // ConfigPreview 返回生效调度配置的只读摘要（令牌掩码），供 run --dry-run
 // 预览「当前实际用的是什么配置」。
 func ConfigPreview(config Config, repoDir string) []string {
@@ -506,7 +539,7 @@ func DryRunPass(ctx context.Context, deps Deps) error {
 		))
 		deps.Log("")
 	}
-	work, err := ListWork(ctx, deps.API, config.Repository)
+	work, err := ListWork(ctx, deps.API, config.Repository, config.Reviewer)
 	if err != nil {
 		return err
 	}
@@ -543,20 +576,140 @@ type attemptRecord struct {
 	PermissionDenials int      `json:"permissionDenials"`
 }
 
-// ProcessResult 是一次处理的走向：Settled 表示已产出可验证的完成动作
-// （review 已提交 / triage 标签已移除），该请求已满足；在标签被 sync 收敛前
-// 不应重复拉起。
+// ProcessResult 是一次处理的走向：
+//   - Settled：标签通道已产出可验证的完成动作（review 已提交 / triage 标签已
+//     移除），该请求已满足；在标签被 sync 收敛前不应重复拉起。
+//   - Responded：mention 通道已回应（会话无错误收尾），mention 水位线推进到
+//     此刻；清单里水位线之后的他人新评论才会再次触发。
 type ProcessResult struct {
-	Settled bool
+	Settled   bool
+	Responded bool
+}
+
+// guardState 是检测循环与 worker 之间的双通道守卫（键 kind#number，本进程内）。
+// 自带互斥：detector 读写、worker 收尾写全部在锁内，杜绝并发 map 访问。
+//
+//   - settled：标签通道——已可验证完成的请求在标签清单收敛前压制，防止同一
+//     请求重复拉起会话；
+//   - handled：mention 通道——最后回应时刻（水位线）。mention 条目会持续留在
+//     mentioned_by 清单里，水位线只吸收「同一消息的重复信号」，他人新评论仍会
+//     重新触发；这与标签通道 settled 的「请求已满足」语义不同，不可混用。
+type guardState struct {
+	mutex   sync.Mutex
+	settled map[string]bool
+	handled map[string]time.Time
+}
+
+func newGuardState() *guardState {
+	return &guardState{settled: map[string]bool{}, handled: map[string]time.Time{}}
+}
+
+// get 返回键的守卫状态：是否已 settled、mention 水位线（零值 = 从未回应）。
+func (g *guardState) get(key string) (settled bool, handled time.Time) {
+	g.mutex.Lock()
+	defer g.mutex.Unlock()
+	return g.settled[key], g.handled[key]
+}
+
+// apply 把一次处理结果记入守卫：Settled 置标签通道压制，Responded 推进
+// mention 水位线（at 为回应完成时刻）。
+func (g *guardState) apply(key string, result ProcessResult, at time.Time) {
+	g.mutex.Lock()
+	defer g.mutex.Unlock()
+	if result.Settled {
+		g.settled[key] = true
+	}
+	if result.Responded {
+		g.handled[key] = at
+	}
+}
+
+// release 清除已从各自清单消失的键：标签请求收敛（清单里不再出现）解除
+// settled；mention 条目关闭或 mention 被移除后清除水位线——重新打开或再次
+// mention 视为全新请求。状态变化走 debug 日志（Why is it happening）。
+func (g *guardState) release(work []WorkItem, debug func(string)) {
+	labeled := map[string]bool{}
+	mentioned := map[string]bool{}
+	for _, item := range work {
+		if item.Labeled {
+			labeled[item.key()] = true
+		}
+		if item.Mention {
+			mentioned[item.key()] = true
+		}
+	}
+	g.mutex.Lock()
+	defer g.mutex.Unlock()
+	for key := range g.settled {
+		if !labeled[key] {
+			delete(g.settled, key)
+			debug(fmt.Sprintf("%s 已离开标签清单，settled 守卫解除（新请求可入队）", key))
+		}
+	}
+	for key := range g.handled {
+		if !mentioned[key] {
+			delete(g.handled, key)
+			debug(fmt.Sprintf("%s 已离开 mention 清单，水位线清除（重新 mention 视为全新请求）", key))
+		}
+	}
+}
+
+// clockSkewTolerance 是 mention 水位线预检的时钟偏差余量：水位线取本地时钟，
+// 条目 Updated 取 Gitea 服务端时钟，预检按水位线前推该余量，避免时钟偏差漏掉
+// 真实新评论；是否真有新消息仍以评论列表细查为准。
+const clockSkewTolerance = 2 * time.Minute
+
+// selectDispatch 按通道判定单个条目本轮是否派发、以何种模式派发（两通道行为
+// 的完整定义见 detect.go 头注释）。ok=false 表示两路都不需要动。
+//
+//   - 标签通道：标签在清单且未 settled → 全量会话；已 settled 的等待标签
+//     收敛，不重复拉起。
+//   - mention 通道：从未回应 → 全量会话；已回应 → 仅当条目在水位线后有新动态
+//     （Updated 预检把常态开销压到零）且确有他人新评论时，以追问轮（同一会话
+//     续聊）再次入队，不重跑全量协议。
+//
+// 同一条目两路同时命中时标签通道优先：全量会话覆盖追问诉求，会话后的追问轮
+// 会消化新消息。
+func (d Deps) selectDispatch(ctx context.Context, guards *guardState, item WorkItem) (WorkItem, bool) {
+	settled, handled := guards.get(item.key())
+	if item.Labeled && !settled {
+		return item, true
+	}
+	if !item.Mention {
+		return WorkItem{}, false
+	}
+	if handled.IsZero() {
+		return item, true
+	}
+	if !item.Updated.After(handled.Add(-clockSkewTolerance)) {
+		return WorkItem{}, false
+	}
+	if d.FollowUpMessages == nil {
+		return WorkItem{}, false
+	}
+	messages, err := d.FollowUpMessages(ctx, item, handled)
+	if err != nil {
+		d.Log(fmt.Sprintf("%s 新消息检查失败：%v（下一轮重试）", item.label(), err))
+		return WorkItem{}, false
+	}
+	if len(messages) == 0 {
+		// 有动态但全是自身活动（自己的评论、标签变更）：不重新入队
+		d.logDebug(fmt.Sprintf("%s 水位线后无他人新评论，不重新入队", item.label()))
+		return WorkItem{}, false
+	}
+	d.logVerbose(fmt.Sprintf("%s 水位线后 %d 条新消息，以追问轮入队（同一会话续聊）", item.label(), len(messages)))
+	item.FollowUp = true
+	item.Since = handled
+	return item, true
 }
 
 // ProcessItem 处理单个待办（主循环逐项调用；review/triage 一次性命令也走这里）。
 // 会话进度两路落点：控制台实时显示基础进度，完整明细实时写待办日志。
-// 每个待办每次只起一个会话：处理完即放行等待下一轮检测，同一请求的重复
-// 信号（连续 @ai / /review）由 RunLoop 的 settled 唯一键守卫吸收。
+// 每个待办每次只起一个会话：处理完即放行等待下一轮检测，同一请求的重复信号
+// 由主循环的双通道守卫吸收（标签 settled / mention 水位线，见 guardState）。
 func ProcessItem(ctx context.Context, deps Deps, item WorkItem) ProcessResult {
 	config := deps.Config
-	tag := item.key()
+	tag := item.label()
 	logFile := filepath.Join(config.LogDir, fmt.Sprintf("%s-%d-%s.log", item.Kind, item.Number, stamp(time.Now())))
 	appendLog := func(line string) {
 		file, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
@@ -577,6 +730,19 @@ func ProcessItem(ctx context.Context, deps Deps, item WorkItem) ProcessResult {
 		}
 	}()
 
+	// 镜像同步在每次起会话前执行（fail-closed）：评审基线必须新鲜，且同步
+	// 只属于「要起会话」这条路径，不占用检测 loop 的频率。检出是评审标准
+	// （.claude/）与分诊的数据源，与其带着陈旧基线开会话，不如跳过本条。
+	if deps.SyncMirror != nil {
+		sha, err := deps.SyncMirror()
+		if err != nil {
+			deps.Log(fmt.Sprintf("%s 镜像同步失败：%v（跳过本条，下一轮重试）", tag, err))
+			appendLog(fmt.Sprintf("[error] 镜像同步失败：%v\n", err))
+			return ProcessResult{}
+		}
+		deps.logVerbose(fmt.Sprintf("%s 镜像同步：%s @ %s", tag, config.BaseBranch, sha))
+	}
+
 	switch {
 	case item.Kind == KindPull:
 		worktreeDir = filepath.Join(config.WorktreeRoot, fmt.Sprintf("pr-%d", item.Number))
@@ -588,7 +754,7 @@ func ProcessItem(ctx context.Context, deps Deps, item WorkItem) ProcessResult {
 		}
 		headSHA = sha
 		cwd = worktreeDir
-		deps.Log(fmt.Sprintf("%s worktree=%s head=%s", tag, worktreeDir, headSHA))
+		deps.logVerbose(fmt.Sprintf("%s worktree=%s head=%s", tag, worktreeDir, headSHA))
 	case deps.PrepareIssue != nil:
 		// Issue 会话同样在 /tmp 的 detach worktree 里跑：宿主检出只做 fetch
 		worktreeDir = filepath.Join(config.WorktreeRoot, fmt.Sprintf("issue-%d", item.Number))
@@ -599,35 +765,88 @@ func ProcessItem(ctx context.Context, deps Deps, item WorkItem) ProcessResult {
 			return ProcessResult{}
 		}
 		cwd = worktreeDir
-		deps.Log(fmt.Sprintf("%s worktree=%s head=%s", tag, worktreeDir, sha))
+		deps.logVerbose(fmt.Sprintf("%s worktree=%s head=%s", tag, worktreeDir, sha))
+	}
+	// 追问轮（仅 mention 通道派发）：不重跑全量协议，把水位线之后的他人新
+	// 消息喂给同一会话续聊
+	if item.FollowUp {
+		return deps.processFollowUp(ctx, item, cwd, headSHA, appendLog)
 	}
 	prompt := deps.BuildPrompt(item.Kind, item.Number, PromptContext{Title: item.Title, HeadSHA: headSHA})
 	appendLog("[prompt] " + strings.ReplaceAll(prompt, "\n", " ⏎ ") + "\n")
+	// --debug：起始提示词全文上控制台（Why is it happening：会话被要求做什么）
+	deps.logDebug(fmt.Sprintf("%s prompt：%s", tag, strings.ReplaceAll(prompt, "\n", " ⏎ ")))
 
+	startedAt := time.Now()
+	outcome, started := deps.runSessionRecorded(item, SessionRequest{
+		Item:    item,
+		HeadSHA: headSHA,
+		Prompt:  prompt,
+		Cwd:     cwd,
+	}, appendLog, startedAt)
+	if !started {
+		// 同一待办已有在跑的会话（互斥守卫）：本轮放行，等下一轮检测；
+		// worktree 由 defer 统一清理
+		return ProcessResult{}
+	}
+	responded := !outcome.IsError
+
+	verdict, err := verifyItem(ctx, deps, item, startedAt, headSHA)
+	if err != nil {
+		deps.Log(fmt.Sprintf("%s 处理异常：%v", tag, err))
+		appendLog(fmt.Sprintf("[error] %v\n", err))
+		return ProcessResult{Responded: responded}
+	}
+	appendLog(fmt.Sprintf("[verify] completed=%t headMoved=%t reason=%s\n",
+		verdict.completed, verdict.headMoved, verdict.reason))
+	if verdict.completed {
+		deps.Log(fmt.Sprintf("%s 完成（%s）", tag, verdict.reason))
+		// 完成不等于收工：会话期间或验证之后用户可能又留了新消息。追问轮保证
+		// 「ai 回复前必须读到消息」——同一会话 --resume 续聊，直到没有未读
+		deps.followUp(ctx, item, tag, startedAt, cwd, appendLog)
+		return ProcessResult{Settled: true, Responded: responded}
+	}
+	// 作者在会话期间推送 ⇒ 评审锚定的旧 head 已作废：直接放行，下一轮以新
+	// head 重开（会话锚定的 head 记录在待办日志）
+	if verdict.headMoved {
+		deps.logDebug(fmt.Sprintf("%s %s；本轮放行，下一轮以新 head 重开", tag, verdict.reason))
+		return ProcessResult{Responded: responded}
+	}
+	deps.logDebug(fmt.Sprintf("%s 本轮未完成，放行等待下一轮检测", tag))
+	return ProcessResult{Responded: responded}
+}
+
+// runSessionRecorded 是「起一个会话」的公共路径（全量会话与追问轮共用）：
+// sqlite 互斥守卫（OnStart）→ 会话（进度两路落日志：控制台基础进度 + 待办
+// 日志全量明细）→ 结果上报（OnFinish）与待办日志记录。started=false 表示互斥
+// 拒绝（同一待办已有在跑的会话），本轮放行。
+func (d Deps) runSessionRecorded(item WorkItem, request SessionRequest, appendLog func(string), startedAt time.Time) (SessionOutcome, bool) {
+	tag := item.label()
+	if d.OnStart != nil && !d.OnStart(item) {
+		d.logDebug(fmt.Sprintf("%s 已有会话在处理（互斥守卫），本轮放行", tag))
+		return SessionOutcome{}, false
+	}
 	toolCalls := 0
-	onProgress := func(line string) {
+	request.OnProgress = func(line string) {
 		appendLog("[progress] " + line + "\n")
 		switch {
 		case strings.HasPrefix(line, "session="):
-			deps.Log(tag + " " + line)
+			d.Log(tag + " " + line)
 		case strings.HasPrefix(line, "🔧 "):
 			toolCalls++
-			deps.Log(fmt.Sprintf("%s 🔧 #%d %s", tag, toolCalls, strings.TrimPrefix(line, "🔧 ")))
+			d.logVerbose(fmt.Sprintf("%s 🔧 #%d %s", tag, toolCalls, strings.TrimPrefix(line, "🔧 ")))
+		case strings.HasPrefix(line, "[debug] "):
+			// 会话内部的 debug 明细（完整命令行、注入 env、stream 事件、stderr
+			// 尾部）：--debug 时上控制台（Why is it happening），其余级别只落
+			// 待办日志
+			d.logDebug(tag + " " + strings.TrimPrefix(line, "[debug] "))
+		case strings.HasPrefix(line, "[debug]事件"):
+			d.logDebug(tag + " " + line)
 		}
 	}
-	startedAt := time.Now()
-	if deps.OnStart != nil {
-		deps.OnStart(item)
-	}
-	outcome := deps.RunSession(SessionRequest{
-		Item:       item,
-		HeadSHA:    headSHA,
-		Prompt:     prompt,
-		Cwd:        cwd,
-		OnProgress: onProgress,
-	})
-	if deps.OnFinish != nil {
-		deps.OnFinish(item, outcome)
+	outcome := d.RunSession(request)
+	if d.OnFinish != nil {
+		d.OnFinish(item, outcome)
 	}
 	record, err := json.Marshal(attemptRecord{
 		Attempt:           1,
@@ -651,29 +870,131 @@ func ProcessItem(ctx context.Context, deps Deps, item WorkItem) ProcessResult {
 	if outcome.PermissionDenials > 0 {
 		denials = fmt.Sprintf(" denials=%d", outcome.PermissionDenials)
 	}
-	deps.Log(fmt.Sprintf("%s 会话结束：%s turns=%d cost=$%.2f%s",
+	d.Log(fmt.Sprintf("%s 会话结束：%s turns=%d cost=$%.2f%s",
 		tag, outcome.Subtype, outcome.NumTurns, outcome.CostUSD, denials))
+	return outcome, true
+}
 
-	verdict, err := verifyItem(ctx, deps, item, startedAt, headSHA)
+// processFollowUp 是追问轮的执行路径（仅 mention 通道派发）：把水位线之后的
+// 他人新消息喂给同一会话（RunSession 按会话记录自动 --resume 续聊），不重跑
+// 全量协议，也没有标签式完成判定——会话无错误收尾即视为已回应，水位线由主
+// 循环推进。会话期间又到达的新消息由 followUp 兜底续读。
+func (d Deps) processFollowUp(ctx context.Context, item WorkItem, cwd string, headSHA string, appendLog func(string)) ProcessResult {
+	tag := item.label()
+	if d.FollowUpMessages == nil {
+		d.Log(fmt.Sprintf("%s 未接入新消息检查，追问轮无法执行", tag))
+		return ProcessResult{}
+	}
+	messages, err := d.FollowUpMessages(ctx, item, item.Since)
 	if err != nil {
-		deps.Log(fmt.Sprintf("%s 处理异常：%v", tag, err))
+		d.Log(fmt.Sprintf("%s 新消息读取失败：%v（下一轮重试）", tag, err))
 		appendLog(fmt.Sprintf("[error] %v\n", err))
 		return ProcessResult{}
 	}
-	appendLog(fmt.Sprintf("[verify] completed=%t headMoved=%t reason=%s\n",
-		verdict.completed, verdict.headMoved, verdict.reason))
-	if verdict.completed {
-		deps.Log(fmt.Sprintf("%s 完成（%s）", tag, verdict.reason))
-		return ProcessResult{Settled: true}
+	if len(messages) == 0 {
+		// 检测与派发之间消息已被消化（如上一轮追问已覆盖）：仅推进水位线
+		d.logDebug(fmt.Sprintf("%s 待回应消息已消失，仅推进水位线", tag))
+		return ProcessResult{Responded: true}
 	}
-	// 作者在会话期间推送 ⇒ 评审锚定的旧 head 已作废：直接放行，下一轮以新
-	// head 重开（会话锚定的 head 记录在待办日志）
-	if verdict.headMoved {
-		deps.Log(fmt.Sprintf("%s %s；本轮放行，下一轮以新 head 重开", tag, verdict.reason))
+	d.Log(fmt.Sprintf("%s 有 %d 条新消息，追问轮（同一会话续聊）", tag, len(messages)))
+	if d.PostFollowUpNote != nil {
+		if err := d.PostFollowUpNote(ctx, item, len(messages)); err != nil {
+			d.Log(fmt.Sprintf("%s 追问说明评论失败：%v", tag, err))
+		}
+	}
+	for _, message := range messages {
+		appendLog("[follow-up] " + strings.ReplaceAll(message, "\n", " ⏎ ") + "\n")
+	}
+	prompt := followUpPrompt(item.Number, messages)
+	appendLog("[follow-up prompt] " + strings.ReplaceAll(prompt, "\n", " ⏎ ") + "\n")
+	startedAt := time.Now()
+	outcome, started := d.runSessionRecorded(item, SessionRequest{
+		Item:    item,
+		HeadSHA: headSHA,
+		Prompt:  prompt,
+		Cwd:     cwd,
+	}, appendLog, startedAt)
+	if !started {
 		return ProcessResult{}
 	}
-	deps.Log(fmt.Sprintf("%s 本轮未完成，放行等待下一轮检测", tag))
-	return ProcessResult{}
+	appendLog(fmt.Sprintf("[follow-up result] subtype=%s turns=%d is_error=%t\n",
+		outcome.Subtype, outcome.NumTurns, outcome.IsError))
+	if outcome.IsError {
+		d.Log(fmt.Sprintf("%s 追问轮失败（%s），放行等待下一轮", tag, outcome.Subtype))
+		return ProcessResult{}
+	}
+	// 会话期间可能又到了新消息：与全量会话同一兜底，从本轮起点续读
+	d.followUp(ctx, item, tag, startedAt, cwd, appendLog)
+	return ProcessResult{Responded: true}
+}
+
+// maxFollowUpRounds 是追问轮上限：每轮都会话 --resume 读取增量消息并回应，
+// 超限放行（下一轮检测重新处理，防死循环）。
+const maxFollowUpRounds = 3
+
+// followUpPrompt 构造追问轮提示词：要求先完整阅读全部新消息，再按既定协议
+// 续处理（回答问题、补充结论或调整判断）。全量会话后的兜底追问与检测循环
+// 直派的追问轮共用。
+func followUpPrompt(number int64, messages []string) string {
+	return fmt.Sprintf(
+		"你在处理 #%d 期间或之后，用户又留下了 %d 条新消息（已在下方原文给出）。"+
+			"回复前必须先完整阅读这些消息；按消息内容继续处理本待办：回答问题、"+
+			"补充结论或调整你此前的判断，仍按既定协议（评审/分诊）落结论。\n\n"+
+			"新消息如下：\n%s",
+		number, len(messages), strings.Join(messages, "\n\n---\n\n"))
+}
+
+// followUp 检查条目上 since 之后他人（非 assistant 自身账号）的新评论；有则
+// 拉起追问会话（同一会话记录 --resume 续聊），让 ai 读到消息后再回复。评论
+// 本身也写入待办日志，时间线完整。
+func (d Deps) followUp(
+	ctx context.Context,
+	item WorkItem,
+	tag string,
+	since time.Time,
+	cwd string,
+	appendLog func(string),
+) {
+	if d.FollowUpMessages == nil {
+		return
+	}
+	for round := 1; round <= maxFollowUpRounds; round++ {
+		messages, err := d.FollowUpMessages(ctx, item, since)
+		if err != nil {
+			d.Log(fmt.Sprintf("%s 后续消息检查失败：%v", tag, err))
+			return
+		}
+		if len(messages) == 0 {
+			return
+		}
+		d.Log(fmt.Sprintf("%s 有 %d 条后续消息，追问轮 %d/%d（同一会话续聊）",
+			tag, len(messages), round, maxFollowUpRounds))
+		for _, message := range messages {
+			appendLog("[follow-up] " + strings.ReplaceAll(message, "\n", " ⏎ ") + "\n")
+		}
+		if d.PostFollowUpNote != nil {
+			if err := d.PostFollowUpNote(ctx, item, len(messages)); err != nil {
+				d.Log(fmt.Sprintf("%s 追问说明评论失败：%v", tag, err))
+			}
+		}
+		prompt := followUpPrompt(item.Number, messages)
+		appendLog("[follow-up prompt] " + strings.ReplaceAll(prompt, "\n", " ⏎ ") + "\n")
+		outcome := d.RunSession(SessionRequest{
+			Item:   item,
+			Prompt: prompt,
+			Cwd:    cwd,
+			OnProgress: func(line string) {
+				appendLog("[follow-up progress] " + line + "\n")
+			},
+		})
+		appendLog(fmt.Sprintf("[follow-up result] subtype=%s turns=%d is_error=%t\n",
+			outcome.Subtype, outcome.NumTurns, outcome.IsError))
+		if outcome.IsError {
+			d.Log(fmt.Sprintf("%s 追问轮 %d 失败（%s），放行等待下一轮", tag, round, outcome.Subtype))
+			return
+		}
+		since = time.Now()
+	}
 }
 
 type itemVerdict struct {

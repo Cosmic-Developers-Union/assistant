@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"assistant/internal/instances"
+	"assistant/internal/statestore"
 )
 
 // Endpoint 是 daemon 的 API 端点凭据，写入 <配置目录>/daemon.json 供 MCP 自举发现。
@@ -31,7 +32,7 @@ type Endpoint struct {
 // Serve 在 listen 上提供只读状态 API（Bearer token 鉴权），返回端点并落盘
 // daemon.json（0600）。ctx 取消时关闭服务并删除端点文件。listen 支持 ":0"
 // （随机端口，实际地址以返回值/端点文件为准）。
-func Serve(ctx context.Context, listen string, store *Store, version string, logf func(string, ...any)) (*Endpoint, error) {
+func Serve(ctx context.Context, listen string, store *Store, version string, logf func(string, ...any), state ...*statestore.Store) (*Endpoint, error) {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
@@ -83,6 +84,29 @@ func Serve(ctx context.Context, listen string, store *Store, version string, log
 		}
 		writeJSON(writer, http.StatusOK, recent)
 	}))
+	// SQLite 状态库内省（run.yaml 配了 state-dir/state-file 时可用）：返回持久
+	// 化的全量状态——daemon 重启后内存快照清零，这里仍能看到历史会话与结果
+	var stateStore *statestore.Store
+	for _, candidate := range state {
+		if candidate != nil {
+			stateStore = candidate
+			break
+		}
+	}
+	if stateStore != nil {
+		mux.Handle("GET /api/v1/state", auth(token, func(writer http.ResponseWriter, request *http.Request) {
+			limit, _ := strconv.Atoi(request.URL.Query().Get("limit"))
+			if limit <= 0 {
+				limit = 50
+			}
+			snapshot, err := stateStore.Snapshot(limit)
+			if err != nil {
+				writeJSON(writer, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+				return
+			}
+			writeJSON(writer, http.StatusOK, snapshot)
+		}))
+	}
 
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {

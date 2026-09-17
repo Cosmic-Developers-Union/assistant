@@ -39,7 +39,10 @@ jobs:
             type=ref,event=branch
             type=semver,pattern={{version}}
             type=sha,prefix=sha-
+            # latest：最新构建，每次 merge 到 main 都覆盖
             type=raw,value=latest,enable={{is_default_branch}}
+            # stable：最后一个发布版本，仅在 push v* tag 时移动
+            type=raw,value=stable,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
 
       - uses: docker/build-push-action@v6
         with:
@@ -48,3 +51,6 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: VERSION=${{ github.ref_name }}
+          # GHA 缓存加速高频构建
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

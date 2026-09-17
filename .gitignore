@@ -330,6 +330,7 @@ cython_debug/
 
 # 配置文件
 config.json
+run.yaml
 
 # IDE
 .idea/

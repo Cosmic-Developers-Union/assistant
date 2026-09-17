@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"io"
 	"os"
 	"os/exec"
@@ -18,6 +19,8 @@ import (
 	"assistant/internal/dispatcher"
 	"assistant/internal/instances"
 	"assistant/internal/provider"
+	"assistant/internal/runcfg"
+	"assistant/internal/statestore"
 	"assistant/internal/status"
 
 	"github.com/spf13/cobra"
@@ -30,6 +33,7 @@ type dispatcherOptions struct {
 	Token         string
 	APIListen     string
 	Weixin        bool
+	Verbose       bool
 	Reviewer      string
 	Model         string
 	ClaudeBin     string
@@ -44,6 +48,7 @@ type dispatcherOptions struct {
 	Concurrency   string
 	DockerImage   string
 	DockerNetwork string
+	Run           string
 	DryRun        bool
 }
 
@@ -99,10 +104,22 @@ func newDispatcherCommands(repoFlag, configFlag *string) []*cobra.Command {
 		"每轮待办处理的会话并发数（缺省 8；轮间 barrier 保证同一待办同时至多一个会话）",
 	)
 	runCommand.Flags().BoolVar(
+		&runOptions.Verbose,
+		"verbose",
+		false,
+		"展示系统正在做什么（步骤/目标/进度/外部调用）；--debug 已包含",
+	)
+	runCommand.Flags().BoolVar(
 		&runOptions.DryRun,
 		"dry-run",
 		false,
 		"只读演练：列出将执行的待办并逐步说明动作（日志/worktree/会话/完成判定/重试），零副作用",
+	)
+	runCommand.Flags().StringVar(
+		&runOptions.Run,
+		"run",
+		"",
+		"run.yaml 路径（缺省 ASSISTANT_RUN、config.json 同目录或平台标准配置目录下的 run.yaml；存在时 run 完全按它运行）",
 	)
 	runCommand.Flags().StringVar(
 		&runOptions.APIListen,
@@ -292,6 +309,41 @@ func resolveDispatchTargets(
 	repoFlag, configPath string,
 	options *dispatcherOptions,
 ) ([]dispatchTarget, error) {
+	// run.yaml 存在时完全按它运行：站点与仓库来自 monitor，config.json 只承担
+	// 账号身份（providers/optimizations/weixin）——不再读它的 instances。
+	// --config 指向 run.yaml 是常见笔误（run.yaml 要用 --run）：点名纠正而不是
+	// 让它深入到凭据库报一个不相关的错
+	if trimmed := strings.TrimSpace(configPath); trimmed != "" &&
+		(strings.HasSuffix(trimmed, ".yaml") || strings.HasSuffix(trimmed, ".yml")) {
+		if _, statErr := os.Stat(trimmed); statErr == nil {
+			return nil, fmt.Errorf(
+				"%s 是 run.yaml（运行配置），不是 config.json：请用 --run %s 传入（--config 只接受 config.json）",
+				trimmed, trimmed)
+		}
+	}
+	runPath, err := runcfg.ResolvePath(options.Run, configPath)
+	if err != nil {
+		return nil, err
+	}
+	if runPath != "" {
+		targets, err := resolveRunYamlTargets(command, runPath, configPath, options)
+		if err != nil {
+			return nil, err
+		}
+		if repoFlag == "" {
+			return targets, nil
+		}
+		filtered := make([]dispatchTarget, 0, len(targets))
+		for _, target := range targets {
+			if target.config.Repository.FullName() == repoFlag {
+				filtered = append(filtered, target)
+			}
+		}
+		if len(filtered) == 0 {
+			return nil, fmt.Errorf("仓库 %s 不在 run.yaml 的 monitor repos 中", repoFlag)
+		}
+		return filtered, nil
+	}
 	resolvedPath, file, err := resolveInstanceFile(commandOptions{ConfigPath: configPath})
 	if err != nil {
 		return nil, err
@@ -301,7 +353,7 @@ func resolveDispatchTargets(
 		if err != nil {
 			return nil, err
 		}
-		client, err := newDispatchClient(config)
+		client, err := newDispatchClient(config, options.Debug)
 		if err != nil {
 			return nil, err
 		}
@@ -360,6 +412,177 @@ func resolveDispatchTargets(
 		return nil, fmt.Errorf("配置文件没有可运行的仓库")
 	}
 	return targets, nil
+}
+
+// resolveRunYamlTargets 是 run.yaml 模式的目标装配：run.yaml 存在时 run 完全
+// 按它运行——站点（monitor）与仓库清单来自 monitor，令牌来自 monitor.token
+// （缺省回退凭据库 purpose=review），落点与评审工作区按 root/repos-dir/review-*。
+// config.json 此时只承担账号身份（providers/optimizations/weixin）。
+func resolveRunYamlTargets(
+	command *cobra.Command,
+	runPath, configPath string,
+	options *dispatcherOptions,
+) ([]dispatchTarget, error) {
+	file, err := runcfg.Load(runPath)
+	if err != nil {
+		return nil, err
+	}
+	// configPath 未显式给出时按标准顺序定位（ASSISTANT_CONFIG / 标准配置目录）：
+	// run.yaml 模式下它只承担账号身份，缺省也不报错
+	if strings.TrimSpace(configPath) == "" {
+		configPath = strings.TrimSpace(os.Getenv("ASSISTANT_CONFIG"))
+	}
+	if strings.TrimSpace(configPath) == "" {
+		if standard, standardErr := instances.DefaultConfigPath(); standardErr == nil {
+			if _, statErr := os.Stat(standard); statErr == nil {
+				configPath = standard
+			}
+		}
+	}
+
+	var targets []dispatchTarget
+	for host, monitor := range file.Monitor {
+		if len(monitor.Repos) == 0 {
+			// 已登记但暂无仓库的站点（如仅 login）：跳过，不阻断其他站点
+			dispatchLoggerStderr(command)(fmt.Sprintf("跳过 monitor[%s]：repos 为空", host))
+			continue
+		}
+		token := monitor.Token
+		tokenSource := "run.yaml monitor.token"
+		if token == "" {
+			// 未写令牌时回退凭据库：本地开发 run.yaml 不必含敏感值
+			credential, credentialErr := tokenForPurpose(configPath, host, credentials.PurposeReview)
+			if credentialErr != nil {
+				return nil, fmt.Errorf("monitor[%s]: %w", host, credentialErr)
+			}
+			token = credential.Token
+			tokenSource = "凭据库 purpose=review"
+		}
+		for _, repoName := range monitor.Repos {
+			target, err := runYamlTarget(command, file, configPath, host, repoName, token, options)
+			if err != nil {
+				return nil, err
+			}
+			logf := dispatchLoggerStderr(command)
+			logf(fmt.Sprintf("monitor[%s] %s：令牌=%s（%s）", host, repoName, maskTokenForLog(token), tokenSource))
+			targets = append(targets, target)
+		}
+	}
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("run.yaml 没有可运行的仓库")
+	}
+	return targets, nil
+}
+
+// runYamlTarget 装配 run.yaml 模式下单个 (站点, 仓库) 的运行上下文：布局与
+// config.json 受管克隆一致（repos/{host}/{owner}/{name}，state/ 在检出之外），
+// 但根目录由 run.yaml 决定；worktree 按 review-root 与命名模板落到站点隔离的
+// 子目录。
+func runYamlTarget(
+	command *cobra.Command,
+	file *runcfg.File,
+	configPath, host, repoName, token string,
+	options *dispatcherOptions,
+) (dispatchTarget, error) {
+	repoDir, err := file.TargetPath(host, repoName)
+	if err != nil {
+		return dispatchTarget{}, fmt.Errorf("%s: %w", repoName, err)
+	}
+	stateDir, err := file.RepoStatePath(host, repoName)
+	if err != nil {
+		return dispatchTarget{}, fmt.Errorf("%s: %w", repoName, err)
+	}
+	flags := dispatcherFlags(command, repoName, options)
+	flags.Host = host
+	flags.Repository = repoName
+	flags.AccessToken = token
+	// 受管克隆：恒开镜像同步，日志/锁落状态目录
+	value := true
+	flags.SyncMirror = &value
+	if flags.LogDir == "" {
+		flags.LogDir = filepath.Join(stateDir, "logs")
+	}
+	if flags.LockFile == "" {
+		flags.LockFile = filepath.Join(stateDir, "dispatcher.lock")
+	}
+	if flags.WorktreeRoot == "" && strings.TrimSpace(os.Getenv("DISPATCH_WORKTREE_ROOT")) == "" {
+		// 评审工作区：run.yaml 的 review-root + 命名模板去掉逐待办叶子后的仓库
+		// 级基名（模板已含站点与仓库占位符，同名仓库跨站点不会相撞）
+		reviewBase, err := file.ReviewDirBase(host, repoName)
+		if err != nil {
+			return dispatchTarget{}, fmt.Errorf("%s: %w", repoName, err)
+		}
+		flags.WorktreeRoot = filepath.Join(file.ReviewRootDir(), reviewBase, "worktrees")
+	}
+	config, err := dispatcher.ResolveConfig(flags, repoDir, os.Getenv, func() (dispatcher.GitRemote, bool) {
+		return dispatcher.GitRemote{Host: host, Repository: repoName}, true
+	})
+	if err != nil {
+		return dispatchTarget{}, err
+	}
+	// 会话记录归档：sessions-dir + 命名模板展开到本仓库的目录（文件名按会话 ID）
+	if file.SessionsDir != "" {
+		archiveDir, err := file.SessionArchiveDir(host, repoName)
+		if err != nil {
+			return dispatchTarget{}, fmt.Errorf("%s: %w", repoName, err)
+		}
+		config.SessionArchiveDir = archiveDir
+	}
+	// provider/优化点：run.yaml 的 provider 节优先（type 选内置预设，token 简写
+	// 落 api_key），否则回退 config.json 的 default_provider（账号身份层）
+	_, configFile, fileErr := resolveInstanceFile(commandOptions{ConfigPath: configPath})
+	if fileErr != nil {
+		return dispatchTarget{}, fileErr
+	}
+	config.ConfigPath = configPath
+	providerName := ""
+	if file.Provider != nil {
+		providerName = file.Provider.Type
+	} else if configFile != nil {
+		providerName = configFile.DefaultProvider
+	}
+	if configFile != nil {
+		effective, err := configFile.EffectiveOverrides(providerName)
+		if err != nil {
+			return dispatchTarget{}, fmt.Errorf("%s（provider %s）: %w", repoName, providerName, err)
+		}
+		config.Provider = effective
+		config.ProviderName = providerName
+		config.Optimizations = configFile.Optimizations.Overrides()
+	}
+	if file.Provider != nil {
+		// run.yaml 的 token 简写按预设 TokenEnvs 落地，压过 config.json 同名值；
+		// 供应商语义（端点/模型映射/MCP）仍由内置预设与代码级 handler 提供
+		effective, err := provider.Resolve(file.Provider.Type, config.Optimizations, claudecfg.Overrides{}, file.Provider.Token)
+		if err != nil {
+			return dispatchTarget{}, fmt.Errorf("%s（provider %s）: %w", repoName, file.Provider.Type, err)
+		}
+		config.Provider = effective
+		config.ProviderName = file.Provider.Type
+	}
+	client, err := newDispatchClient(config, options.Debug)
+	if err != nil {
+		return dispatchTarget{}, err
+	}
+	return dispatchTarget{
+		instance: instances.Instance{Host: host},
+		repo:     instances.Repo{Name: repoName},
+		config:   config,
+		client:   client,
+		repoDir:  repoDir,
+		managed:  true,
+	}, nil
+}
+
+// maskTokenForLog 令牌打码（日志展示用）：只保留前后各 4 位。
+func maskTokenForLog(token string) string {
+	if token == "" {
+		return "(空)"
+	}
+	if len(token) <= 8 {
+		return "***"
+	}
+	return token[:4] + "***" + token[len(token)-4:]
 }
 
 // resolveInstanceTarget 解析 (instance, repo) 的运行上下文：repo.dir 缺省时用
@@ -448,7 +671,7 @@ func resolveInstanceTarget(
 	config.Provider = effective
 	config.ProviderName = providerName
 	config.Optimizations = file.Optimizations.Overrides()
-	client, err := newDispatchClient(config)
+	client, err := newDispatchClient(config, options.Debug)
 	if err != nil {
 		return dispatchTarget{}, err
 	}
@@ -512,8 +735,39 @@ func checkTargetsHealth(ctx context.Context, targets []dispatchTarget, log func(
 	return nil
 }
 
-func newDispatchClient(config dispatcher.Config) (*status.Client, error) {
-	return status.NewClient(config.Host, config.AccessToken)
+
+// shortGiteaPath 把 Gitea 请求 URL 折成站点相对路径（日志可读性）：
+// https://host/api/v1/repos/a/b/issues?limit=50 → GET /repos/a/b/issues?limit=50
+func shortGiteaPath(host, rawURL string) string {
+	prefix := strings.TrimRight(host, "/") + "/api/v1"
+	if rest, ok := strings.CutPrefix(rawURL, prefix); ok {
+		return rest
+	}
+	if parsed, err := url.Parse(rawURL); err == nil {
+		path := strings.TrimPrefix(parsed.Path, "/api/v1")
+		if parsed.RawQuery != "" {
+			return path + "?" + parsed.RawQuery
+		}
+		return path
+	}
+	return rawURL
+}
+
+func newDispatchClient(config dispatcher.Config, debug bool) (*status.Client, error) {
+	client, err := status.NewClient(config.Host, config.AccessToken)
+	if err != nil {
+		return nil, err
+	}
+	if debug {
+		// --debug：观测系统对 Gitea 的全部外部调用（Why/What 的外部调用面）。
+		// 只显示 method + 站点相对路径（不含主机名与令牌），一眼可读
+		client.EnableRequestLog(func(method, url string, statusCode int, duration time.Duration) {
+			fmt.Fprintf(os.Stderr, "[dispatch:d %s] Gitea %s %s → %d %dms\n",
+				time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+				method, shortGiteaPath(config.Host, url), statusCode, duration.Milliseconds())
+		})
+	}
+	return client, nil
 }
 
 func firstNonEmpty(values ...string) string {
@@ -704,21 +958,58 @@ func checkSessionRuntime(command *cobra.Command, targets []dispatchTarget, log f
 	}
 }
 
-func dispatchLogger(w io.Writer) func(string) {
-	return func(line string) {
-		fmt.Fprintf(w, "[dispatch %s] %s\n", time.Now().UTC().Format("2006-01-02T15:04:05.000Z"), line)
+// dispatchLogger 按三级日志约定构造 dispatcher 的日志回调组：
+//
+//	default = What happened?     → [dispatch]（恒输出）
+//	verbose = What is happening? → [dispatch:v]（--verbose/--debug 输出）
+//	debug   = Why is it happening? → [dispatch:d]（仅 --debug 输出）
+type dispatchLoggers struct {
+	info    func(string)
+	verbose func(string)
+	debug   func(string)
+}
+
+func newDispatchLoggers(w io.Writer, verbose, debug bool) dispatchLoggers {
+	if debug {
+		verbose = true
+	}
+	newLogger := func(prefix string, enabled bool) func(string) {
+		return func(line string) {
+			if !enabled {
+				return
+			}
+			fmt.Fprintf(w, "[%s %s] %s\n", prefix,
+				time.Now().UTC().Format("2006-01-02T15:04:05.000Z"), line)
+		}
+	}
+	return dispatchLoggers{
+		info:    newLogger("dispatch", true),
+		verbose: newLogger("dispatch:v", verbose),
+		debug:   newLogger("dispatch:d", debug),
 	}
 }
 
-func newDispatchDeps(target dispatchTarget, w io.Writer, store *daemon.Store) dispatcher.Deps {
+
+// dispatchLoggerStderr 是 stderr 上的 default 级日志（run.yaml 解析期提示）。
+func dispatchLoggerStderr(command *cobra.Command) func(string) {
+	return func(line string) {
+		fmt.Fprintf(command.ErrOrStderr(), "[dispatch %s] %s\n",
+			time.Now().UTC().Format("2006-01-02T15:04:05.000Z"), line)
+	}
+}
+
+func newDispatchDeps(target dispatchTarget, w io.Writer, store *daemon.Store, stateStore *statestore.Store, verbose, debug bool) dispatcher.Deps {
 	config := target.config
 	repoDir := target.repoDir
 	token := targetToken(target)
+	loggers := newDispatchLoggers(w, verbose, debug)
 	deps := dispatcher.Deps{
-		Config:  config,
-		API:     target.client,
-		RepoDir: repoDir,
-		Log:     dispatchLogger(w),
+		Config:     config,
+		API:        target.client,
+		RepoDir:    repoDir,
+		Log:        loggers.info,
+		LogVerbose: loggers.verbose,
+		LogDebug:   loggers.debug,
 		BuildPrompt: func(kind string, number int64, extra dispatcher.PromptContext) string {
 			extra.Repository = config.Repository.FullName()
 			return dispatcher.BuildPrompt(kind, number, extra)
@@ -733,9 +1024,32 @@ func newDispatchDeps(target dispatchTarget, w io.Writer, store *daemon.Store) di
 		PrepareIssue: func(worktreeDir string) (string, error) {
 			return dispatcher.PrepareBaselineWorktree(repoDir, config.BaseBranch, worktreeDir, token)
 		},
-		RemoveWorktree: func(dir string) error {
-			return dispatcher.RemoveWorktree(repoDir, dir)
-		},
+			RemoveWorktree: func(dir string) error {
+				return dispatcher.RemoveWorktree(repoDir, dir)
+			},
+			// 追问轮的输入：会话开始（since）之后他人（非 assistant 账号）的
+			// 新评论，保证「ai 回复前必须读到消息」
+			FollowUpMessages: func(ctx context.Context, item dispatcher.WorkItem, since time.Time) ([]string, error) {
+				comments, err := target.client.ListIssueCommentsSince(ctx, config.Repository, item.Number, since)
+				if err != nil {
+					return nil, err
+				}
+				var messages []string
+				for _, comment := range comments {
+					if comment.User == config.Reviewer || comment.User == "" {
+						continue
+					}
+					if strings.TrimSpace(comment.Body) == "" {
+						continue
+					}
+					messages = append(messages, fmt.Sprintf("@%s：%s", comment.User, comment.Body))
+				}
+				return messages, nil
+			},
+			PostFollowUpNote: func(ctx context.Context, item dispatcher.WorkItem, count int) error {
+				body := fmt.Sprintf("检测到 %d 条新消息，正在续接会话读取并回应（回复前先完整阅读全部消息）。", count)
+				return target.client.CreateIssueComment(ctx, config.Repository, item.Number, body)
+			},
 		RunSession: func(request dispatcher.SessionRequest) dispatcher.SessionOutcome {
 			item := request.Item
 			// 稳定会话 ID：PR 以 head 为锚点（head 变化换新记录），Issue 以标题
@@ -777,8 +1091,9 @@ func newDispatchDeps(target dispatchTarget, w io.Writer, store *daemon.Store) di
 			}
 			store.SetQueue(host, repository, time.Now(), converted)
 		}
-		deps.OnStart = func(item dispatcher.WorkItem) {
+		deps.OnStart = func(item dispatcher.WorkItem) bool {
 			store.Start(host, repository, convert(item), time.Now())
+			return true
 		}
 		deps.OnFinish = func(item dispatcher.WorkItem, outcome dispatcher.SessionOutcome) {
 			store.Finish(host, repository, convert(item), daemon.Result{
@@ -793,11 +1108,111 @@ func newDispatchDeps(target dispatchTarget, w io.Writer, store *daemon.Store) di
 			})
 		}
 	}
+	if stateStore != nil {
+		host, repository := target.instance.Host, target.repo.Name
+		convert := func(item dispatcher.WorkItem) statestore.Item {
+			return statestore.Item{Kind: item.Kind, Number: item.Number, Title: item.Title}
+		}
+		deps.OnQueue = appendOnQueue(deps.OnQueue, func(items []dispatcher.WorkItem) {
+			converted := make([]statestore.Item, 0, len(items))
+			for _, item := range items {
+				converted = append(converted, convert(item))
+			}
+			if err := stateStore.ReplaceQueue(host, repository, time.Now(), converted); err != nil {
+				deps.Log(fmt.Sprintf("状态库队列写入失败：%v", err))
+			}
+		})
+		// 同一待办同一时刻只一个 claude：sqlite 事务互斥（跨进程），残留 running
+		// 超过两个会话超时视为崩溃残留并接管
+		deps.OnStart = appendOnStartBool(deps.OnStart, func(item dispatcher.WorkItem) bool {
+			started, err := stateStore.StartSession(
+				host, repository, convert(item), time.Now(), "", 2*target.config.SessionTimeout)
+			if err != nil {
+				deps.Log(fmt.Sprintf("状态库会话登记失败：%v", err))
+				return true // 状态库故障不阻断评审，内存守卫仍在
+			}
+			return started
+		})
+		deps.OnFinish = appendOnFinish(deps.OnFinish, func(item dispatcher.WorkItem, outcome dispatcher.SessionOutcome) {
+			if err := stateStore.FinishSession(host, repository, convert(item), time.Time{}, statestore.Result{
+				Subtype:    outcome.Subtype,
+				IsError:    outcome.IsError,
+				Turns:      outcome.NumTurns,
+				CostUSD:    outcome.CostUSD,
+				DurationMS: outcome.DurationMS,
+				SessionID:  outcome.SessionID,
+				Errors:     outcome.Errors,
+			}); err != nil {
+				deps.Log(fmt.Sprintf("状态库会话收尾失败：%v", err))
+			}
+		})
+	}
 	return deps
+}
+
+// appendOnQueue 组合两个队列回调（内存 store 与 sqlite store 各一份）。
+func appendOnQueue(first, second func([]dispatcher.WorkItem)) func([]dispatcher.WorkItem) {
+	if first == nil {
+		return second
+	}
+	return func(items []dispatcher.WorkItem) {
+		first(items)
+		second(items)
+	}
+}
+
+// appendOnStart 组合会话开始回调；second 返回 false 表示互斥拒绝（跳过本待办）。
+func appendOnStartBool(first func(dispatcher.WorkItem) bool, second func(dispatcher.WorkItem) bool) func(dispatcher.WorkItem) bool {
+	if first == nil {
+		return second
+	}
+	return func(item dispatcher.WorkItem) bool {
+		first(item)
+		return second(item)
+	}
+}
+
+// appendOnFinish 组合会话结束回调。
+func appendOnFinish(first func(dispatcher.WorkItem, dispatcher.SessionOutcome), second func(dispatcher.WorkItem, dispatcher.SessionOutcome)) func(dispatcher.WorkItem, dispatcher.SessionOutcome) {
+	if first == nil {
+		return second
+	}
+	return func(item dispatcher.WorkItem, outcome dispatcher.SessionOutcome) {
+		first(item, outcome)
+		second(item, outcome)
+	}
+}
+
+// openStateStore 按 run.yaml 的 state-dir/state-file 打开 SQLite 状态库；未配置
+// 返回 nil（内省与互斥退化为进程内守卫）。runPath 是已定位的 run.yaml 路径
+// （空串表示 run.yaml 模式未激活，状态库随之下线）。
+func openStateStore(runPath string, log func(string)) (*statestore.Store, error) {
+	if strings.TrimSpace(runPath) == "" {
+		return nil, nil
+	}
+	file, err := runcfg.Load(runPath)
+	if err != nil {
+		return nil, err
+	}
+	path := file.StatePath()
+	if path == "" {
+		return nil, nil
+	}
+	store, err := statestore.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	log("状态库：" + path + "（SQLite WAL，内省与跨进程互斥）")
+	return store, nil
 }
 
 func runDispatchLoop(command *cobra.Command, repoFlag, configPath string, options *dispatcherOptions) error {
 	targets, err := resolveDispatchTargets(command, repoFlag, configPath, options)
+	if err != nil {
+		return err
+	}
+	// run.yaml 路径（run.yaml 模式激活时非空）：状态库随之启用
+	runPath, err := runcfg.ResolvePath(options.Run, configPath)
 	if err != nil {
 		return err
 	}
@@ -808,7 +1223,8 @@ func runDispatchLoop(command *cobra.Command, repoFlag, configPath string, option
 	} else {
 		targets = prepareManagedTargets(command, targets)
 	}
-	log := dispatchLogger(command.OutOrStdout())
+	loggers := newDispatchLoggers(command.OutOrStdout(), options.Verbose, options.Debug)
+	log := loggers.info
 	ready := readyTargets(targets)
 	if !options.DryRun {
 		if err := checkTargetsHealth(command.Context(), ready, log); err != nil {
@@ -841,8 +1257,15 @@ func runDispatchLoop(command *cobra.Command, repoFlag, configPath string, option
 	// daemon 运行态：调度循环写入，状态 API 与对话会话的 MCP 读取；未就绪仓库也
 	// 登记（带原因），对话/状态查询能解释「为什么这个仓库没在跑」
 	store := daemon.NewStore(version)
+	// SQLite WAL 共享状态（run.yaml 配了 state-dir/state-file 时启用）：跨进程
+	// 内省 + 同一待办的跨进程互斥
+	stateStore, err := openStateStore(runPath, log)
+	if err != nil {
+		return err
+	}
+	defer stateStore.Close()
 	for _, target := range targets {
-		store.AddTarget(daemon.Target{
+		daemonTarget := daemon.Target{
 			Host:       target.instance.Host,
 			Repository: target.repo.Name,
 			Dir:        target.repoDir,
@@ -851,17 +1274,30 @@ func runDispatchLoop(command *cobra.Command, repoFlag, configPath string, option
 			Ready:      target.skipReason == "",
 			SkipReason: target.skipReason,
 			Provider:   target.config.ProviderName,
-		})
+		}
+		store.AddTarget(daemonTarget)
+		if err := stateStore.UpsertTarget(statestore.Target{
+			Host:       daemonTarget.Host,
+			Repository: daemonTarget.Repository,
+			Dir:        daemonTarget.Dir,
+			BaseBranch: daemonTarget.BaseBranch,
+			Managed:    daemonTarget.Managed,
+			Ready:      daemonTarget.Ready,
+			SkipReason: daemonTarget.SkipReason,
+			Provider:   daemonTarget.Provider,
+		}); err != nil {
+			return fmt.Errorf("登记目标到状态库: %w", err)
+		}
 	}
 	if !options.DryRun {
-		if err := startDaemonServices(command, configPath, options, store); err != nil {
+		if err := startDaemonServices(command, configPath, options, store, stateStore); err != nil {
 			return err
 		}
 	}
 
 	depsList := make([]dispatcher.Deps, 0, len(ready))
 	for _, target := range ready {
-		depsList = append(depsList, newDispatchDeps(target, command.OutOrStdout(), store))
+		depsList = append(depsList, newDispatchDeps(target, command.OutOrStdout(), store, stateStore, options.Verbose, options.Debug))
 	}
 	if options.DryRun {
 		for _, deps := range depsList {
@@ -889,7 +1325,7 @@ func runDispatchList(command *cobra.Command, repoFlag, configPath string, option
 	stdout := command.OutOrStdout()
 	work := 0
 	for _, target := range targets {
-		items, err := dispatcher.ListWork(command.Context(), target.client, target.config.Repository)
+		items, err := dispatcher.ListWork(command.Context(), target.client, target.config.Repository, target.config.Reviewer)
 		if err != nil {
 			return fmt.Errorf("%s %s: %w", target.config.Host, target.config.Repository.FullName(), err)
 		}
@@ -934,7 +1370,7 @@ func runDispatchOneShot(
 		}
 	}
 	config := target.config
-	log := dispatchLogger(command.OutOrStdout())
+	log := dispatchLoggerStderr(command)
 	// 一次性命令同样亮明身份：review 以该账号落库
 	if login, err := target.client.AuthenticatedUser(command.Context()); err == nil {
 		log(fmt.Sprintf("当前账户：@%s（reviewer=%s）", login, config.Reviewer))
@@ -954,7 +1390,7 @@ func runDispatchOneShot(
 		return err
 	}
 	defer dispatcher.ReleaseLock(config.LockFile)
-	deps := newDispatchDeps(target, command.OutOrStdout(), nil)
+	deps := newDispatchDeps(target, command.OutOrStdout(), nil, nil, options.Verbose, options.Debug)
 	dispatcher.ProcessItem(command.Context(), deps, dispatcher.WorkItem{Kind: kind, Number: number})
 	return nil
 }

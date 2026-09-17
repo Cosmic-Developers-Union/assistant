@@ -347,21 +347,26 @@ func (a *giteaAdmin) collaboratorPermission(ctx context.Context, owner, name, us
 	}
 }
 
-// ListAllRepos 列出实例上的全部仓库（站点管理员端点）。
+// ListAllRepos 列出实例上的全部仓库。全局 /admin/repos 端点已在 Gitea 1.27
+// 移除，这里只走仓库搜索：站点管理员令牌 + private=true 覆盖全部私有仓库
+// （本工具支持标准为 Gitea ≥ 1.27，更早版本不在考虑范围）。
 func (a *giteaAdmin) ListAllRepos(ctx context.Context) ([]string, error) {
 	var result []string
 	for page := 1; ; page++ {
-		var batch []struct {
-			FullName string `json:"full_name"`
+		var payload struct {
+			OK   bool `json:"ok"`
+			Data []struct {
+				FullName string `json:"full_name"`
+			} `json:"data"`
 		}
-		path := fmt.Sprintf("/api/v1/admin/repos?page=%d&limit=50", page)
-		if _, err := a.do(ctx, http.MethodGet, path, a.auth(), nil, &batch); err != nil {
-			return nil, fmt.Errorf("列出实例仓库: %w", err)
+		path := fmt.Sprintf("/api/v1/repos/search?page=%d&limit=50&private=true", page)
+		if _, err := a.do(ctx, http.MethodGet, path, a.auth(), nil, &payload); err != nil {
+			return nil, fmt.Errorf("搜索实例仓库: %w", err)
 		}
-		for _, item := range batch {
+		for _, item := range payload.Data {
 			result = append(result, item.FullName)
 		}
-		if len(batch) < 50 {
+		if len(payload.Data) < 50 || page >= 1000 {
 			return result, nil
 		}
 	}

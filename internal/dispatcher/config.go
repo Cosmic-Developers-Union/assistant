@@ -66,6 +66,10 @@ type Config struct {
 	// SessionDir 是 Claude Code 配置根（缺省 $CLAUDE_CONFIG_DIR 或 ~/.claude）：
 	// 文本记录落 <SessionDir>/projects/<SessionProject>/<session-id>.jsonl
 	SessionDir string
+	// SessionArchivePath 是本仓库会话记录（stream-json 原始行）的归档目录
+	// （run.yaml 的 sessions-dir + 命名模板展开；空串表示不归档）。归档按会话
+	// ID 命名，daemon 重启不丢、外部工具可直接内省。
+	SessionArchiveDir string
 	// SessionProject 是本仓库稳定的会话项目目录名（缺省由站点+仓库派生）：
 	// worktree 在 /tmp 用完即删，会话记录的位置不受影响
 	SessionProject string

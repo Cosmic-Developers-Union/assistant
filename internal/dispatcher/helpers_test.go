@@ -47,6 +47,20 @@ type fakeAPI struct {
 	login     string
 	loginErr  error
 	listCalls atomic.Int32
+	// mention 通道：mentioned_by 过滤的返回（mentionPulls / mentionIssues）
+	mentionPulls  []status.Issue
+	mentionIssues []status.Issue
+	// mentionUser 记录 mention 通道的账号参数；两路并发调用，用原子量留痕
+	mentionUser atomic.Pointer[string]
+}
+
+func (f *fakeAPI) ListIssuesMentioning(_ context.Context, _ status.Repository, user, issueType string) ([]status.Issue, error) {
+	f.listCalls.Add(1)
+	f.mentionUser.Store(&user)
+	if issueType == "pulls" {
+		return f.mentionPulls, nil
+	}
+	return f.mentionIssues, nil
 }
 
 func (f *fakeAPI) ListReviewPullRequests(context.Context, status.Repository) ([]status.Issue, error) {

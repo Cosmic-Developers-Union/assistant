@@ -16,6 +16,101 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// run.yaml 存在时 run 完全按它运行：站点/仓库来自 monitor，令牌回退凭据库，
+// 落点与评审工作区按 root/repos-dir/review-*；config.json 退为账号身份层
+// （这里的 config.json 没有 instances，不应阻断运行）。
+func TestResolveDispatchTargetsFromRunYaml(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	data := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", data)
+	configDir := t.TempDir()
+	configPath := filepath.Join(configDir, "config.json")
+	// run.yaml 模式下 config.json 只承担账号身份；instances 可为空（weixin 兜底
+	// 通过校验），不应阻断运行
+	if err := instances.Save(configPath, &instances.File{Weixin: &instances.Weixin{}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ASSISTANT_CONFIG", configPath)
+	withReviewCredentialFor(t, configPath, "https://gitea.example.com")
+
+	runYaml := `
+monitor:
+  https://gitea.example.com:
+    repos:
+      - acme/rocket
+      - acme/lab
+root: ${XDG_DATA_HOME:-$HOME/.local/share}/Cosmic-Developers-Union/assistant
+repos-dir: $root/repos
+review-root: /tmp
+review-name-template: "${instance-name}-{username-or-org}--{name}-{pr|issue}-{index}"
+`
+	runPath := filepath.Join(configDir, "run.yaml")
+	if err := os.WriteFile(runPath, []byte(runYaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stderr := &bytes.Buffer{}
+	command := &cobra.Command{}
+	command.SetOut(&bytes.Buffer{})
+	command.SetErr(stderr)
+	targets, err := resolveDispatchTargets(command, "", configPath, &dispatcherOptions{})
+	if err != nil {
+		t.Fatalf("resolveDispatchTargets: %v", err)
+	}
+	if len(targets) != 2 {
+		t.Fatalf("targets = %d, want 2", len(targets))
+	}
+	first := targets[0]
+	if first.config.Host != "https://gitea.example.com" || first.config.Repository.FullName() != "acme/rocket" {
+		t.Errorf("首个目标 = %s %s", first.config.Host, first.config.Repository.FullName())
+	}
+	if first.instance.Host != "https://gitea.example.com" {
+		t.Errorf("instance.Host = %q（受管克隆与 daemon 状态按它键控）", first.instance.Host)
+	}
+	if !first.managed {
+		t.Error("run.yaml 目标应是受管克隆")
+	}
+	// 落点：root 决定的 repos 根
+	wantRepo := filepath.Join(data, "Cosmic-Developers-Union", "assistant", "repos", "gitea.example.com", "acme", "rocket")
+	if first.repoDir != wantRepo {
+		t.Errorf("repoDir = %q, want %q", first.repoDir, wantRepo)
+	}
+	// 日志/锁在检出之外的状态目录
+	wantState := filepath.Join(data, "Cosmic-Developers-Union", "assistant", "state", "gitea.example.com", "acme", "rocket")
+	if first.config.LogDir != filepath.Join(wantState, "logs") || first.config.LockFile != filepath.Join(wantState, "dispatcher.lock") {
+		t.Errorf("LogDir = %q LockFile = %q", first.config.LogDir, first.config.LockFile)
+	}
+	if !first.config.SyncMirror {
+		t.Error("受管克隆应恒开镜像同步")
+	}
+	// 评审工作区：review-root + 命名模板展开（模板已含站点与仓库）
+	wantWorktree := filepath.Join("/tmp", "gitea.example.com-acme--rocket", "worktrees")
+	if first.config.WorktreeRoot != wantWorktree {
+		t.Errorf("WorktreeRoot = %q, want %q", first.config.WorktreeRoot, wantWorktree)
+	}
+	// monitor 未写 token 时回退凭据库
+	if first.config.AccessToken == "" {
+		t.Error("AccessToken 不应为空（回退凭据库）")
+	}
+	if !strings.Contains(stderr.String(), "monitor[https://gitea.example.com]") {
+		t.Errorf("stderr 缺少 monitor 日志：%s", stderr.String())
+	}
+
+	// --repo 过滤仍可用
+	filtered, err := resolveDispatchTargets(command, "acme/lab", configPath, &dispatcherOptions{})
+	if err != nil {
+		t.Fatalf("--repo 过滤: %v", err)
+	}
+	if len(filtered) != 1 || filtered[0].config.Repository.FullName() != "acme/lab" {
+		t.Fatalf("--repo 过滤结果 = %+v", filtered)
+	}
+
+	// 不在 run.yaml 里的仓库报错
+	if _, err := resolveDispatchTargets(command, "acme/other", configPath, &dispatcherOptions{}); err == nil {
+		t.Error("不在 monitor repos 中的仓库应报错")
+	}
+}
+
 // 未 setup 的实例（无 repos）应跳过并提示，不阻断其他实例。
 func TestResolveDispatchTargetsSkipsInstancesWithoutRepos(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())

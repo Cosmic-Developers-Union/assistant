@@ -32,7 +32,7 @@ func TestStartDaemonServicesServesAPI(t *testing.T) {
 	command.SetOut(&bytes.Buffer{})
 	store := daemon.NewStore("test-version")
 	store.AddTarget(daemon.Target{Host: "https://gitea.example.com", Repository: "acme/repo"})
-	if err := startDaemonServices(command, configPath, &dispatcherOptions{APIListen: "127.0.0.1:0"}, store); err != nil {
+	if err := startDaemonServices(command, configPath, &dispatcherOptions{APIListen: "127.0.0.1:0"}, store, nil); err != nil {
 		t.Fatalf("startDaemonServices: %v", err)
 	}
 
