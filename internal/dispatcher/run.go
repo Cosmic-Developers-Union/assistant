@@ -559,7 +559,7 @@ func RunSession(options SessionOptions) SessionOutcome {
 		if container != "" {
 			_ = exec.Command("docker", "kill", container).Run()
 		}
-		_ = command.Process.Signal(syscall.SIGTERM)
+		_ = terminateProcess(command.Process)
 		time.AfterFunc(killGrace, func() { _ = command.Process.Kill() })
 	})
 	waitErr := command.Wait()
@@ -580,8 +580,8 @@ func RunSession(options SessionOptions) SessionOutcome {
 			how := ""
 			if exitCode > 0 {
 				how = fmt.Sprintf("退出码 %d", exitCode)
-			} else if status, ok := command.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() {
-				how = fmt.Sprintf("被信号 %s 终止", signalName(status.Signal()))
+			} else if signaled, name := processSignaled(command.ProcessState); signaled {
+				how = fmt.Sprintf("被信号 %s 终止", name)
 			} else {
 				how = "异常终止"
 			}

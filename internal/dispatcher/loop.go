@@ -18,7 +18,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"assistant/internal/claudecfg"
@@ -134,12 +133,6 @@ func AcquireLock(lockFile string, log func(string)) error {
 // ReleaseLock 释放单飞锁（一次性命令 review/triage 用；RunLoop 退出时自管）。
 func ReleaseLock(lockFile string) {
 	_ = os.Remove(lockFile)
-}
-
-// pidAlive 探测进程存活（signal 0 不实际发送）。
-func pidAlive(pid int) bool {
-	err := syscall.Kill(pid, 0)
-	return err == nil || err == syscall.EPERM
 }
 
 func stamp(now time.Time) string {
