@@ -10,8 +10,18 @@ on:
   issue_comment:
     types: [created]
   schedule:
-    - cron: "*/5 * * * *"
+    # 兜底节奏：事件驱动覆盖实时路径，schedule 只补丢事件/runner 离线的场景。
+    # 密集 schedule 在 runner 离线时会以固定速率制造积压（Gitea 不会自动取消
+    # 过期 queued run），runner 恢复后还要逐个消费陈年 run。
+    - cron: "*/30 * * * *"
   workflow_dispatch:
+# 防堆积（latest-wins）：同一时刻组内至多一个 run 在跑/排队，新 run 开始时
+# 自动取消组内其余 run。sync/automerge 幂等且便宜，被取消后由下一个事件或
+# 下一个 schedule 重来即可；没有这一节，runner 掉线再恢复会先清几十上百个
+# 陈年 run 的队列。需要 Gitea 1.26+（GitHub 风格 concurrency）。
+concurrency:
+  group: assistant
+  cancel-in-progress: true
 jobs:
   sync:
     runs-on: ubuntu-latest
