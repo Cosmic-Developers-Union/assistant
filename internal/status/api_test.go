@@ -539,3 +539,26 @@ func TestClientVersionProbeDoesNotPanicOnRetry(t *testing.T) {
 		})
 	}
 }
+
+func TestReviewerRespondedOnHead(t *testing.T) {
+	reviews := []Review{
+		{User: "ai", State: ReviewStateApproved, CommitID: "head-1"},
+	}
+	if !ReviewerRespondedOnHead(reviews, "ai", "head-1") {
+		t.Error("当前 head 上的批准应视为已回应")
+	}
+	if ReviewerRespondedOnHead(reviews, "ai", "head-2") {
+		t.Error("head 推进后旧批准不再计数（需要重新评审）")
+	}
+	dismissed := []Review{{User: "ai", State: ReviewStateApproved, CommitID: "head-1", Dismissed: true}}
+	if ReviewerRespondedOnHead(dismissed, "ai", "head-1") {
+		t.Error("被 dismiss 的批准不算回应")
+	}
+	comment := []Review{{User: "ai", State: ReviewStateComment, CommitID: ""}}
+	if !ReviewerRespondedOnHead(comment, "ai", "head-9") {
+		t.Error("无 CommitID 的历史回应保守视为已回应")
+	}
+	if ReviewerRespondedOnHead(reviews, "bob", "head-1") {
+		t.Error("回应必须来自 reviewer 本人")
+	}
+}

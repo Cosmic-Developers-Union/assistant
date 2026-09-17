@@ -42,8 +42,8 @@ func planDeps(t *testing.T, api API, config Config, logs *[]string) Deps {
 func TestDryRunPassListsPlanWithoutSideEffects(t *testing.T) {
 	var logs []string
 	api := &fakeAPI{
-		pulls:  []status.Issue{{Index: 67, Title: "fix: draft 状态", IsPull: true}},
-		issues: []status.Issue{{Index: 66, Title: "ci: 分层重构"}},
+		requestedPulls: []status.PullRequest{{Index: 67, Title: "fix: draft 状态"}},
+		issues:         []status.Issue{{Index: 66, Title: "ci: 分层重构"}},
 	}
 	deps := planDeps(t, api, testConfig(), &logs)
 	if err := DryRunPass(context.Background(), deps); err != nil {

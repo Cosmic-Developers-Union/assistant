@@ -260,6 +260,63 @@ func (c *Client) ListReviewPullRequests(ctx context.Context, repository Reposito
 	return c.listIssues(ctx, repository, gitea.IssueTypePull, []string{reviewLabelName})
 }
 
+// ListPullRequestsRequestingReview 返回存在待处理评审请求的 open PR：原生
+// requested_reviewers 含 reviewer（团队请求恒算），且该 reviewer 尚未在当前
+// head 上提交正式回应。Gitea 在 reviewer 提交 review 后**不消费**请求记录，
+// 「请求存在」不等于「待处理」——回应判定以 reviews 为准；作者推送推进 head
+// 后旧回应不再计数（评审锚定 head，需要重新评审）。
+func (c *Client) ListPullRequestsRequestingReview(
+	ctx context.Context,
+	repository Repository,
+	reviewer string,
+) ([]PullRequest, error) {
+	pullRequests, err := c.ListOpenPullRequests(ctx, repository)
+	if err != nil {
+		return nil, err
+	}
+	var result []PullRequest
+	for _, pullRequest := range pullRequests {
+		requested := pullRequest.RequestedReviewersTeams
+		if !requested {
+			for _, user := range pullRequest.RequestedReviewers {
+				if user == reviewer {
+					requested = true
+					break
+				}
+			}
+		}
+		if !requested {
+			continue
+		}
+		reviews, err := c.ListPullReviews(ctx, repository, pullRequest.Index)
+		if err != nil {
+			return nil, fmt.Errorf("list reviews for pull request #%d: %w", pullRequest.Index, err)
+		}
+		if !ReviewerRespondedOnHead(reviews, reviewer, pullRequest.HeadSHA) {
+			result = append(result, pullRequest)
+		}
+	}
+	return result, nil
+}
+
+// ReviewerRespondedOnHead 报告 reviewer 是否已在 headSHA 上提交过正式回应
+// （approved / request changes / comment，未被 dismiss）。CommitID 为空的历史
+// 回应视为已回应（无法定位提交时保守取「已处理」，避免无法判定的重放）。
+func ReviewerRespondedOnHead(reviews []Review, reviewer, headSHA string) bool {
+	for _, review := range reviews {
+		if review.User != reviewer || review.Dismissed {
+			continue
+		}
+		switch review.State {
+		case ReviewStateApproved, ReviewStateRequestChanges, ReviewStateComment:
+			if review.CommitID == "" || review.CommitID == headSHA {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (c *Client) ListOpenIssues(ctx context.Context, repository Repository) ([]Issue, error) {
 	return c.listIssues(ctx, repository, gitea.IssueTypeIssue, nil)
 }

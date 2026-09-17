@@ -32,8 +32,9 @@ func newGuardHarness(t *testing.T, messages []string) *guardHarness {
 	return h
 }
 
-// TestGuardStateReleaseByChannel 验证两通道守卫独立解除：settled 只看标签清单，
-// handled 只看 mention 清单——条目从一路消失不影响另一路的守卫。
+// TestGuardStateReleaseByChannel 验证两通道守卫独立解除：settled 只看请求类
+// 清单（review 请求 / 分诊标签），handled 只看 mention 清单——条目从一路消失
+// 不影响另一路的守卫。
 func TestGuardStateReleaseByChannel(t *testing.T) {
 	guards := newGuardState()
 	guards.apply("issue#6", ProcessResult{Settled: true, Responded: true}, time.Date(2026, 9, 17, 14, 36, 1, 0, time.UTC))
@@ -79,8 +80,14 @@ func TestSelectDispatchByChannel(t *testing.T) {
 		wantMode string // "" = 不派发；"full" = 全量；"followup" = 追问
 	}{
 		{
-			name:     "标签未 settled：全量派发",
+			name:     "分诊标签未 settled：全量派发",
 			item:     WorkItem{Kind: KindIssue, Number: 6, Labeled: true},
+			wantOK:   true,
+			wantMode: "full",
+		},
+		{
+			name:     "review 请求未 settled：全量派发",
+			item:     WorkItem{Kind: KindPull, Number: 9, Requested: true},
 			wantOK:   true,
 			wantMode: "full",
 		},

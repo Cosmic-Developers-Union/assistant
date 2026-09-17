@@ -2,19 +2,19 @@
 //
 // 两个通道是**不同类型的行为**，不只是两条检索路径：
 //
-//   - 标签通道（status/review、status/triage）：标签是「请求」本体，一次打标
-//     即一个待处理请求。处理后（review 已提交 / triage 标签移除）标签会从清单
-//     收敛，条目自然出清——重复信号由 settled 守卫吸收，守卫在条目离开标签清单
-//     后解除。
 //   - mention 通道（@reviewer，Gitea 服务端 mentioned_by 过滤）：mention 是
 //     「消息流」。正文或评论里的 @ai 会让条目**持续**留在清单里（直到关闭或
 //     mention 被编辑掉），清单本身不携带「哪条 mention 是新的」。因此不能照搬
 //     settled：已回应条目改记水位线（最后回应时刻），水位线之后出现他人新评论
 //     才重新触发，且以追问轮（同一会话续聊）回应，不重跑全量协议。条目离开
 //     mention 清单（关闭）即清除水位线，重新 mention 视为全新请求。
-//
-// 标签由 sync 继续维护，仅作为观测产物——看板、报表与既有集成仍然可用，但它们
-// 的缺失不再阻断处理。
+//   - review 请求通道（PR，Gitea 原生 requested_reviewers）：请求即「请求」
+//     本体——reviewer 在当前 head 上提交正式回应后待处理状态自然出清（Gitea
+//     不消费请求记录，出清判定以 reviews 为准）；作者推进 head 后旧回应失效，
+//     条目重新入队。重复信号由 settled 守卫吸收，条目离开清单后解除。
+//   - 标签通道（status/triage，仅 Issue）：兼容人工打标签触发分诊的场景。
+//     PR 的 status/review 标签与全部状态标签由 sync 继续维护，但**只是观测
+//     产物**（看板、报表、既有集成），不再是任何工作的触发源。
 package dispatcher
 
 import (
@@ -39,11 +39,14 @@ type WorkItem struct {
 	Kind   string
 	Number int64
 	Title  string
-	// 通道命中标记，可同时为真（两路都命中时合并为一份待办）。
+	// 通道命中标记，可同时为真（多路都命中时合并为一份待办）。
 	// Mention：mention 通道命中——条目在 @reviewer 的 mentioned_by 清单里；
-	// Labeled：标签通道命中——条目挂着 status/review 或 status/triage。
-	Mention bool
-	Labeled bool
+	// Requested：review 请求通道命中——reviewer 被原生请求评审且未在当前
+	// head 上回应（仅 PR）；
+	// Labeled：标签通道命中——Issue 挂着 status/triage（PR 标签不再是触发源）。
+	Mention   bool
+	Requested bool
+	Labeled   bool
 	// Updated 是条目最近活动时刻（Gitea 服务端时钟）：mention 水位线预检用，
 	// 未变化条目跳过新评论细查。
 	Updated time.Time
@@ -71,7 +74,9 @@ func (w WorkItem) label() string {
 
 // API 是 dispatcher 需要的 Gitea 只读能力（*status.Client 满足）。
 type API interface {
-	ListReviewPullRequests(context.Context, status.Repository) ([]status.Issue, error)
+	// ListPullRequestsRequestingReview 是 review 请求通道：Gitea 原生
+	// requested_reviewers 含 reviewer 且未在当前 head 上回应的 open PR。
+	ListPullRequestsRequestingReview(context.Context, status.Repository, string) ([]status.PullRequest, error)
 	ListTriageIssues(context.Context, status.Repository) ([]status.Issue, error)
 	// ListIssuesMentioning 是 mention 通道：Gitea 服务端 mentioned_by 过滤，
 	// 返回 mention 了 reviewer 的 open 条目（issueType 为 "issues"/"pulls"）。
@@ -82,37 +87,45 @@ type API interface {
 	AuthenticatedUser(context.Context) (string, error)
 }
 
-// ListWork 检索全部待办：mention 通道（@reviewer 提及）与标签通道
-// （status/review / status/triage）两路并集，通道命中合并进同一条待办
-// （WorkItem.Mention / WorkItem.Labeled），按编号**倒序**（新的待办优先处理；
-// 用户刚 @ai 的条目排在最前）。
+// ListWork 检索全部待办：mention 通道（@reviewer 提及）、review 请求通道
+// （原生 requested_reviewers）与标签通道（status/triage，仅 Issue）三路并集，
+// 通道命中合并进同一条待办（WorkItem 通道标记），按编号**倒序**（新的待办优先
+// 处理；用户刚 @ai 的条目排在最前）。
 func ListWork(ctx context.Context, api API, repository status.Repository, reviewer string) ([]WorkItem, error) {
 	type result struct {
 		items []status.Issue
 		err   error
 	}
 	issuesType := "issues"
-	pullsType := "pulls"
 	const channels = 4
 	results := make([]result, channels)
 	start := func(index int, fetch func() ([]status.Issue, error)) {
 		items, err := fetch()
 		results[index] = result{items: items, err: err}
 	}
+	requested := func() ([]status.Issue, error) {
+		// review 请求通道按 PullRequest 检索，这里折成统一视图
+		pulls, err := api.ListPullRequestsRequestingReview(ctx, repository, reviewer)
+		if err != nil {
+			return nil, err
+		}
+		issues := make([]status.Issue, 0, len(pulls))
+		for _, pull := range pulls {
+			issues = append(issues, status.Issue{Index: pull.Index, Title: pull.Title, IsPull: true})
+		}
+		return issues, nil
+	}
 	var waitGroup sync.WaitGroup
 	waitGroup.Add(channels)
 	go func() {
 		defer waitGroup.Done()
-		start(0, func() ([]status.Issue, error) { return api.ListIssuesMentioning(ctx, repository, reviewer, pullsType) })
+		start(0, func() ([]status.Issue, error) { return api.ListIssuesMentioning(ctx, repository, reviewer, "pulls") })
 	}()
 	go func() {
 		defer waitGroup.Done()
 		start(1, func() ([]status.Issue, error) { return api.ListIssuesMentioning(ctx, repository, reviewer, issuesType) })
 	}()
-	go func() {
-		defer waitGroup.Done()
-		start(2, func() ([]status.Issue, error) { return api.ListReviewPullRequests(ctx, repository) })
-	}()
+	go func() { defer waitGroup.Done(); start(2, requested) }()
 	go func() {
 		defer waitGroup.Done()
 		start(3, func() ([]status.Issue, error) { return api.ListTriageIssues(ctx, repository) })
@@ -124,19 +137,18 @@ func ListWork(ctx context.Context, api API, repository status.Repository, review
 		}
 	}
 	work := make([]WorkItem, 0, len(results[0].items)+len(results[1].items)+len(results[2].items)+len(results[3].items))
-	// mention 通道由 Gitea 的 IsPull 定型；标签通道按来源过滤（labels 过滤叠加
-	// type 时 Gitea 偶发混入纯 Issue，双保险保留）
+	// mention 通道由 Gitea 的 IsPull 定型；标签通道仅剩 Issue 分诊
 	work = append(work, workItems(results[0].items, mentionChannel)...)
 	work = append(work, workItems(results[1].items, mentionChannel)...)
-	work = append(work, workItems(results[2].items, labelChannel, KindPull)...)
+	work = append(work, workItems(results[2].items, requestedChannel)...)
 	work = append(work, workItems(results[3].items, labelChannel, KindIssue)...)
 	slices.SortFunc(work, func(a, b WorkItem) int { return cmp.Compare(b.Number, a.Number) })
 	return dedupeWork(work), nil
 }
 
 // dedupeWork 保证同一仓库内 (kind, number) 唯一：请求的初始提示词与完成判定
-// 都以它为键，重复条目会导致同一待办被并发拉起多个会话。mention 与标签两路
-// 命中同一待办时合并为一份（通道标记按或合并，守卫各自独立生效）。
+// 都以它为键，重复条目会导致同一待办被并发拉起多个会话。多路命中同一待办时
+// 合并为一份（通道标记按或合并，守卫各自独立生效）。
 func dedupeWork(work []WorkItem) []WorkItem {
 	if len(work) < 2 {
 		return work
@@ -146,6 +158,7 @@ func dedupeWork(work []WorkItem) []WorkItem {
 		last := &result[len(result)-1]
 		if last.Kind == item.Kind && last.Number == item.Number {
 			last.Mention = last.Mention || item.Mention
+			last.Requested = last.Requested || item.Requested
 			last.Labeled = last.Labeled || item.Labeled
 			continue
 		}
@@ -159,12 +172,13 @@ type channel int
 
 const (
 	mentionChannel channel = iota
+	requestedChannel
 	labelChannel
 )
 
-// workItems 把条目列表折成待办并打上通道标记。标签通道传 kind 按来源定型并
-// 过滤混入条目（labels 过滤叠加 type 时 Gitea 偶发混入纯 Issue，双保险保留）；
-// mention 通道不传 kind，按条目自身的 IsPull 区分。
+// workItems 把条目列表折成待办并打上通道标记。标签通道传 kind 按来源定型
+// （status/triage 只可能是 Issue；叠加 type 时 Gitea 偶发混入条目，双保险
+// 过滤）；mention 通道按条目自身的 IsPull 区分；review 请求通道按构造已是 PR。
 func workItems(items []status.Issue, ch channel, kind ...string) []WorkItem {
 	forced := ""
 	if len(kind) > 0 {
@@ -183,12 +197,13 @@ func workItems(items []status.Issue, ch channel, kind ...string) []WorkItem {
 			continue
 		}
 		work = append(work, WorkItem{
-			Kind:    kindValue,
-			Number:  item.Index,
-			Title:   item.Title,
-			Updated: item.Updated,
-			Mention: ch == mentionChannel,
-			Labeled: ch == labelChannel,
+			Kind:      kindValue,
+			Number:    item.Index,
+			Title:     item.Title,
+			Updated:   item.Updated,
+			Mention:   ch == mentionChannel,
+			Requested: ch == requestedChannel,
+			Labeled:   ch == labelChannel,
 		})
 	}
 	return work

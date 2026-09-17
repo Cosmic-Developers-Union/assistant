@@ -36,7 +36,6 @@ func testConfig(overrides ...func(*Config)) Config {
 
 // fakeAPI 是 dispatcher.API 的测试桩：各方法返回预置结果并按调用计数。
 type fakeAPI struct {
-	pulls   []status.Issue
 	issues  []status.Issue
 	pull    status.PullRequest
 	pullErr error
@@ -52,6 +51,9 @@ type fakeAPI struct {
 	mentionIssues []status.Issue
 	// mentionUser 记录 mention 通道的账号参数；两路并发调用，用原子量留痕
 	mentionUser atomic.Pointer[string]
+	// review 请求通道：requested_reviewers 命中且未在当前 head 上回应的 PR
+	requestedPulls    []status.PullRequest
+	requestedReviewer atomic.Pointer[string]
 }
 
 func (f *fakeAPI) ListIssuesMentioning(_ context.Context, _ status.Repository, user, issueType string) ([]status.Issue, error) {
@@ -63,9 +65,10 @@ func (f *fakeAPI) ListIssuesMentioning(_ context.Context, _ status.Repository, u
 	return f.mentionIssues, nil
 }
 
-func (f *fakeAPI) ListReviewPullRequests(context.Context, status.Repository) ([]status.Issue, error) {
+func (f *fakeAPI) ListPullRequestsRequestingReview(_ context.Context, _ status.Repository, reviewer string) ([]status.PullRequest, error) {
 	f.listCalls.Add(1)
-	return f.pulls, nil
+	f.requestedReviewer.Store(&reviewer)
+	return f.requestedPulls, nil
 }
 
 func (f *fakeAPI) ListTriageIssues(context.Context, status.Repository) ([]status.Issue, error) {

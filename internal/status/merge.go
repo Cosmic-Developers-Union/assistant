@@ -9,13 +9,17 @@ import (
 	"strings"
 )
 
-// AutoMerge 对带 status/approved + awaiting/merge 标签的 open PR 执行自动合并：
+// AutoMerge 对内容评审者已在当前 head 上正式批准的 open PR 执行自动合并：
 // 先以当前身份维护官方评审请求（Gitea 只允许 PR 作者或仓库管理员选择 reviewer，
 // 因此合并 job 的 merge 令牌是唯一能登记/撤回请求的自动化身份），再重读最新状态
 // 确认批准仍有效、未落后、无冲突、必要检查全绿后，以 squash 方式合并。一次运行
-// 至多合并一个 PR——main 随之前移，其余所有 open PR 因此过期，由 sync 打回
-// changes-requested，作者 rebase 并重新获准后才能再次进入合并队列。
-// 由 Gitea Actions（事件 + schedule）驱动，幂等安全：门禁不满足时本轮跳过。
+// 至多合并一个 PR——main 随之前移，其余所有 open PR 因此过期，作者 rebase 并
+// 重新获准后才能再次进入合并队列。由 Gitea Actions（事件 + schedule）驱动，
+// 幂等安全：门禁不满足时本轮跳过。
+//
+// 新规范：合并不再依赖标签——门禁是内容评审者（默认 ai）对当前 head 的官方
+// 批准（approved、未 dismiss、CommitID==head）。标签（status/approved、
+// awaiting/merge 等）由 sync 继续维护，但只是观测产物。
 func (m *Manager) AutoMerge(ctx context.Context) error {
 	if err := m.ReconcileReviewRequests(ctx); err != nil {
 		return err
@@ -44,17 +48,6 @@ func (m *Manager) autoMergeRepository(ctx context.Context, repository Repository
 	if err != nil {
 		return false, err
 	}
-	var candidates []PullRequest
-	for _, pullRequest := range pullRequests {
-		if !hasLabel(pullRequest.Labels, approvedLabelName) || !hasLabel(pullRequest.Labels, awaitingMergeLabelName) {
-			continue
-		}
-		candidates = append(candidates, pullRequest)
-	}
-	if len(candidates) == 0 {
-		m.logf("%s: 没有 status/approved 的 PR，无合并动作", repository.FullName())
-		return false, nil
-	}
 	protections, err := m.api.ListBranchProtections(ctx, repository)
 	if IsPermissionError(err) {
 		// 与 sync 的必要检查门禁同款降级：读取分支保护需要 repo admin，普通
@@ -66,8 +59,8 @@ func (m *Manager) autoMergeRepository(ctx context.Context, repository Repository
 		return false, err
 	}
 	// 编号升序：先来先合并
-	slices.SortFunc(candidates, func(a, b PullRequest) int { return cmp.Compare(a.Index, b.Index) })
-	for _, candidate := range candidates {
+	slices.SortFunc(pullRequests, func(a, b PullRequest) int { return cmp.Compare(a.Index, b.Index) })
+	for _, candidate := range pullRequests {
 		merged, err := m.autoMergePullRequest(ctx, repository, candidate, protections)
 		if err != nil {
 			return false, err
@@ -81,6 +74,8 @@ func (m *Manager) autoMergeRepository(ctx context.Context, repository Repository
 
 // autoMergePullRequest 对单个候选执行合并门禁并尝试合并。合并前重读最新状态：
 // 候选来自列表快照，等待期间评审状态可能已被 sync 更新（批准撤销、打回、落后）。
+// 合并门禁 = 内容评审者对当前 head 的官方批准（approved、未 dismiss、
+// CommitID==head）+ 未落后 + 可合并 + 必要检查全绿；标签不参与判定。
 func (m *Manager) autoMergePullRequest(
 	ctx context.Context,
 	repository Repository,
@@ -98,9 +93,6 @@ func (m *Manager) autoMergePullRequest(
 	if !pullRequest.Open {
 		return skip("PR 已关闭")
 	}
-	if !hasLabel(pullRequest.Labels, approvedLabelName) || !hasLabel(pullRequest.Labels, awaitingMergeLabelName) {
-		return skip("status/approved 标签已不在（评审状态在等待期间被更新）")
-	}
 	if pullRequest.Draft || workInProgress(pullRequest.Title) {
 		return skip("PR 处于草稿或 WIP 状态")
 	}
@@ -114,6 +106,13 @@ func (m *Manager) autoMergePullRequest(
 	if behind {
 		// 批准只背书评审时的那批提交：main 前移后 PR 过期，必须 rebase 并重新获准
 		return skip("已落后基础分支（main 前移使已批准的 PR 过期），需 rebase 后重新评审")
+	}
+	reviews, err := m.api.ListPullReviews(ctx, repository, pullRequest.Index)
+	if err != nil {
+		return false, err
+	}
+	if !reviewerApprovedOnHead(reviews, m.contentReviewer, pullRequest.HeadSHA) {
+		return skip(fmt.Sprintf("内容评审者 @%s 尚未在当前 head（%.10s）上批准", m.contentReviewer, pullRequest.HeadSHA))
 	}
 	failedChecks, pendingChecks, err := m.checkStates(ctx, repository, pullRequest, protections)
 	if err != nil {
@@ -140,6 +139,24 @@ func (m *Manager) autoMergePullRequest(
 	}
 	m.logf("%s#%d: 已 squash 合并 %q；main 前移，本轮不再处理其余 PR", repository.FullName(), pullRequest.Index, pullRequest.Title)
 	return true, nil
+}
+
+// reviewerApprovedOnHead 报告内容评审者是否在 headSHA 上提交过未被 dismiss 的
+// approved review。作者推进 head 后旧批准失效（dismiss_stale_approvals 会由
+// Gitea 落实，这里再按 CommitID 双保险），需要重新评审后才能合并。
+func reviewerApprovedOnHead(reviews []Review, reviewer, headSHA string) bool {
+	if reviewer == "" {
+		return false
+	}
+	for _, review := range reviews {
+		if review.User != reviewer || review.Dismissed || review.State != ReviewStateApproved {
+			continue
+		}
+		if review.CommitID == "" || review.CommitID == headSHA {
+			return true
+		}
+	}
+	return false
 }
 
 // countersignState 以当前令牌身份（状态评审者）对 head 提交状态批准：核验

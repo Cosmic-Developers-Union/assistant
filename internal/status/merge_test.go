@@ -14,23 +14,22 @@ func newAutoMergeAPI(t *testing.T) (*fakeAPI, Repository) {
 	return newFakeAPI(repository, completeLabels()), repository
 }
 
-// withApprovedLabels 给 PR 挂上 status/approved + awaiting/merge——sync 判定
-// 「可以合并」后导出的标签组合，也是 automerge 的候选过滤条件。
-func withApprovedLabels(t *testing.T, pullRequest PullRequest) PullRequest {
-	t.Helper()
-	labels := completeLabels()
-	pullRequest.Labels = []Label{
-		labelByName(t, labels, approvedLabelName),
-		labelByName(t, labels, awaitingMergeLabelName),
-	}
-	return pullRequest
+// withReviewerApproval 以内容评审者（ai）身份对 PR 当前 head 提交官方批准——
+// automerge 的合并门禁（新规范：不依赖标签，批准锚定 head）。
+func withReviewerApproval(api *fakeAPI, repository Repository, index int64, headSHA string) {
+	key := pullRequestKey(repository, index)
+	api.reviews[key] = append(api.reviews[key], Review{
+		ID: int64(len(api.reviews[key]) + 1), State: ReviewStateApproved,
+		Submitted: time.Unix(10, 0), User: "ai", CommitID: headSHA, Official: true,
+	})
 }
 
 func TestAutoMergeMergesApprovedFreshPullRequest(t *testing.T) {
 	api, repository := newAutoMergeAPI(t)
-	candidate := withApprovedLabels(t, mergeablePullRequest(21, nil))
+	candidate := mergeablePullRequest(21, nil)
 	api.pullRequests[repository.FullName()] = []PullRequest{candidate}
 	api.current[pullRequestKey(repository, 21)] = candidate
+	withReviewerApproval(api, repository, 21, "head")
 
 	if err := NewManager(api).AutoMerge(t.Context()); err != nil {
 		t.Fatalf("AutoMerge() error = %v", err)
@@ -44,9 +43,10 @@ func TestAutoMergeMergesApprovedFreshPullRequest(t *testing.T) {
 // 的第二票），随后立即合并——会签与合并是同一机械动作，时序严格先后。
 func TestAutoMergeCountersignsThenMerges(t *testing.T) {
 	api, repository := newAutoMergeAPI(t)
-	candidate := withApprovedLabels(t, mergeablePullRequest(21, nil))
+	candidate := mergeablePullRequest(21, nil)
 	api.pullRequests[repository.FullName()] = []PullRequest{candidate}
 	api.current[pullRequestKey(repository, 21)] = candidate
+	withReviewerApproval(api, repository, 21, "head")
 
 	manager := NewManager(api, WithStateReviewer("merge"))
 	if err := manager.AutoMerge(t.Context()); err != nil {
@@ -74,13 +74,14 @@ func TestAutoMergeCountersignsThenMerges(t *testing.T) {
 // 时不重复盖章，直接重试合并。
 func TestAutoMergeCountersignDedupedPerHead(t *testing.T) {
 	api, repository := newAutoMergeAPI(t)
-	candidate := withApprovedLabels(t, mergeablePullRequest(21, nil))
+	candidate := mergeablePullRequest(21, nil)
 	api.pullRequests[repository.FullName()] = []PullRequest{candidate}
 	api.current[pullRequestKey(repository, 21)] = candidate
-	api.reviews[pullRequestKey(repository, 21)] = []Review{{
+	withReviewerApproval(api, repository, 21, "head")
+	api.reviews[pullRequestKey(repository, 21)] = append(api.reviews[pullRequestKey(repository, 21)], Review{
 		ID: 1, State: ReviewStateApproved, Submitted: time.Unix(10, 0),
 		User: "merge", CommitID: candidate.HeadSHA, Official: true,
-	}}
+	})
 
 	manager := NewManager(api, WithStateReviewer("merge"))
 	if err := manager.AutoMerge(t.Context()); err != nil {
@@ -100,9 +101,10 @@ func TestAutoMergeCountersignDedupedPerHead(t *testing.T) {
 // 未配置状态评审者时保持历史行为：不产生会签，仅依赖 automerge 自身的门禁。
 func TestAutoMergeWithoutStateReviewerSkipsCountersign(t *testing.T) {
 	api, repository := newAutoMergeAPI(t)
-	candidate := withApprovedLabels(t, mergeablePullRequest(21, nil))
+	candidate := mergeablePullRequest(21, nil)
 	api.pullRequests[repository.FullName()] = []PullRequest{candidate}
 	api.current[pullRequestKey(repository, 21)] = candidate
+	withReviewerApproval(api, repository, 21, "head")
 
 	if err := NewManager(api).AutoMerge(t.Context()); err != nil {
 		t.Fatalf("AutoMerge() error = %v", err)
@@ -119,11 +121,13 @@ func TestAutoMergeWithoutStateReviewerSkipsCountersign(t *testing.T) {
 // 必须留给下一轮（sync 会把他们打回 changes-requested）。
 func TestAutoMergeMergesAtMostOnePullRequestPerRun(t *testing.T) {
 	api, repository := newAutoMergeAPI(t)
-	first := withApprovedLabels(t, mergeablePullRequest(21, nil))
-	second := withApprovedLabels(t, mergeablePullRequest(33, nil))
+	first := mergeablePullRequest(21, nil)
+	second := mergeablePullRequest(33, nil)
 	api.pullRequests[repository.FullName()] = []PullRequest{second, first}
 	api.current[pullRequestKey(repository, 21)] = first
+	withReviewerApproval(api, repository, 21, "head")
 	api.current[pullRequestKey(repository, 33)] = second
+	withReviewerApproval(api, repository, 33, "head")
 
 	if err := NewManager(api).AutoMerge(t.Context()); err != nil {
 		t.Fatalf("AutoMerge() error = %v", err)
@@ -135,9 +139,10 @@ func TestAutoMergeMergesAtMostOnePullRequestPerRun(t *testing.T) {
 
 func TestAutoMergeSkipsStalePullRequest(t *testing.T) {
 	api, repository := newAutoMergeAPI(t)
-	candidate := withApprovedLabels(t, stalePullRequest(21, nil))
+	candidate := stalePullRequest(21, nil)
 	api.pullRequests[repository.FullName()] = []PullRequest{candidate}
 	api.current[pullRequestKey(repository, 21)] = candidate
+	withReviewerApproval(api, repository, 21, "head")
 
 	if err := NewManager(api).AutoMerge(t.Context()); err != nil {
 		t.Fatalf("AutoMerge() error = %v", err)
@@ -149,9 +154,10 @@ func TestAutoMergeSkipsStalePullRequest(t *testing.T) {
 
 func TestAutoMergeSkipsUnmergeablePullRequest(t *testing.T) {
 	api, repository := newAutoMergeAPI(t)
-	candidate := withApprovedLabels(t, unmergeablePullRequest(21, nil))
+	candidate := unmergeablePullRequest(21, nil)
 	api.pullRequests[repository.FullName()] = []PullRequest{candidate}
 	api.current[pullRequestKey(repository, 21)] = candidate
+	withReviewerApproval(api, repository, 21, "head")
 
 	if err := NewManager(api).AutoMerge(t.Context()); err != nil {
 		t.Fatalf("AutoMerge() error = %v", err)
@@ -166,11 +172,13 @@ func TestAutoMergeSkipsUnmergeablePullRequest(t *testing.T) {
 // 「第一笔报错即停」与「后续候选仍被尝试（即使也失败）」。
 func TestAutoMergeStopsRepositoryQueueOnMergeError(t *testing.T) {
 	api, repository := newAutoMergeAPI(t)
-	first := withApprovedLabels(t, mergeablePullRequest(21, nil))
-	second := withApprovedLabels(t, mergeablePullRequest(33, nil))
+	first := mergeablePullRequest(21, nil)
+	second := mergeablePullRequest(33, nil)
 	api.pullRequests[repository.FullName()] = []PullRequest{first, second}
 	api.current[pullRequestKey(repository, 21)] = first
+	withReviewerApproval(api, repository, 21, "head")
 	api.current[pullRequestKey(repository, 33)] = second
+	withReviewerApproval(api, repository, 33, "head")
 	api.mergeError = errors.New("merge rejected")
 
 	err := NewManager(api).AutoMerge(t.Context())
@@ -190,9 +198,10 @@ func TestAutoMergeStopsRepositoryQueueOnMergeError(t *testing.T) {
 
 func TestAutoMergeWaitsForPendingChecks(t *testing.T) {
 	api, repository := newAutoMergeAPI(t)
-	candidate := withApprovedLabels(t, mergeablePullRequest(21, nil))
+	candidate := mergeablePullRequest(21, nil)
 	api.pullRequests[repository.FullName()] = []PullRequest{candidate}
 	api.current[pullRequestKey(repository, 21)] = candidate
+	withReviewerApproval(api, repository, 21, "head")
 	api.statuses["head"] = []CheckStatus{{Context: "build / test", State: "pending"}}
 
 	if err := NewManager(api).AutoMerge(t.Context()); err != nil {
@@ -205,9 +214,10 @@ func TestAutoMergeWaitsForPendingChecks(t *testing.T) {
 
 func TestAutoMergeSkipsFailedChecks(t *testing.T) {
 	api, repository := newAutoMergeAPI(t)
-	candidate := withApprovedLabels(t, mergeablePullRequest(21, nil))
+	candidate := mergeablePullRequest(21, nil)
 	api.pullRequests[repository.FullName()] = []PullRequest{candidate}
 	api.current[pullRequestKey(repository, 21)] = candidate
+	withReviewerApproval(api, repository, 21, "head")
 	api.statuses["head"] = []CheckStatus{{Context: "build / test", State: "failure"}}
 
 	if err := NewManager(api).AutoMerge(t.Context()); err != nil {
@@ -226,10 +236,11 @@ func TestAutoMergeSkipsDraftAndWIPTitles(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			api, repository := newAutoMergeAPI(t)
-			candidate := withApprovedLabels(t, mergeablePullRequest(21, nil))
+			candidate := mergeablePullRequest(21, nil)
 			mutate(&candidate)
 			api.pullRequests[repository.FullName()] = []PullRequest{candidate}
 			api.current[pullRequestKey(repository, 21)] = candidate
+			withReviewerApproval(api, repository, 21, "head")
 
 			if err := NewManager(api).AutoMerge(t.Context()); err != nil {
 				t.Fatalf("AutoMerge() error = %v", err)
@@ -244,7 +255,7 @@ func TestAutoMergeSkipsDraftAndWIPTitles(t *testing.T) {
 // 候选来自列表快照；合并前重读发现标签已被 sync 更新（批准撤销、打回）时放弃合并。
 func TestAutoMergeSkipsWhenApprovalGoneAfterSnapshot(t *testing.T) {
 	api, repository := newAutoMergeAPI(t)
-	candidate := withApprovedLabels(t, mergeablePullRequest(21, nil))
+	candidate := mergeablePullRequest(21, nil)
 	api.pullRequests[repository.FullName()] = []PullRequest{candidate}
 	api.current[pullRequestKey(repository, 21)] = mergeablePullRequest(21, nil)
 
@@ -259,7 +270,7 @@ func TestAutoMergeSkipsWhenApprovalGoneAfterSnapshot(t *testing.T) {
 func TestAutoMergeWithoutCandidatesDoesNothing(t *testing.T) {
 	api, repository := newAutoMergeAPI(t)
 	api.pullRequests[repository.FullName()] = []PullRequest{
-		mergeablePullRequest(21, nil), // 无 status/approved / awaiting/merge
+		mergeablePullRequest(21, nil), // 无内容评审者批准
 	}
 
 	if err := NewManager(api).AutoMerge(t.Context()); err != nil {
@@ -267,5 +278,26 @@ func TestAutoMergeWithoutCandidatesDoesNothing(t *testing.T) {
 	}
 	if len(api.mergedPulls) != 0 {
 		t.Errorf("merged pulls = %v, want none", api.mergedPulls)
+	}
+}
+
+// 批准必须来自内容评审者本人：其他账号（包括状态评审者）的批准不构成合并门禁。
+func TestAutoMergeIgnoresApprovalFromOthers(t *testing.T) {
+	api, repository := newAutoMergeAPI(t)
+	candidate := mergeablePullRequest(21, nil)
+	api.pullRequests[repository.FullName()] = []PullRequest{candidate}
+	api.current[pullRequestKey(repository, 21)] = candidate
+	withReviewerApproval(api, repository, 21, "head")
+	api.reviews[pullRequestKey(repository, 21)] = append(api.reviews[pullRequestKey(repository, 21)], Review{
+		ID: 99, State: ReviewStateApproved, Submitted: time.Unix(20, 0),
+		User: "someone-else", CommitID: "head", Official: true,
+	})
+
+	manager := NewManager(api, WithContentReviewer("alice"))
+	if err := manager.AutoMerge(t.Context()); err != nil {
+		t.Fatalf("AutoMerge() error = %v", err)
+	}
+	if len(api.mergedPulls) != 0 {
+		t.Errorf("merged pulls = %v, want none（alice 未批准，他人批准不算）", api.mergedPulls)
 	}
 }

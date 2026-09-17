@@ -63,12 +63,20 @@ state-file: $state-dir/state.sqlite3
 - **倒序扫描**：待办按编号**降序**处理——最新请求的条目最先起会话。
 - **单会话互斥**：同一 PR/Issue 同一时刻只允许一个 claude（sqlite 事务保证
   跨进程原子），重复触发只记日志不重开会话。
-- **双通道守卫**：标签与 mention 是两类行为，去重守卫随之分离。标签通道
-  （status/review、status/triage）以 **settled** 守卫吸收同一请求的重复信号，
-  标签收敛（条目离开标签清单）后自动解除；mention 通道（@ai）以**水位线**记录
-  最后回应时刻——mention 条目会持续留在 `mentioned_by` 清单里，只有水位线之后
-  出现他人新评论才重新触发，且以追问轮（同一会话续聊）回应，不重跑全量协议。
-  条目关闭（离开 mention 清单）后水位线清除，重新 @ai 视为全新请求。
+- **双通道守卫**：请求与 mention 是两类行为，去重守卫随之分离。请求类通道
+  以 **settled** 守卫吸收同一请求的重复信号，请求出清后自动解除；mention 通道
+  （@ai）以**水位线**记录最后回应时刻——mention 条目会持续留在 `mentioned_by`
+  清单里，只有水位线之后出现他人新评论才重新触发，且以追问轮（同一会话续聊）
+  回应，不重跑全量协议。条目关闭（离开 mention 清单）后水位线清除，重新 @ai
+  视为全新请求。
+  触发口径（新规范）：PR 评审走 `@ai` mention 或**原生 review 请求**
+  （requested_reviewers，优先接口——评论中的 @提及 / /review 由 sync 以
+  merge 身份转正为官方请求）；reviewer 在当前 head 上正式回应后请求出清，
+  作者推进 head 后旧回应失效、自动重新排队。标签不再驱动任何工作：
+  status/review、status/approved 等由 sync 继续维护，仅作观测产物；
+  status/triage（Issue）保留人工打标触发分诊的兼容通道。automerge 的合并
+  门禁 = 内容评审者对当前 head 的官方批准（approved、未 dismiss、
+  CommitID==head）+ 未落后 + 可合并 + 必要检查全绿。
 - **追问轮**（follow-up）：会话完成判定通过后（或 mention 通道检测到水位线
   之后的新消息时，由检测循环直接派发追问），dispatcher 检查条目上是否有
   assistant 账号之外的新评论；有则以**同一会话 --resume 续聊**，提示词要求

@@ -6,9 +6,9 @@
 //     立即返回、当前待办处理完即退出；二次信号由 main 强杀。
 //   - 验证失败重试一次（每待办至多两个会话），仍失败则记录并放行，等待下一轮
 //     检测（标签未变意味着待办仍在列表里，循环天然重试）。
-//   - 双通道守卫（guardState）：标签通道 settled 吸收同一请求的重复信号，
-//     mention 通道水位线吸收同一消息的重复信号、放行新消息（追问轮）——两类
-//     行为分离，见 detect.go 头注释与 selectDispatch。
+//   - 双通道守卫（guardState）：请求类通道（review 请求 / 分诊标签）settled
+//     吸收同一请求的重复信号，mention 通道水位线吸收同一消息的重复信号、放行
+//     新消息（追问轮）——两类行为分离，见 detect.go 头注释与 selectDispatch。
 package dispatcher
 
 import (
@@ -247,10 +247,10 @@ func RunLoop(ctx context.Context, deps Deps) error {
 		config.BaseBranch, mirror,
 	))
 
-	// guards 是双通道守卫（本进程内，键 kind#number）。标签与 mention 是两类
+	// guards 是双通道守卫（本进程内，键 kind#number）。请求与 mention 是两类
 	// 行为，守卫语义随之分离（完整说明见 detect.go 头注释）：
-	//   - 标签通道 settled：处理后压制，标签清单收敛才解除——吸收同一请求的
-	//     重复信号；
+	//   - 请求类通道（review 请求 / Issue 分诊标签）settled：处理后压制，请求
+	//     出清才解除——吸收同一请求的重复信号；
 	//   - mention 通道 handled（水位线）：记录最后回应时刻，只吸收同一消息的
 	//     重复信号，水位线后的他人新评论会以追问轮重新触发。
 	guards := newGuardState()
@@ -577,8 +577,8 @@ type attemptRecord struct {
 }
 
 // ProcessResult 是一次处理的走向：
-//   - Settled：标签通道已产出可验证的完成动作（review 已提交 / triage 标签已
-//     移除），该请求已满足；在标签被 sync 收敛前不应重复拉起。
+//   - Settled：请求类通道已产出可验证的完成动作（review 已提交 / triage 标签
+//     已移除），该请求已满足；在请求出清前不应重复拉起。
 //   - Responded：mention 通道已回应（会话无错误收尾），mention 水位线推进到
 //     此刻；清单里水位线之后的他人新评论才会再次触发。
 type ProcessResult struct {
@@ -589,11 +589,11 @@ type ProcessResult struct {
 // guardState 是检测循环与 worker 之间的双通道守卫（键 kind#number，本进程内）。
 // 自带互斥：detector 读写、worker 收尾写全部在锁内，杜绝并发 map 访问。
 //
-//   - settled：标签通道——已可验证完成的请求在标签清单收敛前压制，防止同一
-//     请求重复拉起会话；
+//   - settled：请求类通道（review 请求 / Issue 分诊标签）——已可验证完成的
+//     请求在请求出清前压制，防止同一请求重复拉起会话；
 //   - handled：mention 通道——最后回应时刻（水位线）。mention 条目会持续留在
 //     mentioned_by 清单里，水位线只吸收「同一消息的重复信号」，他人新评论仍会
-//     重新触发；这与标签通道 settled 的「请求已满足」语义不同，不可混用。
+//     重新触发；这与请求类通道 settled 的「请求已满足」语义不同，不可混用。
 type guardState struct {
 	mutex   sync.Mutex
 	settled map[string]bool
@@ -611,7 +611,7 @@ func (g *guardState) get(key string) (settled bool, handled time.Time) {
 	return g.settled[key], g.handled[key]
 }
 
-// apply 把一次处理结果记入守卫：Settled 置标签通道压制，Responded 推进
+// apply 把一次处理结果记入守卫：Settled 置请求类通道压制，Responded 推进
 // mention 水位线（at 为回应完成时刻）。
 func (g *guardState) apply(key string, result ProcessResult, at time.Time) {
 	g.mutex.Lock()
@@ -624,15 +624,16 @@ func (g *guardState) apply(key string, result ProcessResult, at time.Time) {
 	}
 }
 
-// release 清除已从各自清单消失的键：标签请求收敛（清单里不再出现）解除
-// settled；mention 条目关闭或 mention 被移除后清除水位线——重新打开或再次
-// mention 视为全新请求。状态变化走 debug 日志（Why is it happening）。
+// release 清除已从各自清单消失的键：请求类信号（review 请求 / Issue 分诊标签）
+// 收敛（清单里不再出现）解除 settled；mention 条目关闭或 mention 被移除后清除
+// 水位线——重新请求或再次 mention 视为全新请求。状态变化走 debug 日志
+// （Why is it happening）。
 func (g *guardState) release(work []WorkItem, debug func(string)) {
-	labeled := map[string]bool{}
+	requested := map[string]bool{}
 	mentioned := map[string]bool{}
 	for _, item := range work {
-		if item.Labeled {
-			labeled[item.key()] = true
+		if item.Requested || item.Labeled {
+			requested[item.key()] = true
 		}
 		if item.Mention {
 			mentioned[item.key()] = true
@@ -641,9 +642,9 @@ func (g *guardState) release(work []WorkItem, debug func(string)) {
 	g.mutex.Lock()
 	defer g.mutex.Unlock()
 	for key := range g.settled {
-		if !labeled[key] {
+		if !requested[key] {
 			delete(g.settled, key)
-			debug(fmt.Sprintf("%s 已离开标签清单，settled 守卫解除（新请求可入队）", key))
+			debug(fmt.Sprintf("%s 请求已出清（reviewer 已回应/标签收敛），settled 守卫解除（新请求可入队）", key))
 		}
 	}
 	for key := range g.handled {
@@ -659,20 +660,21 @@ func (g *guardState) release(work []WorkItem, debug func(string)) {
 // 真实新评论；是否真有新消息仍以评论列表细查为准。
 const clockSkewTolerance = 2 * time.Minute
 
-// selectDispatch 按通道判定单个条目本轮是否派发、以何种模式派发（两通道行为
-// 的完整定义见 detect.go 头注释）。ok=false 表示两路都不需要动。
+// selectDispatch 按通道判定单个条目本轮是否派发、以何种模式派发（各通道行为
+// 的完整定义见 detect.go 头注释）。ok=false 表示所有通道都不需要动。
 //
-//   - 标签通道：标签在清单且未 settled → 全量会话；已 settled 的等待标签
-//     收敛，不重复拉起。
+//   - 请求类通道（review 请求、Issue 分诊标签）：请求在清单且未 settled →
+//     全量会话；已 settled 的等待请求出清（reviewer 回应当前 head / 标签
+//     收敛），不重复拉起。
 //   - mention 通道：从未回应 → 全量会话；已回应 → 仅当条目在水位线后有新动态
 //     （Updated 预检把常态开销压到零）且确有他人新评论时，以追问轮（同一会话
 //     续聊）再次入队，不重跑全量协议。
 //
-// 同一条目两路同时命中时标签通道优先：全量会话覆盖追问诉求，会话后的追问轮
+// 同一条目多路同时命中时请求类通道优先：全量会话覆盖追问诉求，会话后的追问轮
 // 会消化新消息。
 func (d Deps) selectDispatch(ctx context.Context, guards *guardState, item WorkItem) (WorkItem, bool) {
 	settled, handled := guards.get(item.key())
-	if item.Labeled && !settled {
+	if (item.Requested || item.Labeled) && !settled {
 		return item, true
 	}
 	if !item.Mention {
