@@ -62,7 +62,8 @@ help: ## 显示帮助信息
 build: ## 构建 assistant 二进制 (Linux/amd64, 静态链接, 供 generic package 发布)
 	@echo "==> 构建 $(BINARY_NAME) 二进制..."
 	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=$(GOARCH) \
-		go build -ldflags="$(LDFLAGS)" -o $(BINARY_NAME) ./cmd/assistant
+		go build -ldflags="$(LDFLAGS) -X main.version=$$(git describe --tags --always 2>/dev/null || echo dev)" \
+		-o $(BINARY_NAME) ./cmd/assistant
 	@echo "==> 构建完成: $(BINARY_NAME)"
 
 .PHONY: build-local
