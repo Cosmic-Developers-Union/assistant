@@ -421,7 +421,14 @@ type Client struct {
 }
 
 func NewClient(host, accessToken string) (*Client, error) {
-	httpClient := &http.Client{Timeout: httpClientTimeout}
+	httpClient := &http.Client{
+		Timeout: httpClientTimeout,
+		Transport: &retryTransport{
+			base:     http.DefaultTransport,
+			attempts: 3,
+			backoff:  200 * time.Millisecond,
+		},
+	}
 	sdk, err := newSDK(host, accessToken, httpClient)
 	if err != nil {
 		return nil, err

@@ -493,15 +493,17 @@ func TestClientListBranchProtectionsUsesDedicatedToken(t *testing.T) {
 // 第二次走版本门禁的调用会 nil 解引用（常驻 daemon 直接崩）。客户端改成自己探一次：
 // 探到就钉死版本（SDK 不再自拉），探不到就忽略版本门禁，让真实 API 错误浮出来。
 func TestClientVersionProbeDoesNotPanicOnRetry(t *testing.T) {
-	cases := []struct {
-		name         string
-		versionBody  string
-		versionCode  int
-		wantVersions int32
-	}{
-		{name: "探测成功", versionBody: `{"version":"1.26.0"}`, versionCode: http.StatusOK, wantVersions: 1},
-		{name: "探测失败", versionBody: "boom", versionCode: http.StatusInternalServerError, wantVersions: 1},
-	}
+		cases := []struct {
+			name         string
+			versionBody  string
+			versionCode  int
+			wantVersions int32
+		}{
+			// 成功（200）不重试：仍是一次；失败（500）由 retryTransport 退避重试
+			// 到上限 3 次——抖动站点上版本探测也受保护，探测轮数不变（每轮至多 3 次尝试）
+			{name: "探测成功", versionBody: `{"version":"1.26.0"}`, versionCode: http.StatusOK, wantVersions: 1},
+			{name: "探测失败", versionBody: "boom", versionCode: http.StatusInternalServerError, wantVersions: 3},
+		}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			var versionCalls int32
