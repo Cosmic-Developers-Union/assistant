@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# install.sh —— assistant 主机部署（systemd 形态）：
+# install.sh —— assistant 主机安装，按平台两种形态：
 #
-#   1. 创建独立系统服务用户（nologin、无密码，仅供服务运行使用，无需登陆）；
-#   2. 按用户家目录建立 XDG 标准目录（config/data/state/cache，落点与
-#      assistant 二进制的缺省解析一致）；
-#   3. 安装二进制到 <prefix>/bin/assistant（来源优先级：--bin > 检出内现成的
-#      ./assistant > go 构建 > GitHub Release 下载）；
-#   4. 以服务用户身份生成空配置骨架（assistant config new）；
-#   5. 安装 systemd 单元（不自动启动：配置完成前 run 无法运行）。
+#   macOS（测试形态）：二进制 + 空配置骨架。以当前用户安装、直接前台跑
+#     `assistant run`——不建服务用户/systemd（个人测试机无需隔离）；配置落
+#     ~/Library/Application Support/Cosmic-Developers-Union/assistant（Go 的
+#     os.UserConfigDir 在 macOS 读这里，设 XDG 变量无效）。
 #
-# 支持 curl -fsSL https://raw.githubusercontent.com/Cosmic-Developers-Union/assistant/main/install.sh | bash
-# 一键执行（stdin 模式自动下载 Release 二进制，非 root 自动提权）。
-# 幂等：重复执行只更新二进制与单元文件，已存在的用户/目录/配置不动。
-# 用法见 --help。
+#   Linux（服务形态）：独立系统服务用户（nologin、无密码，无需登陆）+
+#     XDG 标准目录 + systemd 单元 + 空配置骨架，`assistant run` 由 systemd
+#     常驻运行。
+#
+# 二进制来源优先级：--bin > 检出内现成的 ./assistant > go 构建 >
+# GitHub Release 下载（按 OS/ARCH 选 linux/darwin × amd64/arm64）。
+# 支持 curl -fsSL <raw-url> | bash 一键执行；幂等。
 set -euo pipefail
 
 GITHUB_REPO=Cosmic-Developers-Union/assistant
@@ -24,23 +24,26 @@ usage() {
 用法: install.sh [选项]
       curl -fsSL https://raw.githubusercontent.com/Cosmic-Developers-Union/assistant/main/install.sh | bash
 
-主机部署 assistant：独立系统服务用户 + XDG 目录 + 二进制 + systemd 单元 + 空配置。
+主机安装 assistant：
+  macOS  测试形态——二进制 + 空配置（当前用户，前台跑 assistant run）
+  Linux  服务形态——独立系统服务用户 + XDG 目录 + systemd 单元 + 空配置
+
 二进制来源优先级：--bin 指定 > 检出内现成的 ./assistant > go 构建 > GitHub Release 下载。
 
 选项:
-  --user NAME      服务用户名（缺省 assistant；组名同名）
-  --home PATH      服务用户家目录（缺省 /var/lib/<user>；XDG 目录建在其下）
+  --user NAME      服务用户名（仅 Linux；缺省 assistant）
+  --home PATH      服务用户家目录（仅 Linux；缺省 /var/lib/<user>）
   --bin PATH       使用已构建的二进制（跳过构建/下载）
   --prefix PATH    二进制安装前缀（缺省 /usr/local，装到 <prefix>/bin/assistant）
-  --systemd        强制安装 systemd 单元
+  --systemd        强制安装 systemd 单元（仅 Linux）
   --no-systemd     不安装 systemd 单元（缺省 auto：检测到运行中的 systemd 才装）
-  --enable         装完后 systemctl enable（开机自启；启动仍需配置完成后手动）
+  --enable         装完后 systemctl enable（仅 Linux）
   -h, --help       显示本帮助
 
 示例:
   curl -fsSL https://raw.githubusercontent.com/Cosmic-Developers-Union/assistant/main/install.sh | bash
-  sudo ./install.sh --enable                 # 检出内安装 + 设开机自启
-  sudo ./install.sh --user bot --home /srv/bot --bin ./assistant --prefix /opt/assistant
+  sudo ./install.sh --enable                 # Linux 检出内安装 + 设开机自启
+  ./install.sh --bin ./assistant             # macOS 检出内安装（无需 sudo）
 EOF
 }
 
@@ -78,13 +81,12 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-SERVICE_GROUP=$SERVICE_USER
-[ -n "$SERVICE_HOME" ] || SERVICE_HOME=/var/lib/$SERVICE_USER
-BINDIR=$PREFIX/bin
-CONFIG_DIR=$SERVICE_HOME/.config/Cosmic-Developers-Union/assistant
-DATA_DIR=$SERVICE_HOME/.local/share/Cosmic-Developers-Union/assistant
-STATE_DIR=$SERVICE_HOME/.local/state/Cosmic-Developers-Union/assistant
-CACHE_DIR=$SERVICE_HOME/.cache/Cosmic-Developers-Union/assistant
+OS=$(uname -s)
+case "$(uname -m)" in
+  x86_64) ARCH=amd64 ;;
+  aarch64|arm64) ARCH=arm64 ;;
+  *) echo "错误: 不支持的架构 $(uname -m)（用 --bin 指定二进制）" >&2; exit 1 ;;
+esac
 
 die() { echo "错误: $*" >&2; exit 1; }
 # 进度日志走 stderr：resolve_binary 的 stdout 被命令替换捕获为二进制路径，
@@ -102,34 +104,9 @@ fetch() { # fetch <url> -o <path>
   fi
 }
 
-# 脚本路径与模式已在参数解析前确定；非 root 时自动 sudo 重跑（与 Makefile 一致）
-if [ "$(id -u)" -ne 0 ]; then
-  if [ -z "$SELF" ]; then
-    # curl | bash：脚本在 stdin 上，先落地再提权重跑
-    downloaded=$(mktemp /tmp/assistant-install-XXXXXX.sh)
-    fetch "$RAW_SCRIPT_URL" -o "$downloaded"
-    exec sudo bash "$downloaded" "$@"
-  fi
-  command -v sudo >/dev/null 2>&1 || die "需要 root 权限（当前非 root 且没有 sudo）"
-  exec sudo bash "$SELF" "$@"
-fi
-
-# 本脚本做的是 Linux 主机部署（useradd/nologin/systemd）；其它系统直接拒绝，
-# 避免创建出无用的用户与目录
-case "$(uname -s)" in
-  Linux) ;;
-  *) die "install.sh 面向 Linux 主机部署（需要 useradd/systemd），当前系统 $(uname -s)。
-macOS/Windows 请手动下载二进制: https://github.com/$GITHUB_REPO/releases ，或用 docker compose 部署" ;;
-esac
-
-# ---------- 1. 二进制 ----------
+# ---------- 二进制来源 ----------
 download_release() {
-  case "$(uname -m)" in
-    x86_64) arch=amd64 ;;
-    aarch64|arm64) arch=arm64 ;;
-    *) die "不支持的架构: $(uname -m)（用 --bin 指定二进制，或在检出内运行本脚本）" ;;
-  esac
-  url="$RELEASE_BASE/assistant-linux-$arch"
+  url="$RELEASE_BASE/assistant-$(echo "$OS" | tr '[:upper:]' '[:lower:]')-$ARCH"
   step "下载 Release 二进制: $url"
   downloaded=$(mktemp /tmp/assistant-XXXXXX)
   fetch "$url" -o "$downloaded"
@@ -149,7 +126,7 @@ resolve_binary() {
       return
     fi
     if command -v go >/dev/null 2>&1; then
-      step "未找到预构建二进制，用 go 构建（Linux/$(uname -m)）"
+      step "未找到预构建二进制，用 go 构建（$OS/$ARCH）"
       version=$(git -C "$SCRIPT_DIR" describe --tags --always 2>/dev/null || echo dev)
       (cd "$SCRIPT_DIR" && CGO_ENABLED=0 go build \
         -ldflags "-w -s -X main.version=$version" \
@@ -160,86 +137,172 @@ resolve_binary() {
   fi
   download_release
 }
-BINARY=$(resolve_binary)
-step "二进制: $BINARY"
 
-# ---------- 2. 独立系统服务用户（nologin、无密码，无需登陆） ----------
-NOLOGIN=
-for candidate in /usr/sbin/nologin /sbin/nologin /bin/false; do
-  [ -x "$candidate" ] && NOLOGIN=$candidate && break
-done
-[ -n "$NOLOGIN" ] || die "找不到 nologin（/usr/sbin/nologin、/sbin/nologin、/bin/false 都不存在）"
+BINDIR=$PREFIX/bin
 
-if ! getent group "$SERVICE_GROUP" >/dev/null 2>&1; then
-  step "创建系统组: $SERVICE_GROUP"
-  groupadd --system "$SERVICE_GROUP"
-fi
-if id -u "$SERVICE_USER" >/dev/null 2>&1; then
-  step "服务用户已存在，跳过创建: $SERVICE_USER"
-else
-  step "创建系统服务用户: $SERVICE_USER（home=$SERVICE_HOME，shell=$NOLOGIN，无密码）"
-  useradd --system --gid "$SERVICE_GROUP" --home-dir "$SERVICE_HOME" \
-    --shell "$NOLOGIN" --comment "assistant service" "$SERVICE_USER"
-fi
-
-# ---------- 3. XDG 标准目录 ----------
-# 与二进制缺省解析一致：XDG_CONFIG_HOME ~/.config、XDG_DATA_HOME ~/.local/share、
-# XDG_STATE_HOME ~/.local/state、XDG_CACHE_HOME ~/.cache，加命名空间段。
-step "创建 XDG 目录（属主 $SERVICE_USER，配置/数据/状态 0700）"
-install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0750 "$SERVICE_HOME"
-for dir in "$CONFIG_DIR" "$DATA_DIR" "$STATE_DIR" "$CACHE_DIR"; do
-  install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0700 "$dir"
-done
-
-# ---------- 4. 安装二进制 ----------
-step "安装二进制到 $BINDIR/assistant"
-install -d "$BINDIR"
-install -m 0755 "$BINARY" "$BINDIR/assistant"
-
-# 以服务用户身份执行命令（runuser/sudo 都不经过登录 shell，nologin 不碍事）
-run_as_service_user() {
-  local -a environment=(
-    env
-    "HOME=$SERVICE_HOME"
-    "XDG_CONFIG_HOME=$SERVICE_HOME/.config"
-    "XDG_DATA_HOME=$SERVICE_HOME/.local/share"
-    "XDG_STATE_HOME=$SERVICE_HOME/.local/state"
-    "XDG_CACHE_HOME=$SERVICE_HOME/.cache"
-  )
-  if command -v runuser >/dev/null 2>&1; then
-    runuser -u "$SERVICE_USER" -- "${environment[@]}" "$@"
-  elif command -v sudo >/dev/null 2>&1; then
-    sudo -u "$SERVICE_USER" "${environment[@]}" "$@"
-  else
-    die "需要 runuser 或 sudo 以服务用户身份执行: $*"
-  fi
+print_next_steps() { # 公共尾部：以某用户身份补全配置并跑 run 的说明 <bin> <config_dir> <user> <home>
+  echo "下一步（token 已备好时最快路径——环境变量，不用写文件）："
+  echo "  export GITEA_HOST=https://<gitea地址> GITEA_ACCESS_TOKEN=<token>"
+  echo "  $1 run                          # 前台跑，Ctrl+C 停止；--debug 看决策细节"
+  echo "  # AI 供应商 key：编辑 $2/config.json 的 providers，或 ANTHROPIC_* 环境变量"
+  echo "  # 空配置不挡路：config.json 的 instances 为空时自动按环境变量单实例运行"
+  echo "  # run 需要 claude CLI 在 PATH（macOS: npm i -g @anthropic-ai/claude-code 等）"
 }
 
-# ---------- 5. 空配置骨架（服务用户身份，落 XDG 配置目录） ----------
-if [ -f "$CONFIG_DIR/config.json" ]; then
-  step "配置已存在，跳过生成: $CONFIG_DIR/config.json"
-else
-  step "生成空配置骨架（assistant config new，以 $SERVICE_USER 身份）"
-  run_as_service_user "$BINDIR/assistant" config new
-fi
+# ============================================================
+# macOS —— 测试形态：当前用户、前台跑 run，不建服务用户/systemd
+# ============================================================
+install_darwin() {
+  [ -z "$SERVICE_HOME" ] || step "提示: macOS 测试形态不使用 --home（--user/--systemd/--enable 同样忽略）"
 
-# ---------- 6. systemd 单元 ----------
-if [ "$INSTALL_SYSTEMD" = auto ]; then
-  if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
-    INSTALL_SYSTEMD=yes
-  else
-    INSTALL_SYSTEMD=no
+  local binary
+  binary=$(resolve_binary)
+  step "二进制: $binary"
+
+  # root 直接跑时仍要把配置生成到真实用户家目录（curl|bash 由脚本内部单点 sudo 的不受影响）
+  local real_home=$HOME
+  if [ "$(id -u)" = 0 ] && [ -n "${SUDO_USER:-}" ]; then
+    real_home=$(dscl . -read "/Users/$SUDO_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+    [ -n "$real_home" ] || real_home=$HOME
   fi
-fi
-UNIT_PATH=/etc/systemd/system/assistant.service
-if [ "$INSTALL_SYSTEMD" = yes ]; then
-  # ProtectHome 与家目录位置冲突时（家目录在 /home 下）必须关闭
-  protect_home=true
-  case "$SERVICE_HOME" in
-    /home/*|/root|/root/*|/run/user/*) protect_home=false ;;
-  esac
-  step "写入 systemd 单元: $UNIT_PATH"
-  cat > "$UNIT_PATH" <<EOF
+  local config_dir
+  config_dir="$real_home/Library/Application Support/Cosmic-Developers-Union/assistant"
+
+  # 安装二进制：目标目录可写直接装，否则单点 sudo（不整脚本提权，配置仍归当前用户）
+  local sudo=
+  if [ -e "$BINDIR" ]; then
+    [ -w "$BINDIR" ] || sudo=sudo
+  else
+    [ -w "$(dirname "$BINDIR")" ] || sudo=sudo
+  fi
+  step "安装二进制到 $BINDIR/assistant"
+  $sudo install -d "$BINDIR"
+  $sudo install -m 0755 "$binary" "$BINDIR/assistant"
+
+  # 空配置骨架（当前用户；config new 自动建目录）
+  if [ -f "$config_dir/config.json" ]; then
+    step "配置已存在，跳过生成: $config_dir/config.json"
+  else
+    step "生成空配置骨架（assistant config new）"
+    if [ "$(id -u)" = 0 ] && [ -n "${SUDO_USER:-}" ]; then
+      sudo -u "$SUDO_USER" "$BINDIR/assistant" config new
+    else
+      "$BINDIR/assistant" config new
+    fi
+  fi
+
+  echo
+  echo "安装完成（macOS 测试形态，当前用户运行）："
+  echo "  二进制: $BINDIR/assistant"
+  echo "  配置:   $config_dir/config.json（空骨架）"
+  echo "  数据:   $real_home/.local/share/Cosmic-Developers-Union/assistant（运行时自动创建）"
+  echo
+  print_next_steps "$BINDIR/assistant" "$config_dir"
+}
+
+# ============================================================
+# Linux —— 服务形态：独立系统服务用户 + XDG 目录 + systemd
+# ============================================================
+install_linux() {
+  # 非 root 时自动 sudo 重跑（与 Makefile 的 install 行为一致）
+  if [ "$(id -u)" -ne 0 ]; then
+    if [ -z "$SELF" ]; then
+      # curl | bash：脚本在 stdin 上，先落地再提权重跑
+      downloaded=$(mktemp /tmp/assistant-install-XXXXXX.sh)
+      fetch "$RAW_SCRIPT_URL" -o "$downloaded"
+      exec sudo bash "$downloaded" "$@"
+    fi
+    command -v sudo >/dev/null 2>&1 || die "需要 root 权限（当前非 root 且没有 sudo）"
+    exec sudo bash "$SELF" "$@"
+  fi
+
+  local binary
+  binary=$(resolve_binary)
+  step "二进制: $binary"
+
+  local service_group=$SERVICE_USER
+  [ -n "$SERVICE_HOME" ] || SERVICE_HOME=/var/lib/$SERVICE_USER
+  local config_dir=$SERVICE_HOME/.config/Cosmic-Developers-Union/assistant
+  local data_dir=$SERVICE_HOME/.local/share/Cosmic-Developers-Union/assistant
+  local state_dir=$SERVICE_HOME/.local/state/Cosmic-Developers-Union/assistant
+  local cache_dir=$SERVICE_HOME/.cache/Cosmic-Developers-Union/assistant
+
+  # ---------- 独立系统服务用户（nologin、无密码，无需登陆） ----------
+  local nologin=
+  for candidate in /usr/sbin/nologin /sbin/nologin /bin/false; do
+    [ -x "$candidate" ] && nologin=$candidate && break
+  done
+  [ -n "$nologin" ] || die "找不到 nologin（/usr/sbin/nologin、/sbin/nologin、/bin/false 都不存在）"
+
+  if ! getent group "$service_group" >/dev/null 2>&1; then
+    step "创建系统组: $service_group"
+    groupadd --system "$service_group"
+  fi
+  if id -u "$SERVICE_USER" >/dev/null 2>&1; then
+    step "服务用户已存在，跳过创建: $SERVICE_USER"
+  else
+    step "创建系统服务用户: $SERVICE_USER（home=$SERVICE_HOME，shell=$nologin，无密码）"
+    useradd --system --gid "$service_group" --home-dir "$SERVICE_HOME" \
+      --shell "$nologin" --comment "assistant service" "$SERVICE_USER"
+  fi
+
+  # ---------- XDG 标准目录 ----------
+  # 与二进制缺省解析一致：XDG_CONFIG_HOME ~/.config、XDG_DATA_HOME ~/.local/share、
+  # XDG_STATE_HOME ~/.local/state、XDG_CACHE_HOME ~/.cache，加命名空间段。
+  step "创建 XDG 目录（属主 $SERVICE_USER，配置/数据/状态 0700）"
+  install -d -o "$SERVICE_USER" -g "$service_group" -m 0750 "$SERVICE_HOME"
+  local dir
+  for dir in "$config_dir" "$data_dir" "$state_dir" "$cache_dir"; do
+    install -d -o "$SERVICE_USER" -g "$service_group" -m 0700 "$dir"
+  done
+
+  # ---------- 安装二进制 ----------
+  step "安装二进制到 $BINDIR/assistant"
+  install -d "$BINDIR"
+  install -m 0755 "$binary" "$BINDIR/assistant"
+
+  # 以服务用户身份执行命令（runuser/sudo 都不经过登录 shell，nologin 不碍事）
+  run_as_service_user() {
+    local -a environment=(
+      env
+      "HOME=$SERVICE_HOME"
+      "XDG_CONFIG_HOME=$SERVICE_HOME/.config"
+      "XDG_DATA_HOME=$SERVICE_HOME/.local/share"
+      "XDG_STATE_HOME=$SERVICE_HOME/.local/state"
+      "XDG_CACHE_HOME=$SERVICE_HOME/.cache"
+    )
+    if command -v runuser >/dev/null 2>&1; then
+      runuser -u "$SERVICE_USER" -- "${environment[@]}" "$@"
+    else
+      sudo -u "$SERVICE_USER" "${environment[@]}" "$@"
+    fi
+  }
+
+  # ---------- 空配置骨架（服务用户身份，落 XDG 配置目录） ----------
+  if [ -f "$config_dir/config.json" ]; then
+    step "配置已存在，跳过生成: $config_dir/config.json"
+  else
+    step "生成空配置骨架（assistant config new，以 $SERVICE_USER 身份）"
+    run_as_service_user "$BINDIR/assistant" config new
+  fi
+
+  # ---------- systemd 单元 ----------
+  if [ "$INSTALL_SYSTEMD" = auto ]; then
+    if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+      INSTALL_SYSTEMD=yes
+    else
+      INSTALL_SYSTEMD=no
+    fi
+  fi
+  local unit_path=/etc/systemd/system/assistant.service
+  if [ "$INSTALL_SYSTEMD" = yes ]; then
+    # ProtectHome 与家目录位置冲突时（家目录在 /home 下）必须关闭
+    local protect_home=true
+    case "$SERVICE_HOME" in
+      /home/*|/root|/root/*|/run/user/*) protect_home=false ;;
+    esac
+    step "写入 systemd 单元: $unit_path"
+    cat > "$unit_path" <<EOF
 # 由 assistant install.sh 生成；重新运行安装脚本即可更新
 [Unit]
 Description=assistant —— Gitea 仓库机器人与评审调度引擎
@@ -249,7 +312,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=$SERVICE_USER
-Group=$SERVICE_GROUP
+Group=$service_group
 WorkingDirectory=$SERVICE_HOME
 Environment=HOME=$SERVICE_HOME
 Environment=XDG_CONFIG_HOME=$SERVICE_HOME/.config
@@ -265,40 +328,46 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=$protect_home
-ReadWritePaths=$CONFIG_DIR $DATA_DIR $STATE_DIR $CACHE_DIR
+ReadWritePaths=$config_dir $data_dir $state_dir $cache_dir
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 [Install]
 WantedBy=multi-user.target
 EOF
-  systemctl daemon-reload
-  if [ "$ENABLE" = true ]; then
-    step "systemctl enable assistant（开机自启；启动需配置完成后 systemctl start assistant）"
-    systemctl enable assistant
+    systemctl daemon-reload
+    if [ "$ENABLE" = true ]; then
+      step "systemctl enable assistant（开机自启；启动需配置完成后 systemctl start assistant）"
+      systemctl enable assistant
+    fi
+  else
+    step "跳过 systemd 单元（--systemd 可强制安装）"
   fi
-else
-  step "跳过 systemd 单元（--systemd 可强制安装）"
-fi
 
-# ---------- 完成 ----------
-echo
-echo "安装完成："
-echo "  二进制:   $BINDIR/assistant"
-echo "  服务用户: $SERVICE_USER（系统用户，$NOLOGIN，无密码，无需登陆）"
-echo "  配置:     $CONFIG_DIR/config.json（空骨架，instances 为空）"
-echo "  数据:     $DATA_DIR"
-echo "  状态:     $STATE_DIR"
-if [ "$INSTALL_SYSTEMD" = yes ]; then
-  echo "  systemd:  $UNIT_PATH"
-fi
-echo
-echo "下一步（以服务用户身份操作；凭据与配置都随 XDG 配置目录走）："
-echo "  1. 补全配置：sudo -u $SERVICE_USER -H $BINDIR/assistant login <gitea地址> --user <管理员账号>"
-echo "     然后 sudo -u $SERVICE_USER -H $BINDIR/assistant setup 建 ai/merge 机器人账号；"
-echo "     或直接编辑 $CONFIG_DIR/config.json（providers/instances）"
-echo "  2. 校验：   sudo -u $SERVICE_USER -H $BINDIR/assistant validate"
-echo "  3. 评审会话需要 claude CLI 在 PATH（建议装到 /usr/local/bin）"
-if [ "$INSTALL_SYSTEMD" = yes ]; then
-  echo "  4. 启动：   systemctl enable --now assistant；观测 journalctl -u assistant -f"
-fi
-exit 0
+  echo
+  echo "安装完成："
+  echo "  二进制:   $BINDIR/assistant"
+  echo "  服务用户: $SERVICE_USER（系统用户，$nologin，无密码，无需登陆）"
+  echo "  配置:     $config_dir/config.json（空骨架，instances 为空）"
+  echo "  数据:     $data_dir"
+  echo "  状态:     $state_dir"
+  if [ "$INSTALL_SYSTEMD" = yes ]; then
+    echo "  systemd:  $unit_path"
+  fi
+  echo
+  echo "配置补全（凭据与配置都随 XDG 配置目录走）："
+  echo "  1. token 最快路径：sudo -u $SERVICE_USER -H env GITEA_HOST=https://<gitea地址> GITEA_ACCESS_TOKEN=<token> $BINDIR/assistant list   # 只读验证"
+  echo "  2. 长期配置：sudo -u $SERVICE_USER -H $BINDIR/assistant login <gitea地址> --user <管理员账号>"
+  echo "     然后 setup 建 ai/merge 机器人账号；或直接编辑 $config_dir/config.json（providers/instances）"
+  echo "  3. 校验: sudo -u $SERVICE_USER -H $BINDIR/assistant validate；claude CLI 装到 PATH（/usr/local/bin）"
+  if [ "$INSTALL_SYSTEMD" = yes ]; then
+    echo "  4. 启动: systemctl enable --now assistant；观测 journalctl -u assistant -f"
+  else
+    echo "  4. 前台跑: sudo -u $SERVICE_USER -H $BINDIR/assistant run"
+  fi
+}
+
+case "$OS" in
+  Darwin) install_darwin "$@" ;;
+  Linux) install_linux "$@" ;;
+  *) die "$OS 暂不支持自动安装（Windows 手动下载 $RELEASE_BASE ；或用 docker compose 部署）" ;;
+esac

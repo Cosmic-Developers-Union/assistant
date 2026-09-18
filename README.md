@@ -88,11 +88,20 @@ docker compose logs -f                                      # compose 默认带 
 curl -fsSL https://raw.githubusercontent.com/Cosmic-Developers-Union/assistant/main/install.sh | bash
 ```
 
-从 GitHub Release 下载对应架构的 linux 二进制（amd64/arm64），创建独立系统服务用户、按 XDG 规范建目录、写 systemd 单元并生成空配置骨架。检出内运行则优先用现成/本地构建的二进制：
+按平台自动选择形态（从 GitHub Release 下载对应 OS/ARCH 的二进制）：
 
-```bash
-sudo ./install.sh --enable       # 检出内安装（make install-service 等价）；--enable 设开机自启
-```
+- **macOS（测试形态）**：装二进制 + 生成空配置（当前用户，配置落 `~/Library/Application Support/Cosmic-Developers-Union/assistant`），不建服务用户，直接前台跑 `assistant run`。token 已备好时零配置起步：
+
+  ```bash
+  export GITEA_HOST=https://<gitea地址> GITEA_ACCESS_TOKEN=<token>
+  assistant run          # config.json 的 instances 为空时自动按环境变量单实例运行
+  ```
+
+- **Linux（服务形态）**：创建独立系统服务用户 + XDG 目录 + systemd 单元 + 空配置，`assistant run` 由 systemd 常驻运行（详见下）。
+
+检出内运行则优先用现成/本地构建的二进制：`sudo ./install.sh --enable`（Linux；`make install-service` 等价）。
+
+Linux 服务形态细节：
 
 - **独立服务用户**（缺省 `assistant`，`--user`/`--home` 可改）：系统账号、nologin、无密码——仅供 systemd 运行服务，无需登陆；
 - **XDG 目录**建在服务用户家目录下（缺省 `/var/lib/assistant`）：配置 `~/.config/Cosmic-Developers-Union/assistant`、数据 `~/.local/share/…`、状态 `~/.local/state/…`，与二进制缺省解析一致；

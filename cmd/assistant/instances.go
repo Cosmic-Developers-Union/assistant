@@ -42,6 +42,13 @@ func resolveInstanceFile(options commandOptions) (string, *instances.File, error
 	}
 	file, err := instances.Load(path)
 	if err != nil {
+		// 空骨架（config new 生成、尚未填写）当作没有配置文件：退回环境变量
+		// 单实例模式——token 走 GITEA_HOST/GITEA_ACCESS_TOKEN 即可跑，填好
+		// instances 后配置文件自然接管。其余错误（语法坏、语义错）照报。
+		if skeleton, parseErr := instances.Parse(path); parseErr == nil &&
+			len(skeleton.Instances) == 0 && skeleton.Weixin == nil {
+			return "", nil, nil
+		}
 		return "", nil, err
 	}
 	return path, file, nil
