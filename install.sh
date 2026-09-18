@@ -87,7 +87,9 @@ STATE_DIR=$SERVICE_HOME/.local/state/Cosmic-Developers-Union/assistant
 CACHE_DIR=$SERVICE_HOME/.cache/Cosmic-Developers-Union/assistant
 
 die() { echo "错误: $*" >&2; exit 1; }
-step() { echo "==> $*"; }
+# 进度日志走 stderr：resolve_binary 的 stdout 被命令替换捕获为二进制路径，
+# 日志混进去会把多行文本当路径传给 install
+step() { echo "==> $*" >&2; }
 
 # fetch 下载到本地文件（curl 优先，wget 兜底）
 fetch() { # fetch <url> -o <path>
@@ -111,6 +113,14 @@ if [ "$(id -u)" -ne 0 ]; then
   command -v sudo >/dev/null 2>&1 || die "需要 root 权限（当前非 root 且没有 sudo）"
   exec sudo bash "$SELF" "$@"
 fi
+
+# 本脚本做的是 Linux 主机部署（useradd/nologin/systemd）；其它系统直接拒绝，
+# 避免创建出无用的用户与目录
+case "$(uname -s)" in
+  Linux) ;;
+  *) die "install.sh 面向 Linux 主机部署（需要 useradd/systemd），当前系统 $(uname -s)。
+macOS/Windows 请手动下载二进制: https://github.com/$GITHUB_REPO/releases ，或用 docker compose 部署" ;;
+esac
 
 # ---------- 1. 二进制 ----------
 download_release() {
