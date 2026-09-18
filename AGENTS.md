@@ -15,3 +15,5 @@ default   = What happened?
 verbose   = What is happening?
 debug     = Why is it happening?
 ```
+
+你当前主要工作托管为 Github , Gitea 托官方的目的是备份, 测试
