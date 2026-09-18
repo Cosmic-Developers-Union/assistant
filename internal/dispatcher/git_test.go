@@ -2,12 +2,16 @@ package dispatcher
 
 import (
 	"encoding/base64"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 const (
@@ -227,5 +231,67 @@ func TestGitTokenEnvUsesBasicScheme(t *testing.T) {
 func TestGitTokenEnvEmptyToken(t *testing.T) {
 	if env := gitTokenEnv("   "); env != nil {
 		t.Errorf("空令牌应返回 nil，得到 %v", env)
+	}
+}
+
+// SingleFlightMirror：同窗口内并发调用只有第一个真正执行同步，其余等锁复用；
+// 窗口过期后重新同步；失败同样复用到窗口结束（fail-closed）。
+func TestSingleFlightMirror(t *testing.T) {
+	var calls atomic.Int32
+	doSync := func() (string, error) {
+		calls.Add(1)
+		time.Sleep(20 * time.Millisecond) // 拉长首次同步，让并发全部撞在锁上
+		return "abc1234", nil
+	}
+	mirror := SingleFlightMirror(time.Minute, doSync)
+
+	var group sync.WaitGroup
+	results := make([]string, 16)
+	for i := range results {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			sha, err := mirror()
+			if err != nil {
+				t.Errorf("mirror() error = %v", err)
+			}
+			results[i] = sha
+		}()
+	}
+	group.Wait()
+	if got := calls.Load(); got != 1 {
+		t.Errorf("底层同步执行 %d 次, want 1（窗口内单飞）", got)
+	}
+	for i, sha := range results {
+		if sha != "abc1234" {
+			t.Errorf("results[%d] = %q, want abc1234", i, sha)
+		}
+	}
+
+	// 窗口过期后重新同步
+	time.Sleep(10 * time.Millisecond)
+	if _, err := SingleFlightMirror(0, doSync)(); err != nil {
+		t.Fatalf("窗口为 0 时应立即重新同步: %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Errorf("calls = %d, want 2", got)
+	}
+}
+
+// 同步失败也复用到窗口结束：一轮内整组待办一致跳过，下一轮重新同步。
+func TestSingleFlightMirrorReusesFailure(t *testing.T) {
+	var calls atomic.Int32
+	wantErr := errors.New("fetch 失败")
+	mirror := SingleFlightMirror(time.Minute, func() (string, error) {
+		calls.Add(1)
+		return "", wantErr
+	})
+	for i := 0; i < 3; i++ {
+		if _, err := mirror(); !errors.Is(err, wantErr) {
+			t.Fatalf("第 %d 次 error = %v, want %v", i+1, err, wantErr)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("calls = %d, want 1", got)
 	}
 }

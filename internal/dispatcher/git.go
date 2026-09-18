@@ -12,6 +12,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 )
 
 func runGit(repoDir string, args ...string) (string, error) {
@@ -108,6 +110,28 @@ func SyncMirror(repoDir, baseBranch, token string) (string, error) {
 	return strings.TrimSpace(stdout), nil
 }
 
+// SingleFlightMirror 把 SyncMirror 包成「同仓库互斥 + 窗口内单飞」：一轮检测
+// 的多个待办并发起会话时（ProcessItem 各自在会话前同步基线），第一个真正
+// 执行 fetch/checkout，其余等锁后复用同一结果——避免并发 git 命令互撞
+// .git/index.lock（受管克隆是同仓库唯一检出）。窗口取检测间隔：一轮至多
+// 同步一次；同步失败同样复用到窗口结束（fail-closed：基线不新鲜时整轮跳过，
+// 下一轮重新同步）。
+func SingleFlightMirror(window time.Duration, mirror func() (string, error)) func() (string, error) {
+	var mutex sync.Mutex
+	var sha string
+	var failure error
+	var syncedAt time.Time
+	return func() (string, error) {
+		mutex.Lock()
+		defer mutex.Unlock()
+		if !syncedAt.IsZero() && time.Since(syncedAt) < window {
+			return sha, failure
+		}
+		sha, failure = mirror()
+		syncedAt = time.Now()
+		return sha, failure
+	}
+}
 // PinStandard 用宿主检出的 .claude/ 整体替换 worktree 的同名目录。worktree 按
 // PR head 检出，随带的 .claude 是 PR 自己的版本——照单全收等于允许 PR 改弱
 // 自己被审的规则（甚至自带放行权限的 settings），所以一律先删掉：基线有

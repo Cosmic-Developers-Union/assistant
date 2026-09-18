@@ -1073,11 +1073,13 @@ func newDispatchDeps(target dispatchTarget, w io.Writer, store *daemon.Store, st
 		},
 	}
 	// 受管克隆每个检测轮前强制对齐 origin/<base>；显式 dir 的共享检出只在
-	// --sync-mirror 显式开启时对齐
+	// --sync-mirror 显式开启时对齐。同一轮的多个待办并发起会话时共享一次
+	// 同步（SingleFlightMirror）：受管克隆是同仓库唯一检出，并发 git 命令
+	// 会互撞 .git/index.lock
 	if config.SyncMirror || target.managed {
-		deps.SyncMirror = func() (string, error) {
+		deps.SyncMirror = dispatcher.SingleFlightMirror(config.Interval, func() (string, error) {
 			return dispatcher.SyncMirror(repoDir, config.BaseBranch, token)
-		}
+		})
 	}
 	if store != nil {
 		host, repository := target.instance.Host, target.repo.Name
