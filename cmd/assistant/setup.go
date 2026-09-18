@@ -13,15 +13,16 @@ import (
 )
 
 type setupOptions struct {
-	Host               string
-	Repos              []string
-	ReviewerName       string
-	MergerName         string
-	EmailDomain        string
-	RequiredApprovals  int64
-	CreateRepos        bool
-	DryRun             bool
-	AllowAdminOverride bool
+	Host                string
+	Repos               []string
+	ReviewerName        string
+	MergerName          string
+	EmailDomain         string
+	RequiredApprovals   int64
+	StatusCheckContexts []string
+	CreateRepos         bool
+	DryRun              bool
+	AllowAdminOverride  bool
 }
 
 func newSetupCommand(configFlag *string) *cobra.Command {
@@ -53,6 +54,8 @@ func newSetupCommand(configFlag *string) *cobra.Command {
 	flags.StringVar(&options.MergerName, "merger", "", "状态评审/会签账号名（缺省 merge）")
 	flags.StringVar(&options.EmailDomain, "email-domain", "", "机器人邮箱域名（缺省从 host 推导）")
 	flags.Int64Var(&options.RequiredApprovals, "required-approvals", 0, "分支保护 required approvals（缺省 2）")
+	flags.StringSliceVar(&options.StatusCheckContexts, "status-check-contexts", nil,
+		"合并前必须全绿的检查 context（逗号分隔，支持 glob）；配置后 automerge 在检查运行期间武装 Gitea 原生\nauto-merge，检查变绿即由服务端即时合并。缺省不改动服务端现状；勿填 assistant 自身工作流的 context")
 	flags.BoolVar(&options.AllowAdminOverride, "allow-admin-override", false,
 		"允许管理员绕过分支保护（缺省关闭：勾选「管理员须遵守分支保护规则」）")
 	flags.BoolVar(&options.CreateRepos, "create-repos", false, "仓库不存在时自动创建（私有，auto_init）")
@@ -130,6 +133,7 @@ func runSetup(command *cobra.Command, configPath string, options *setupOptions) 
 		MergerName:          options.MergerName,
 		EmailDomain:         options.EmailDomain,
 		RequiredApprovals:   options.RequiredApprovals,
+		StatusCheckContexts: options.StatusCheckContexts,
 		AllowAdminOverride:  options.AllowAdminOverride,
 		CreateRepos:         options.CreateRepos,
 		DryRun:              options.DryRun,

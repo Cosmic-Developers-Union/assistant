@@ -493,17 +493,17 @@ func TestClientListBranchProtectionsUsesDedicatedToken(t *testing.T) {
 // 第二次走版本门禁的调用会 nil 解引用（常驻 daemon 直接崩）。客户端改成自己探一次：
 // 探到就钉死版本（SDK 不再自拉），探不到就忽略版本门禁，让真实 API 错误浮出来。
 func TestClientVersionProbeDoesNotPanicOnRetry(t *testing.T) {
-		cases := []struct {
-			name         string
-			versionBody  string
-			versionCode  int
-			wantVersions int32
-		}{
-			// 成功（200）不重试：仍是一次；失败（500）由 retryTransport 退避重试
-			// 到上限 3 次——抖动站点上版本探测也受保护，探测轮数不变（每轮至多 3 次尝试）
-			{name: "探测成功", versionBody: `{"version":"1.26.0"}`, versionCode: http.StatusOK, wantVersions: 1},
-			{name: "探测失败", versionBody: "boom", versionCode: http.StatusInternalServerError, wantVersions: 3},
-		}
+	cases := []struct {
+		name         string
+		versionBody  string
+		versionCode  int
+		wantVersions int32
+	}{
+		// 成功（200）不重试：仍是一次；失败（500）由 retryTransport 退避重试
+		// 到上限 3 次——抖动站点上版本探测也受保护，探测轮数不变（每轮至多 3 次尝试）
+		{name: "探测成功", versionBody: `{"version":"1.26.0"}`, versionCode: http.StatusOK, wantVersions: 1},
+		{name: "探测失败", versionBody: "boom", versionCode: http.StatusInternalServerError, wantVersions: 3},
+	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			var versionCalls int32
@@ -562,5 +562,160 @@ func TestReviewerRespondedOnHead(t *testing.T) {
 	}
 	if ReviewerRespondedOnHead(reviews, "bob", "head-1") {
 		t.Error("回应必须来自 reviewer 本人")
+	}
+}
+
+// ArmAutoMerge 按 Gitea 1.27.3 实测状态码分类：201 排定、409+「already
+// scheduled」已在排定、200 检查已绿直接合并；409 的其他消息（Wrong commit
+// ID 等）与 405 常规拒绝是失败，405「Please try again later」短暂重试。
+func TestClientArmAutoMerge(t *testing.T) {
+	tests := []struct {
+		name       string
+		statuses   []int  // 依序返回的状态码（耗尽后重复最后一个）
+		body       string // 4xx/5xx 响应体
+		wantResult AutoMergeArmResult
+		wantError  string
+		wantCalls  int
+	}{
+		{
+			name:       "scheduled",
+			statuses:   []int{http.StatusCreated},
+			wantResult: AutoMergeArmed,
+			wantCalls:  1,
+		},
+		{
+			name:       "already scheduled",
+			statuses:   []int{http.StatusConflict},
+			body:       `{"message":"pull request is already scheduled to auto merge when checks succeed [pull_id: 2]"}`,
+			wantResult: AutoMergeAlreadyArmed,
+			wantCalls:  1,
+		},
+		{
+			name:       "merged directly",
+			statuses:   []int{http.StatusOK},
+			wantResult: AutoMergeMergedNow,
+			wantCalls:  1,
+		},
+		{
+			name:      "wrong head is a failure not already-armed",
+			statuses:  []int{http.StatusConflict},
+			body:      `{"message":"Wrong commit ID"}`,
+			wantError: "Wrong commit ID",
+			wantCalls: 1,
+		},
+		{
+			name:       "mergeability pending retries then schedules",
+			statuses:   []int{http.StatusMethodNotAllowed, http.StatusCreated},
+			body:       `{"message":"Please try again later"}`,
+			wantResult: AutoMergeArmed,
+			wantCalls:  2,
+		},
+		{
+			name:      "mergeability pending gives up after three tries",
+			statuses:  []int{http.StatusMethodNotAllowed, http.StatusMethodNotAllowed, http.StatusMethodNotAllowed},
+			body:      `{"message":"Please try again later"}`,
+			wantError: "Please try again later",
+			wantCalls: 3,
+		},
+		{
+			name:      "other rejections do not retry",
+			statuses:  []int{http.StatusMethodNotAllowed},
+			body:      `{"message":"User not allowed to merge PR"}`,
+			wantError: "User not allowed to merge PR",
+			wantCalls: 1,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if request.URL.Path == "/api/v1/version" {
+					_, _ = writer.Write([]byte(`{"version":"1.27.3"}`))
+					return
+				}
+				calls.Add(1)
+				if request.Method != http.MethodPost || !strings.HasSuffix(request.URL.Path, "/pulls/21/merge") {
+					t.Errorf("request = %s %s, want POST .../pulls/21/merge", request.Method, request.URL.Path)
+				}
+				index := min(int(calls.Load()), len(test.statuses)) - 1
+				status := test.statuses[index]
+				if status < 300 {
+					writer.WriteHeader(status)
+					return
+				}
+				writer.WriteHeader(status)
+				_, _ = writer.Write([]byte(test.body))
+			}))
+			defer server.Close()
+
+			client, err := NewClient(server.URL, "secret")
+			if err != nil {
+				t.Fatalf("NewClient() error = %v", err)
+			}
+			result, err := client.ArmAutoMerge(t.Context(), Repository{Owner: "acme", Name: "video"}, 21, "head")
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("ArmAutoMerge() = %v, %v, want error containing %q", result, err, test.wantError)
+				}
+			} else if err != nil {
+				t.Fatalf("ArmAutoMerge() error = %v", err)
+			}
+			if result != test.wantResult {
+				t.Errorf("ArmAutoMerge() = %q, want %q", result, test.wantResult)
+			}
+			if got := int(calls.Load()); got != test.wantCalls {
+				t.Errorf("calls = %d, want %d", got, test.wantCalls)
+			}
+		})
+	}
+}
+
+// DisarmAutoMerge 幂等：204 移除了排定，404 本无排定，其余为失败。
+func TestClientDisarmAutoMerge(t *testing.T) {
+	tests := []struct {
+		name        string
+		statusCode  int
+		body        string
+		wantRemoved bool
+		wantError   bool
+	}{
+		{name: "removed", statusCode: http.StatusNoContent, wantRemoved: true},
+		{name: "nothing scheduled", statusCode: http.StatusNotFound},
+		{name: "failure", statusCode: http.StatusForbidden, body: `{"message":"forbidden"}`, wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if request.URL.Path == "/api/v1/version" {
+					_, _ = writer.Write([]byte(`{"version":"1.27.3"}`))
+					return
+				}
+				if request.Method != http.MethodDelete {
+					t.Errorf("request method = %s, want DELETE", request.Method)
+				}
+				writer.WriteHeader(test.statusCode)
+				_, _ = writer.Write([]byte(test.body))
+			}))
+			defer server.Close()
+
+			client, err := NewClient(server.URL, "secret")
+			if err != nil {
+				t.Fatalf("NewClient() error = %v", err)
+			}
+			removed, err := client.DisarmAutoMerge(t.Context(), Repository{Owner: "acme", Name: "video"}, 21)
+			if test.wantError {
+				if err == nil {
+					t.Fatalf("DisarmAutoMerge() error = nil, want failure")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("DisarmAutoMerge() error = %v", err)
+			}
+			if removed != test.wantRemoved {
+				t.Errorf("DisarmAutoMerge() removed = %v, want %v", removed, test.wantRemoved)
+			}
+		})
 	}
 }

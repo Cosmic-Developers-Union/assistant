@@ -523,7 +523,7 @@ func (a *giteaAdmin) EnsureBranchProtection(
 			continue
 		}
 		required := options.RequiredApprovals
-		if _, _, err := a.sdk.Repositories.EditBranchProtection(ctx, owner, name, protection.RuleName, gitea.EditBranchProtectionOption{
+		edit := gitea.EditBranchProtectionOption{
 			RequiredApprovals:             &required,
 			BlockOnRejectedReviews:        &enabled,
 			BlockOnOfficialReviewRequests: &enabled,
@@ -532,12 +532,19 @@ func (a *giteaAdmin) EnsureBranchProtection(
 			EnableMergeWhitelist:          &enabled,
 			MergeWhitelistUsernames:       whitelist,
 			BlockAdminMergeOverride:       &blockAdmin,
-		}); err != nil {
+		}
+		if len(options.StatusCheckContexts) > 0 {
+			// 只在显式提供时写入：未提供时不改动服务端现状（可能手配过），
+			// nil 字段在 Edit 语义下保持原值。
+			edit.EnableStatusCheck = &enabled
+			edit.StatusCheckContexts = options.StatusCheckContexts
+		}
+		if _, _, err := a.sdk.Repositories.EditBranchProtection(ctx, owner, name, protection.RuleName, edit); err != nil {
 			return fmt.Errorf("更新 %s 分支保护: %w", fullName, err)
 		}
 		return nil
 	}
-	if _, _, err := a.sdk.Repositories.CreateBranchProtection(ctx, owner, name, gitea.CreateBranchProtectionOption{
+	create := gitea.CreateBranchProtectionOption{
 		BranchName:                    options.Branch,
 		RequiredApprovals:             options.RequiredApprovals,
 		BlockOnRejectedReviews:        true,
@@ -547,7 +554,12 @@ func (a *giteaAdmin) EnsureBranchProtection(
 		EnableMergeWhitelist:          true,
 		MergeWhitelistUsernames:       whitelist,
 		BlockAdminMergeOverride:       blockAdmin,
-	}); err != nil {
+	}
+	if len(options.StatusCheckContexts) > 0 {
+		create.EnableStatusCheck = true
+		create.StatusCheckContexts = options.StatusCheckContexts
+	}
+	if _, _, err := a.sdk.Repositories.CreateBranchProtection(ctx, owner, name, create); err != nil {
 		return fmt.Errorf("创建 %s 分支保护: %w", fullName, err)
 	}
 	return nil

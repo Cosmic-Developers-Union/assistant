@@ -20,11 +20,12 @@ import (
 )
 
 type initOptions struct {
-	Reviewer       string
-	Merger         string
-	Image          string
-	ExtraApprovals int64
-	DryRun         bool
+	Reviewer            string
+	Merger              string
+	Image               string
+	ExtraApprovals      int64
+	StatusCheckContexts []string
+	DryRun              bool
 }
 
 // repoSetupTarget 是当前仓库初始化的解析结果。
@@ -137,6 +138,8 @@ func newInitBranchProtectionCommand(configFlag *string, options *initOptions) *c
 	command.Flags().StringVar(&options.Merger, "merger", instances.DefaultMergerName, "merge 账号名（合并白名单）")
 	command.Flags().StringVar(&options.Reviewer, "reviewer", instances.DefaultReviewerName, "ai 账号名（存在时票数 +1）")
 	command.Flags().Int64Var(&options.ExtraApprovals, "extra-approvals", 0, "在 merge/ai 之上附加的批准数")
+	command.Flags().StringSliceVar(&options.StatusCheckContexts, "status-check-contexts", nil,
+		"合并前必须全绿的检查 context（逗号分隔，支持 glob）；配置后 automerge 在检查运行期间武装 Gitea 原生\nauto-merge，检查变绿即由服务端即时合并。缺省不改动服务端现状")
 	return command
 }
 
@@ -283,9 +286,10 @@ func runInitBranchProtection(command *cobra.Command, configPath string, options 
 		return nil
 	}
 	if err := client.EnsureBranchProtection(ctx, target.FullName, setup.ProtectionOptions{
-		Branch:            info.DefaultBranch,
-		MergerName:        options.Merger,
-		RequiredApprovals: int64(approvals),
+		Branch:              info.DefaultBranch,
+		MergerName:          options.Merger,
+		RequiredApprovals:   int64(approvals),
+		StatusCheckContexts: options.StatusCheckContexts,
 	}); err != nil {
 		return err
 	}

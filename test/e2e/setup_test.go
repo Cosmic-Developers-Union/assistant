@@ -453,18 +453,19 @@ func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 	}
 
-	// Actions 配置：每个受管仓库写 MERGE_TOKEN，值是同一条 merge 令牌（整站
-	// 唯一）。secret 只写不可读，无法回读比对，因此这里校验两块：result 里
-	// merge 凭据恰好一条 + 每个仓库都存在 MERGE_TOKEN；令牌值正确性由
-	// workflow_test 的 automerge job（真实的 merge 身份合并）端到端验证。
+	// Actions 配置：setup.Run 已在收尾时分发 MERGE_TOKEN（整站同一条 merge
+	// 令牌，覆盖 merge 为管理员协作者的仓库）。secret 只写不可读，无法回读
+	// 比对，因此这里校验 SyncMergeSecrets 幂等（双写）+ 每个仓库都存在
+	// MERGE_TOKEN；令牌值正确性由 workflow_test 的 automerge job（真实的
+	// merge 身份合并）端到端验证。
 	actionsAdmin, err := setup.NewAdmin(ctx, setup.Options{Host: host, AdminToken: adminToken})
 	if err != nil {
 		t.Fatal(err)
 	}
 	// 写两次：同值 PUT 幂等（Gitea secret 只能覆盖写，重复执行不报错）。
 	for round := 0; round < 2; round++ {
-		if err := setup.ConfigureActions(ctx, actionsAdmin, instance, mergeCredential.Token, false, t.Logf); err != nil {
-			t.Fatalf("ConfigureActions() round %d error = %v", round+1, err)
+		if err := setup.SyncMergeSecrets(ctx, actionsAdmin, instance.Merger.Name, mergeCredential.Token, false, t.Logf); err != nil {
+			t.Fatalf("SyncMergeSecrets() round %d error = %v", round+1, err)
 		}
 	}
 	for _, repo := range instance.Repos {

@@ -50,5 +50,8 @@ workflow（`.gitea/workflows/assistant.yml`）包含两个 job:
 
 - sync: 收敛标签, 并把 PR 原生评审状态同步为状态标签（标签已由 `init labels`
   收敛为规范体系, sync 只做维持）
-- automerge: 对满足门禁的 PR 执行会签与合并
+- automerge: 对满足门禁的 PR 执行会签与合并；必要检查运行中且分支保护配置了
+  必要检查 context（`--status-check-contexts`）时, 先会签再武装 Gitea 原生
+  auto-merge, 检查变绿由服务端即时合并——「检查完成」没有任何 Actions 触发
+  事件, 不武装就只能等 schedule 兜底
 

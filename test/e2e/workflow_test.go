@@ -100,14 +100,14 @@ func TestInstalledWorkflowRunsOnGiteaRunner(t *testing.T) {
 	// 机器人令牌只在凭据库结果里：review / merge 按 purpose 各一条。
 	reviewCredential := credentialFor(t, result, credentials.PurposeReview)
 	mergeCredential := credentialFor(t, result, credentials.PurposeMerge)
-	// 2) Actions 配置：唯一需要的是 merge 令牌（MERGE_TOKEN，整站一条，
-	//    每个仓库写入同一个值）
+	// 2) Actions 配置：setup.Run 已分发 MERGE_TOKEN，这里补一次幂等双写，
+	//    与 setup_test 同口径校验 secret 存在
 	actionsAdmin, err := setup.NewAdmin(ctx, setup.Options{Host: host, AdminToken: adminToken})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("NewAdmin() error = %v", err)
 	}
-	if err := setup.ConfigureActions(ctx, actionsAdmin, instance, mergeCredential.Token, false, t.Logf); err != nil {
-		t.Fatalf("ConfigureActions() error = %v", err)
+	if err := setup.SyncMergeSecrets(ctx, actionsAdmin, instance.Merger.Name, mergeCredential.Token, false, t.Logf); err != nil {
+		t.Fatalf("SyncMergeSecrets() error = %v", err)
 	}
 
 	// 3) 权限模型：owner=admin，另加 write / read 两个协作者

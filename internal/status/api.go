@@ -1,8 +1,10 @@
 package status
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -166,6 +168,19 @@ type ReviewInput struct {
 	CommitID string
 }
 
+// AutoMergeArmResult 分类 merge 端点在 merge_when_checks_succeed 模式下的服务端
+// 结果（Gitea 1.27.3 实测）：
+//   - 201：排定成功，必要检查全绿时由 Gitea 核心即时合并；
+//   - 409：此前已排定（幂等成功——重复运行/并发竞态的正常形态）；
+//   - 200：必要检查此刻已全绿，服务端直接完成合并，未排队。
+type AutoMergeArmResult string
+
+const (
+	AutoMergeArmed        AutoMergeArmResult = "armed"
+	AutoMergeAlreadyArmed AutoMergeArmResult = "already-armed"
+	AutoMergeMergedNow    AutoMergeArmResult = "merged-now"
+)
+
 // Comment 是 Issue/PR 评论中与评审意图识别相关的部分。
 type Comment struct {
 	ID      int64
@@ -184,6 +199,12 @@ type API interface {
 	ListOpenPullRequests(context.Context, Repository) ([]PullRequest, error)
 	GetPullRequest(context.Context, Repository, int64) (PullRequest, error)
 	MergePullRequest(context.Context, Repository, int64) error
+	// ArmAutoMerge 武装 Gitea 原生 auto-merge（merge_when_checks_succeed），
+	// headSHA 钉定武装时的 head：head 前移后服务端以 409 拒绝，由下一轮重评。
+	ArmAutoMerge(context.Context, Repository, int64, string) (AutoMergeArmResult, error)
+	// DisarmAutoMerge 撤销已武装的原生 auto-merge；返回是否真的移除了排定，
+	// 本无排定时为 (false, nil)（幂等）。
+	DisarmAutoMerge(context.Context, Repository, int64) (bool, error)
 	ListPullReviews(context.Context, Repository, int64) ([]Review, error)
 	// ListIssueCommentsSince 返回条目（Issue 或 PR）上 since 之后的评论；since 为零值时返回全部。
 	ListIssueCommentsSince(context.Context, Repository, int64, time.Time) ([]Comment, error)
@@ -650,6 +671,131 @@ func (c *Client) MergePullRequest(ctx context.Context, repository Repository, in
 		return fmt.Errorf("merge pull request #%d: Gitea 拒绝合并（分支保护/权限/状态不满足）", index)
 	}
 	return nil
+}
+
+// armAutoMergeBody 对应 Gitea merge 端点 merge_when_checks_succeed 模式的请求体；
+// squash、合并后删 head 分支与直接合并路径（MergePullRequest）保持同一形态，
+// 服务端会把 delete_branch_after_merge 随排定存储，检查变绿时一并生效。
+type armAutoMergeBody struct {
+	Do                     string `json:"Do"`
+	MergeWhenChecksSucceed bool   `json:"merge_when_checks_succeed"`
+	DeleteBranchAfterMerge bool   `json:"delete_branch_after_merge"`
+	HeadCommitID           string `json:"head_commit_id,omitempty"`
+}
+
+// ArmAutoMerge 武装 Gitea 原生 auto-merge（1.19+；Gitea 1.27.3 实测）：必要检查
+// 全绿时由 Gitea 核心即时完成 squash 合并并删除 head 分支，不再依赖 assistant
+// 被事件唤醒——「检查从 running 变 success」没有任何 Actions 触发事件，这是
+// 事件驱动的结构性盲区，武装后盲区消失。走原始 HTTP 而非 SDK：SDK 把 merge
+// 端点的 200/201/409 全部折叠成一个 bool，无法区分三种结果。
+//
+// 状态码语义（1.27.3 实测，CheckPullMergeable 先于排定执行）：
+//   - 201 排定成功；409 + "already scheduled" 已在排定（幂等成功）；
+//   - 200 必要检查此刻已全绿，服务端直接合并（未排队）；
+//   - 405 "Please try again later"：合并性异步计算未完，短暂重试；
+//   - 其余 4xx/5xx：按失败返回（schedule 兜底仍在）。
+func (c *Client) ArmAutoMerge(
+	ctx context.Context,
+	repository Repository,
+	index int64,
+	headSHA string,
+) (AutoMergeArmResult, error) {
+	var payload []byte
+	body, err := jsonv2.Marshal(armAutoMergeBody{
+		Do:                     "squash",
+		MergeWhenChecksSucceed: true,
+		DeleteBranchAfterMerge: true,
+		HeadCommitID:           headSHA,
+	})
+	if err != nil {
+		return "", fmt.Errorf("arm auto merge #%d: %w", index, err)
+	}
+	payload = body
+	for attempt := 0; ; attempt++ {
+		request, requestErr := http.NewRequestWithContext(ctx, http.MethodPost,
+			fmt.Sprintf("%s/api/v1/repos/%s/%s/pulls/%d/merge", c.host, repository.Owner, repository.Name, index),
+			bytes.NewReader(payload))
+		if requestErr != nil {
+			return "", fmt.Errorf("arm auto merge #%d: %w", index, requestErr)
+		}
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "token "+c.accessToken)
+		response, requestErr := c.httpClient.Do(request)
+		if requestErr != nil {
+			return "", fmt.Errorf("arm auto merge #%d: %w", index, requestErr)
+		}
+		result, message, classified := classifyArmResponse(response)
+		response.Body.Close()
+		if classified {
+			return result, nil
+		}
+		if response.StatusCode == http.StatusMethodNotAllowed &&
+			strings.Contains(message, "Please try again later") && attempt < 2 {
+			// 合并性异步计算未完（新 PR 的常态）：等一秒再试，别让秒级窗口
+			// 把合并推迟到下一个 schedule tick——那正是本调用要消除的盲区。
+			select {
+			case <-ctx.Done():
+				return "", fmt.Errorf("arm auto merge #%d: %w", index, ctx.Err())
+			case <-time.After(time.Second):
+			}
+			continue
+		}
+		return "", fmt.Errorf("arm auto merge #%d: HTTP %d: %s", index, response.StatusCode, message)
+	}
+}
+
+// classifyArmResponse 把 merge 端点响应映射为武装结果；classified 为假表示是
+// 需要调用方处理的失败响应。409 需按 body 区分：排定路径的「已在排定」与直接
+// 合并路径的「Wrong commit ID」都用 409。
+func classifyArmResponse(response *http.Response) (result AutoMergeArmResult, message string, classified bool) {
+	if response.StatusCode >= 200 && response.StatusCode < 300 {
+		if response.StatusCode == http.StatusCreated {
+			return AutoMergeArmed, "", true
+		}
+		return AutoMergeMergedNow, "", true
+	}
+	message = responseMessage(response.Body)
+	if response.StatusCode == http.StatusConflict && strings.Contains(message, "already scheduled to auto merge") {
+		return AutoMergeAlreadyArmed, message, true
+	}
+	return "", message, false
+}
+
+// DisarmAutoMerge 撤销已武装的原生 auto-merge（Gitea 1.27.3 实测：有排定回
+// 204，无排定回 404）。Gitea 1.27 的排定不会因批准撤销、head 前移或检查失败
+// 自动失效——assistant 门禁失效时必须主动撤，否则检查转绿即合并。
+func (c *Client) DisarmAutoMerge(ctx context.Context, repository Repository, index int64) (bool, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodDelete,
+		fmt.Sprintf("%s/api/v1/repos/%s/%s/pulls/%d/merge", c.host, repository.Owner, repository.Name, index), nil)
+	if err != nil {
+		return false, fmt.Errorf("disarm auto merge #%d: %w", index, err)
+	}
+	request.Header.Set("Authorization", "token "+c.accessToken)
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return false, fmt.Errorf("disarm auto merge #%d: %w", index, err)
+	}
+	defer response.Body.Close()
+	switch response.StatusCode {
+	case http.StatusNoContent:
+		return true, nil
+	case http.StatusNotFound:
+		return false, nil
+	}
+	return false, fmt.Errorf("disarm auto merge #%d: HTTP %d: %s", index, response.StatusCode, responseMessage(response.Body))
+}
+
+// responseMessage 读取错误响应体中的 message 字段（截断到 512 字节）；非 JSON
+// 体退回原始文本，用于把 Gitea 的拒绝原因带进错误信息。
+func responseMessage(body io.Reader) string {
+	raw, _ := io.ReadAll(io.LimitReader(body, 512))
+	var payload struct {
+		Message string `json:"message"`
+	}
+	if err := jsonv2.Unmarshal(raw, &payload); err != nil {
+		return strings.TrimSpace(string(raw))
+	}
+	return strings.TrimSpace(payload.Message)
 }
 
 func (c *Client) ListIssueCommentsSince(

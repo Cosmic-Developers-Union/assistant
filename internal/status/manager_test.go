@@ -1,6 +1,7 @@
 package status
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"slices"
@@ -50,10 +51,18 @@ type fakeAPI struct {
 	mergeCalls      int
 	mergeError      error
 	reviewError     error
-	issueListError  map[string]error
-	pullListError   map[string]error
-	protectError    map[string]error
-	nextLabelID     int64
+	// armedPulls 是 ArmAutoMerge 的服务端排定状态；armResult 覆盖下一次武装
+	// 的结果（默认 AutoMergeArmed），armHeads 记录武装钉定的 head。
+	armedPulls     map[int64]bool
+	armResult      AutoMergeArmResult
+	armError       error
+	armCalls       []int64
+	armHeads       []string
+	disarmError    error
+	issueListError map[string]error
+	pullListError  map[string]error
+	protectError   map[string]error
+	nextLabelID    int64
 	// selfLogin 是 AuthenticatedUser 返回的身份（会签方），默认 "merge"。
 	selfLogin string
 	// ops 按发生顺序记录 review 提交与合并动作，供时序断言使用。
@@ -104,6 +113,40 @@ func (f *fakeAPI) MergePullRequest(_ context.Context, _ Repository, index int64)
 	}
 	f.mergedPulls = append(f.mergedPulls, index)
 	return nil
+}
+
+// ArmAutoMerge 模拟 Gitea merge 端点 merge_when_checks_succeed 的三分支：
+// 排定（记状态）、已在排定（幂等）、检查已绿直接合并（计入 mergedPulls）。
+func (f *fakeAPI) ArmAutoMerge(_ context.Context, _ Repository, index int64, headSHA string) (AutoMergeArmResult, error) {
+	f.armCalls = append(f.armCalls, index)
+	f.armHeads = append(f.armHeads, headSHA)
+	if f.armError != nil {
+		f.ops = append(f.ops, "arm:error")
+		return "", f.armError
+	}
+	result := cmp.Or(f.armResult, AutoMergeArmed)
+	switch result {
+	case AutoMergeAlreadyArmed:
+		f.ops = append(f.ops, "arm:already")
+	case AutoMergeMergedNow:
+		f.mergedPulls = append(f.mergedPulls, index)
+		f.ops = append(f.ops, "arm:merged")
+	default:
+		f.armedPulls[index] = true
+		f.ops = append(f.ops, "arm")
+	}
+	return result, nil
+}
+
+func (f *fakeAPI) DisarmAutoMerge(_ context.Context, _ Repository, index int64) (bool, error) {
+	if f.disarmError != nil {
+		return false, f.disarmError
+	}
+	if !f.armedPulls[index] {
+		return false, nil
+	}
+	delete(f.armedPulls, index)
+	return true, nil
 }
 
 func (f *fakeAPI) ListPullReviews(_ context.Context, repository Repository, index int64) ([]Review, error) {
@@ -1234,6 +1277,7 @@ func newFakeAPI(repository Repository, labels []Label) *fakeAPI {
 		labels:         map[string][]Label{repository.FullName(): labels},
 		protections:    map[string][]BranchProtection{},
 		statuses:       map[string][]CheckStatus{},
+		armedPulls:     map[int64]bool{},
 		issueListError: map[string]error{},
 		pullListError:  map[string]error{},
 		protectError:   map[string]error{},

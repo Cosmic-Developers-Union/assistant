@@ -40,6 +40,9 @@ type Options struct {
 	RequiredApprovals int64
 	CreateRepos       bool
 	DryRun            bool
+	// StatusCheckContexts 透传给分支保护的必要检查配置；为空时不改动服务端
+	// 现状（见 ProtectionOptions.StatusCheckContexts）。
+	StatusCheckContexts []string
 	// AllowAdminOverride 为真时不勾选「管理员须遵守分支保护规则」；缺省 false，
 	// 即管理员（含 merger）也必须满足审批/检查门禁、不能绕过。
 	AllowAdminOverride bool
@@ -98,8 +101,14 @@ type ProtectionOptions struct {
 	// MergerName 进入合并白名单：只允许 merger 合并（自动化会签 + 合并）。
 	MergerName string
 	// AllowAdminOverride 为真时不勾选「管理员须遵守分支保护规则」；缺省 false
-	// （勾选：身为管理员的 merger 也必须满足审批/检查门禁，不能绕过）。
+	//（勾选：身为管理员的 merger 也必须满足审批/检查门禁，不能绕过）。
 	AllowAdminOverride bool
+	// StatusCheckContexts 是合并前必须全绿的检查 context（支持 glob）；为空时
+	// 不改动服务端的状态检查配置。配置后 automerge 会在检查运行期间武装 Gitea
+	// 原生 auto-merge，检查变绿即由服务端即时合并（消除「检查完成无触发事件」
+	// 的合并延迟盲区）。注意别把 assistant 自身的工作流 context 配成必要项：
+	// sync 运行被取消会留下 failure 状态，会把合并一并卡住。
+	StatusCheckContexts []string
 }
 
 var accountNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
@@ -260,14 +269,19 @@ func setupRepository(
 	if options.AllowAdminOverride {
 		adminOverride = "开启（管理员可绕过）"
 	}
-	logf("配置分支保护 %s（required approvals=%d，只允许 %s 合并，驳回/未回应请求均阻塞，过期批准作废，落后分支阻塞，管理员绕过 %s）",
-		info.DefaultBranch, options.RequiredApprovals, options.MergerName, adminOverride)
+	statusChecks := "不改动"
+	if len(options.StatusCheckContexts) > 0 {
+		statusChecks = strings.Join(options.StatusCheckContexts, ", ")
+	}
+	logf("配置分支保护 %s（required approvals=%d，只允许 %s 合并，必要检查=%s，驳回/未回应请求均阻塞，过期批准作废，落后分支阻塞，管理员绕过 %s）",
+		info.DefaultBranch, options.RequiredApprovals, options.MergerName, statusChecks, adminOverride)
 	if !options.DryRun {
 		if err := admin.EnsureBranchProtection(ctx, fullName, ProtectionOptions{
-			Branch:             info.DefaultBranch,
-			RequiredApprovals:  options.RequiredApprovals,
-			MergerName:         options.MergerName,
-			AllowAdminOverride: options.AllowAdminOverride,
+			Branch:              info.DefaultBranch,
+			RequiredApprovals:   options.RequiredApprovals,
+			MergerName:          options.MergerName,
+			AllowAdminOverride:  options.AllowAdminOverride,
+			StatusCheckContexts: options.StatusCheckContexts,
 		}); err != nil {
 			return err
 		}
