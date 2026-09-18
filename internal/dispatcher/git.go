@@ -5,6 +5,7 @@
 package dispatcher
 
 import (
+	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
@@ -37,15 +38,21 @@ func runGitEnv(repoDir string, env []string, args ...string) (string, error) {
 
 // gitTokenEnv 让 git 子进程以站点令牌认证（Authorization header），只作用于
 // 本次命令：令牌不落 .git/config，也不出现在 URL/进程参数里。
+//
+// scheme 用 Basic 而不是 token：Gitea 的 git smart HTTP 两种都认，但 LFS 端点
+// （objects/batch）只认 Basic——token scheme 会让 git-lfs 的对象下载 401，
+// 克隆时 smudge 失败（克隆成功、检出失败）。Basic 的用户名占位 oauth2：
+// Gitea 校验的是密码位令牌，用户名任意。
 func gitTokenEnv(token string) []string {
 	token = strings.TrimSpace(token)
 	if token == "" {
 		return nil
 	}
+	basic := base64.StdEncoding.EncodeToString([]byte("oauth2:" + token))
 	return []string{
 		"GIT_CONFIG_COUNT=1",
 		"GIT_CONFIG_KEY_0=http.extraHeader",
-		"GIT_CONFIG_VALUE_0=Authorization: token " + token,
+		"GIT_CONFIG_VALUE_0=Authorization: Basic " + basic,
 		"GIT_TERMINAL_PROMPT=0",
 	}
 }

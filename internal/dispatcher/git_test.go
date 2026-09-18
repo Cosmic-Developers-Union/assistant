@@ -1,9 +1,11 @@
 package dispatcher
 
 import (
+	"encoding/base64"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -197,5 +199,33 @@ func TestEnsureRepoRejectsOccupiedDir(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "keep.txt")); err != nil {
 		t.Errorf("不应触碰既有文件: %v", err)
+	}
+}
+
+// gitTokenEnv 必须产出 Basic scheme：Gitea 的 LFS 端点（objects/batch）不认
+// `Authorization: token`，只认 Basic——token scheme 会让 git-lfs 的对象下载
+// 401（克隆成功、检出失败，LFS 仓库整个被跳过）。用户名是占位 oauth2，
+// Gitea 只校验密码位令牌。
+func TestGitTokenEnvUsesBasicScheme(t *testing.T) {
+	env := gitTokenEnv("secret-token")
+	header := "GIT_CONFIG_VALUE_0=Authorization: Basic " +
+		base64.StdEncoding.EncodeToString([]byte("oauth2:secret-token"))
+	if !slices.Contains(env, header) {
+		t.Fatalf("extraHeader 应为 Basic(oauth2:token)，得到: %v", env)
+	}
+	if !slices.Contains(env, "GIT_TERMINAL_PROMPT=0") || !slices.Contains(env, "GIT_CONFIG_COUNT=1") {
+		t.Errorf("环境变量缺项: %v", env)
+	}
+	// 令牌明文不应单独出现在任何变量里（base64 之外无明文，错误输出不泄露）
+	for _, item := range env {
+		if item != header && strings.Contains(item, "secret-token") {
+			t.Errorf("令牌明文出现在环境变量: %s", item)
+		}
+	}
+}
+
+func TestGitTokenEnvEmptyToken(t *testing.T) {
+	if env := gitTokenEnv("   "); env != nil {
+		t.Errorf("空令牌应返回 nil，得到 %v", env)
 	}
 }
