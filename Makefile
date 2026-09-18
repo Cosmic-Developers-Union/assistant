@@ -51,6 +51,7 @@ help: ## 显示帮助信息
 	@echo "  make build               # 构建 assistant 二进制 (Linux/amd64)"
 	@echo "  make build-local         # 构建本地平台二进制"
 	@echo "  make install             # 先构建再安装到本机 (PREFIX 可改，缺省 /usr/local)"
+	@echo "  make install-service     # 主机部署 (systemd: 独立服务用户 + XDG 目录 + 空配置)"
 	@echo "  make test                # 运行测试"
 	@echo "  make compose-up          # 构建二进制并启动 docker compose 部署 (容器挂载该二进制)"
 	@echo "  make push                # 手动发布: 构建并推送 latest 到 generic package registry"
@@ -79,6 +80,10 @@ install: build-local ## 先构建再安装到本机 (缺省 /usr/local；非 roo
 	$(SUDO) install -m 0755 $(BINARY_NAME) "$(INSTALL_DIR)/$(BINARY_NAME)"
 	@echo "==> 已安装: $(INSTALL_DIR)/$(BINARY_NAME)"
 	@echo "    shell 补全: source <($(BINARY_NAME) completion bash)（或写入系统补全目录）"
+
+.PHONY: install-service
+install-service: build-local ## 主机部署: install.sh（独立系统服务用户 + XDG 目录 + systemd 单元 + 空配置；额外参数用 ./install.sh）
+	@./install.sh --bin $(BINARY_NAME)
 
 .PHONY: test
 test: ## 运行测试

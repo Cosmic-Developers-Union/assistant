@@ -307,6 +307,20 @@ func (i Instance) FindRepo(name string) (Repo, bool) {
 // Load 读取并校验配置文件。provider 定义就在 config.json 的 providers 里——
 // 用户配置只有这一个落点（凭据在 credentials.json，由 assistant 管理）。
 func Load(path string) (*File, error) {
+	file, err := Parse(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := file.Validate(); err != nil {
+		return nil, fmt.Errorf("配置 %s 无效: %w", path, err)
+	}
+	return file, nil
+}
+
+// Parse 读取配置并规范化，但不做语义校验（instances 允许为空）：`config new`
+// 生成的空骨架对运行无效，`config init` 却要能在它上面补全——语法与结构错误
+// 照报，语义问题留给合并结果写入前的 Validate。
+func Parse(path string) (*File, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("读取配置 %s: %w", path, err)
@@ -318,19 +332,21 @@ func Load(path string) (*File, error) {
 		return nil, fmt.Errorf("解析配置 %s: %w", path, err)
 	}
 	file.Normalize()
-	if err := file.Validate(); err != nil {
-		return nil, fmt.Errorf("配置 %s 无效: %w", path, err)
-	}
 	return &file, nil
 }
 
-// Save 原子写入配置文件（0600）；先写同目录临时文件再改名，避免半截文件。
+// Save 序列化并原子写入配置文件（0600）。
 func Save(path string, file *File) error {
 	data, err := json.MarshalIndent(file, "", "  ")
 	if err != nil {
 		return err
 	}
 	data = append(data, '\n')
+	return SaveBytes(path, data)
+}
+
+// SaveBytes 原子写入配置文件（0600）：先写同目录临时文件再改名，避免半截文件。
+func SaveBytes(path string, data []byte) error {
 	directory := filepath.Dir(path)
 	if err := os.MkdirAll(directory, 0o755); err != nil {
 		return err

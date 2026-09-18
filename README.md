@@ -26,9 +26,9 @@ Gitea 上的例行事务与评审自动化，两块能力：
 
 | 路径 | 内容 | 谁写 | 说明 |
 | --- | --- | --- | --- |
-| `<配置目录>/config.json` | 平台、仓库、provider、微信桥 | 你（`config init` 可补全） | 用户配置，含 provider `api_key` |
+| `<配置目录>/config.json` | 平台、仓库、provider、微信桥 | 你（`config new` 生成空骨架，`config init` 补全） | 用户配置，含 provider `api_key` |
 | `<配置目录>/credentials.json` | 登录身份 + `review`/`merge`/`admin`/`mcp` 用途令牌 | `login` / `setup` | 0600，不要手改 |
-| `<配置目录>/config.schema.json` | 配置的 JSON Schema | `config init` | 编辑器补全用 |
+| `<配置目录>/config.schema.json` | 配置的 JSON Schema | `config new` / `config init` | 编辑器补全用 |
 | `<配置目录>/claude/` | **会话文本记录 + claude 全局配置** | claude 会话 | `CLAUDE_CONFIG_DIR` 指向这里 |
 | `<配置目录>/claude/projects/<项目>/<session-id>.jsonl` | 一次会话的完整事件流（一行一事件） | claude | 保留期 `cleanupPeriodDays=3650` |
 | `<配置目录>/chat/sessions.json` | 微信会话 → claude 会话 id 映射 | 对话桥 | 跨重启复用同一会话 |
@@ -79,6 +79,36 @@ docker compose logs -f                                      # compose 默认带 
 - 日志一行一个事实：会话实况（版本/认证/权限/工作目录/工具面/**MCP 连通状态**）、`思考: …`、`claude: …`、`🔧 工具名` + 缩进 JSON 入参、`↩ 工具结果`、`API 错误：…`、回复摘要。`--debug` 追加生效配置（env 逐行、settings/MCP 路径、声明的 MCP）与 `[debug] 事件 type/subtype` 时间线。
 - 密钥类字段（`*_TOKEN`/`*_KEY`/`*_SECRET`…）只显示前 6 与后 4 位（`sk-cp-…klmn`）；端点与模型名原样展示。原始 stream-json 不写日志，需要时读文本记录。
 - 启动自检：`claude` 版本、会话配置根、每个 provider 的凭据来源，并用一个 `max_tokens=1` 请求**实测端点**——401 立刻告警（典型：国内 MiniMax 账号配了国际端点）。
+
+## 主机部署（systemd）
+
+不跑容器时的宿主机部署，一键安装：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Cosmic-Developers-Union/assistant/main/install.sh | bash
+```
+
+从 GitHub Release 下载对应架构的 linux 二进制（amd64/arm64），创建独立系统服务用户、按 XDG 规范建目录、写 systemd 单元并生成空配置骨架。检出内运行则优先用现成/本地构建的二进制：
+
+```bash
+sudo ./install.sh --enable       # 检出内安装（make install-service 等价）；--enable 设开机自启
+```
+
+- **独立服务用户**（缺省 `assistant`，`--user`/`--home` 可改）：系统账号、nologin、无密码——仅供 systemd 运行服务，无需登陆；
+- **XDG 目录**建在服务用户家目录下（缺省 `/var/lib/assistant`）：配置 `~/.config/Cosmic-Developers-Union/assistant`、数据 `~/.local/share/…`、状态 `~/.local/state/…`，与二进制缺省解析一致；
+- 安装二进制到 `/usr/local/bin/assistant`、写 `assistant.service`（`ProtectSystem=strict`，仅 XDG 目录与私有 /tmp 可写），并以服务用户身份执行 `assistant config new` 生成空配置骨架；
+- 幂等：重复执行只更新二进制与单元文件，已有用户/目录/配置不动。
+
+之后以服务用户身份补全配置并启动：
+
+```bash
+sudo -u assistant -H assistant login https://gitea.example --user <管理员账号>   # 管理员登录
+sudo -u assistant -H assistant setup                                            # 建 ai/merge 机器人账号并派生令牌
+sudo -u assistant -H assistant validate && sudo systemctl enable --now assistant
+journalctl -u assistant -f                                                      # 观测
+```
+
+评审会话还需要 `claude` CLI 在服务用户的 PATH 上（建议装到 `/usr/local/bin`）。
 
 ## 会话记录服务（serve / session push / sessions MCP）
 

@@ -229,3 +229,89 @@ func TestConfigInitBacksUpExistingFile(t *testing.T) {
 		t.Errorf("应保留原有平台并补上新登录的平台：%v", document["instances"])
 	}
 }
+
+// execConfigNew 以固定配置路径执行 `assistant config new`。
+func execConfigNew(t *testing.T, path string, args ...string) (string, error) {
+	t.Helper()
+	command := newConfigCommand(&path)
+	command.SetArgs(append([]string{"new"}, args...))
+	output := &bytes.Buffer{}
+	command.SetOut(output)
+	command.SetErr(output)
+	err := command.Execute()
+	return output.String(), err
+}
+
+// 空骨架：$schema + 空 instances 写到目标位置（目录可自动创建），schema 落在
+// 旁边供编辑器补全，配置 0600。
+func TestConfigNewWritesSkeleton(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "config.json")
+
+	output, err := execConfigNew(t, path)
+	if err != nil {
+		t.Fatalf("config new() error = %v\n%s", err, output)
+	}
+	document := readConfig(t, path)
+	if document["$schema"] != schema.Reference {
+		t.Errorf("$schema = %v, 期望 %v", document["$schema"], schema.Reference)
+	}
+	instances, ok := document["instances"].([]any)
+	if !ok || len(instances) != 0 {
+		t.Errorf("instances 应为空数组，得到 %v", document["instances"])
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(path), schema.FileName)); err != nil {
+		t.Errorf("schema 未写到配置旁边: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Errorf("config.json 权限 = %v, 期望 0600", mode)
+	}
+	if !strings.Contains(output, "已写入空配置骨架") {
+		t.Errorf("输出缺少骨架提示：\n%s", output)
+	}
+}
+
+// 已有文件不覆盖；--force 才覆盖。
+func TestConfigNewRefusesOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"instances":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := execConfigNew(t, path); err == nil || !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("已有文件应当拒绝覆盖并提示 --force: %v", err)
+	}
+	output, err := execConfigNew(t, path, "--force")
+	if err != nil {
+		t.Fatalf("--force 应当覆盖: %v\n%s", err, output)
+	}
+	document := readConfig(t, path)
+	if document["$schema"] != schema.Reference {
+		t.Errorf("--force 覆盖后 $schema = %v, 期望 %v", document["$schema"], schema.Reference)
+	}
+}
+
+// config init 能在空骨架上继续补全（宽松解析：空 instances 不算解析失败）。
+func TestConfigInitCompletesSkeleton(t *testing.T) {
+	dir := t.TempDir()
+	writeCredentials(t, dir, "https://gitea.example.com")
+	path := filepath.Join(dir, "config.json")
+	if _, err := execConfigNew(t, path); err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := execConfigInit(t, path, "")
+	// 没有 provider 时与既有行为一致：写入后报校验问题
+	if err == nil || !strings.Contains(err.Error(), "已写入") {
+		t.Fatalf("config init 应当在骨架上完成补全：err = %v\n%s", err, output)
+	}
+	document := readConfig(t, path)
+	instances, ok := document["instances"].([]any)
+	if !ok || len(instances) != 1 {
+		t.Fatalf("骨架应被补上 1 个 instance，得到 %v", document["instances"])
+	}
+}

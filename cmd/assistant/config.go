@@ -24,13 +24,14 @@ type configInitOptions struct {
 	APIKeyStdin bool
 }
 
-// newConfigCommand 是 config.json 的维护入口：模板补全（config init）与随后的校验。
-// 配置文件的边界只有两个：config.json（用户手写）与 credentials.json（assistant
-// 管理），所以这里只做「补全 + 校验」，不做交互式编辑。
+// newConfigCommand 是 config.json 的维护入口：骨架生成（config new）、模板补全
+// （config init）与随后的校验。配置文件的边界只有两个：config.json（用户手写）
+// 与 credentials.json（assistant 管理），所以这里只做「生成 + 补全 + 校验」，
+// 不做交互式编辑。
 func newConfigCommand(configFlag *string) *cobra.Command {
 	command := &cobra.Command{
 		Use:   "config",
-		Short: "维护用户配置 config.json（模板补全、校验）",
+		Short: "维护用户配置 config.json（生成骨架、模板补全、校验）",
 		Args:  cobra.NoArgs,
 	}
 	options := &configInitOptions{}
@@ -54,7 +55,67 @@ func newConfigCommand(configFlag *string) *cobra.Command {
 	flags.BoolVar(&options.APIKeyStdin, "api-key-stdin", false,
 		"从 stdin 读取 --provider 的 api_key（终端下隐藏输入，不进 shell 历史）")
 	command.AddCommand(initCommand)
+
+	// newOptions 是 `assistant config new` 的参数。
+	newOptions := &configNewOptions{}
+	newCommand := &cobra.Command{
+		Use:   "new",
+		Short: "生成空配置骨架 config.json（$schema + 空 instances），首次部署起步用",
+		Long: "在目标位置写一份最小可编辑的 config.json 骨架：\n" +
+			"  {\"$schema\": \"./config.schema.json\", \"instances\": []}\n" +
+			"  并把 schema 写到旁边（编辑器补全与悬停文档，离线可用）。\n\n" +
+			"骨架还不能直接运行（instances 为空）；随后手工编辑 providers/instances，\n" +
+			"或 assistant login <host> / setup 之后用 config init 补全。已有文件不覆盖\n" +
+			"（--force 才覆盖）。落点与 config init 一致：--config / ASSISTANT_CONFIG /\n" +
+			"平台标准配置目录（XDG / Known Folders / Library）。",
+		Args: cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			return runConfigNew(command, *configFlag, newOptions)
+		},
+	}
+	newCommand.Flags().BoolVar(&newOptions.Force, "force", false, "覆盖已存在的 config.json")
+	command.AddCommand(newCommand)
 	return command
+}
+
+// configNewOptions 是 `assistant config new` 的参数。
+type configNewOptions struct {
+	Force bool
+}
+
+// runConfigNew 写入空配置骨架：只有 $schema 与空 instances。这是新机器/新服务
+// 用户的起步文件——不校验（空 instances 本就不可运行）、不合并、不备份。
+func runConfigNew(command *cobra.Command, configPath string, options *configNewOptions) error {
+	path, err := configTargetPath(configPath)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(path); err == nil && !options.Force {
+		return fmt.Errorf("%s 已存在（--force 覆盖，或 assistant config init 在其基础上补全）", path)
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	// 骨架手工构造：struct 序列化会带出空的 optimizations 段，"空"名不副实
+	skeleton, err := json.MarshalIndent(map[string]any{
+		"$schema":   schema.Reference,
+		"instances": []any{},
+	}, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := instances.SaveBytes(path, append(skeleton, '\n')); err != nil {
+		return err
+	}
+	schemaPath, err := writeSchemaFile(path)
+	if err != nil {
+		return err
+	}
+	stdout := command.OutOrStdout()
+	fmt.Fprintf(stdout, "已写入空配置骨架: %s（instances 为空，尚不能运行）\n", path)
+	fmt.Fprintf(stdout, "schema: %s\n", schemaPath)
+	fmt.Fprintf(stdout, "下一步：编辑 providers/instances，或 assistant login <host> / setup 后 "+
+		"assistant config init 补全；完成用 assistant validate 校验\n")
+	return nil
 }
 
 func runConfigInit(command *cobra.Command, configPath string, options *configInitOptions) error {
@@ -156,7 +217,9 @@ func configTargetPath(configPath string) (string, error) {
 	return instances.DefaultConfigPath()
 }
 
-// loadOptionalConfig 读取现有配置；文件不存在返回 nil（首次生成）。
+// loadOptionalConfig 读取现有配置；文件不存在返回 nil（首次生成）。空骨架
+// （config new 的产物，instances 为空）不是可运行配置，但对补全有效：语义
+// 校验失败时退回宽松解析，语法/结构错误仍然报出。
 func loadOptionalConfig(path string) (*instances.File, error) {
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
@@ -164,7 +227,11 @@ func loadOptionalConfig(path string) (*instances.File, error) {
 		}
 		return nil, err
 	}
-	return instances.Load(path)
+	file, err := instances.Load(path)
+	if err == nil {
+		return file, nil
+	}
+	return instances.Parse(path)
 }
 
 // prefillInstances 用 credentials.json 里已登录的平台补 instances：登录过就该出现在
