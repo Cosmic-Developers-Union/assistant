@@ -144,6 +144,7 @@ print_next_steps() { # 公共尾部：以某用户身份补全配置并跑 run �
   echo "下一步（token 已备好时最快路径——环境变量，不用写文件）："
   echo "  export GITEA_HOST=https://<gitea地址> GITEA_ACCESS_TOKEN=<token>"
   echo "  $1 run                          # 前台跑，Ctrl+C 停止；--debug 看决策细节"
+  echo "  # 已有 run.yaml？放到 $2/run.yaml 后直接 $1 run（无参数，monitor/provider 全按它跑）"
   echo "  # AI 供应商 key：编辑 $2/config.json 的 providers，或 ANTHROPIC_* 环境变量"
   echo "  # 空配置不挡路：config.json 的 instances 为空时自动按环境变量单实例运行"
   echo "  # run 需要 claude CLI 在 PATH（macOS: npm i -g @anthropic-ai/claude-code 等）"
@@ -355,6 +356,7 @@ EOF
   fi
   echo
   echo "配置补全（凭据与配置都随 XDG 配置目录走）："
+  echo "  0. 已有 run.yaml？放到 $config_dir/run.yaml 后直接启动即可（run 无参数自动发现它）"
   echo "  1. token 最快路径：sudo -u $SERVICE_USER -H env GITEA_HOST=https://<gitea地址> GITEA_ACCESS_TOKEN=<token> $BINDIR/assistant list   # 只读验证"
   echo "  2. 长期配置：sudo -u $SERVICE_USER -H $BINDIR/assistant login <gitea地址> --user <管理员账号>"
   echo "     然后 setup 建 ai/merge 机器人账号；或直接编辑 $config_dir/config.json（providers/instances）"
