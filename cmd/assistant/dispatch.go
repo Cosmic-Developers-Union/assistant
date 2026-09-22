@@ -124,7 +124,7 @@ func newDispatcherCommands(repoFlag, configFlag *string) []*cobra.Command {
 		&runOptions.Run,
 		"run",
 		"",
-		"（已退役）run.yaml 已并入 config.json：`assistant config migrate` 导入旧文件后按 --config / 标准配置目录运行",
+		"（已退役）run.yaml 已并入 config.json：`assistant config migrate` 导入旧文件后按 --config / 当前目录运行",
 	)
 	runCommand.Flags().StringVar(
 		&runOptions.APIListen,
@@ -467,6 +467,8 @@ func giteaTarget(
 	flags := dispatcherFlags(command, repo.Name, options)
 	flags.Host = channel.Host
 	flags.Repository = repo.Name
+	// 会话配置根与对话会话共享（runtime 的 claude 目录）
+	flags.SessionDir = runtime.ClaudeConfigDir()
 	// 评审身份：通道显式 token 优先，否则凭据库 purpose=review（会话提交的
 	// review 以该令牌账号落库）
 	if token := strings.TrimSpace(channel.Token); token != "" {

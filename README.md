@@ -18,11 +18,11 @@ Gitea 上的例行事务与评审自动化，两块能力：
 - **仓库脚手架由 install 托管**：`AGENTS.md`、`CLAUDE.md`、`skills/`、`.mcp.json`、`.claude/settings.json`、`.gitea/workflows/assistant.yml` 的托管段落不要手改；改内容要改本仓库的 `content/`、`skills/` 源文件。
 - **评审协议随二进制走**：评审/分诊会话的协议与标签体系由内置 skill 注入（不依赖仓库是否装过脚手架）；项目自有约定放 `.assistant/review.md` 的非托管段落。
 - **会话工具面由 assistant 决定**：gitea MCP 由 `assistant mcp gitea` 提供，与仓库里的 `.mcp.json` 无关；仓库自带的其它 MCP server 会被合并保留。
-- **配置只有两个文件**：`config.json`（用户手写）与 `credentials.json`（assistant 管理）。没有第三处。
+- **配置只有两个文件**：`config.json`（用户手写）与 `credentials.json`（assistant 管理），都在配置目录（缺省当前目录）。没有第三处。
 
-## 数据落点
+## 数据落点（显式模式）
 
-`<配置目录>` 缺省 `~/.config/Cosmic-Developers-Union/assistant`，`<数据目录>` 缺省 `~/.local/share/Cosmic-Developers-Union/assistant`（`XDG_*`、`--config` / `ASSISTANT_CONFIG` / `ASSISTANT_CREDENTIALS` 可覆盖）。
+assistant 是工具不是常驻应用：配置按 `--config` → `ASSISTANT_CONFIG` → **当前目录 `./config.json`** 定位，不读不写用户的平台配置目录。所有文件都收在配置旁边：`credentials.json`（login/setup 令牌）、`daemon.json`（端点发现）、`data/`（运行树：repos/state/review/chat/claude，`runtime.root` 可改）。入库时排除它们——见仓库根 `.gitignore`。完整说明见 `docs/config.md`。
 
 | 路径 | 内容 | 谁写 | 说明 |
 | --- | --- | --- | --- |
@@ -197,22 +197,22 @@ curl -fsSL https://raw.githubusercontent.com/Cosmic-Developers-Union/assistant/m
 
 按平台自动选择形态（从 GitHub Release 下载对应 OS/ARCH 的二进制）：
 
-- **macOS（测试形态）**：装二进制 + 生成空配置（当前用户，配置落 `~/Library/Application Support/Cosmic-Developers-Union/assistant`），不建服务用户，直接前台跑 `assistant run`。token 已备好时零配置起步：
+- **macOS（测试形态）**：装二进制 + 在**当前目录**生成空配置（`./config.json`），不建服务用户，直接前台跑 `assistant run`。token 已备好时零配置起步：
 
   ```bash
   export GITEA_HOST=https://<gitea地址> GITEA_ACCESS_TOKEN=<token>
   assistant run          # 没有 config.json 时自动按环境变量单实例运行
   ```
 
-- **Linux（服务形态）**：创建独立系统服务用户 + XDG 目录 + systemd 单元 + 空配置，`assistant run` 由 systemd 常驻运行（详见下）。
+- **Linux（服务形态）**：创建独立系统服务用户 + 工作目录（配置与 `data/` 运行树都在这里）+ systemd 单元 + 空配置，`assistant run` 由 systemd 常驻运行（详见下）。
 
 检出内运行则优先用现成/本地构建的二进制：`sudo ./install.sh --enable`（Linux；`make install-service` 等价）。
 
 Linux 服务形态细节：
 
 - **独立服务用户**（缺省 `assistant`，`--user`/`--home` 可改）：系统账号、nologin、无密码——仅供 systemd 运行服务，无需登陆；
-- **XDG 目录**建在服务用户家目录下（缺省 `/var/lib/assistant`）：配置 `~/.config/Cosmic-Developers-Union/assistant`、数据 `~/.local/share/…`、状态 `~/.local/state/…`，与二进制缺省解析一致；
-- 安装二进制到 `/usr/local/bin/assistant`、写 `assistant.service`（`ProtectSystem=strict`，仅 XDG 目录与私有 /tmp 可写），并以服务用户身份执行 `assistant config new` 生成空配置骨架；
+- **工作目录** `/var/lib/assistant/work`（服务用户家目录下，0700）：systemd 单元以它为 WorkingDirectory，`config.json` 与 `data/` 运行树都在这里；
+- 安装二进制到 `/usr/local/bin/assistant`、写 `assistant.service`（`ProtectSystem=strict`，WorkingDirectory 锚定工作目录、仅它与私有 /tmp 可写），并以服务用户身份在工作目录生成空配置骨架；
 - 幂等：重复执行只更新二进制与单元文件，已有用户/目录/配置不动。
 
 之后以服务用户身份补全配置并启动：
@@ -244,7 +244,7 @@ assistant session push --dry-run       # 先看会推什么
 # 也可用 ASSISTANT_SESSIONS_URL / ASSISTANT_SESSIONS_TOKEN
 ```
 
-- `host` 是宿主机标签（缺省主机名）：区分不同机器上的同名项目；记录库缺省在 `<数据目录>/Cosmic-Developers-Union/assistant/sessions`（`serve --root` 可改）。
+- `host` 是宿主机标签（缺省主机名）：区分不同机器上的同名项目；记录库缺省在当前目录 `data/sessions`（`serve --root` 可改）。
 - **目录名不参与身份判断**：库根必须有 `manifest.json`（`{"format":"assistant.sessions","version":1,…}`）。`serve` 打开一个非空、却没有（或格式不符）manifest 的目录会直接拒绝——所以 `/srv/sessions` 这种名字被别的程序占用时不会互相写坏；确认是空目录或你的库才初始化，要接管已有目录用 `--force`。远端示例：`--root /srv/cosmic-developers-union/assistant/sessions`（短名 `/srv/cdu/assistant/sessions` 也行，安全由 manifest 保证）。`GET /healthz` 会回 format/version/host/root，便于确认连的是哪个库。
 - 微信对话桥在配置了记录库时**每轮结束自动归档**该会话（日志 `已归档会话 …`），所以同一轮里 agent 就能查到自己被压缩掉的历史；聊天会话已自动注入 sessions MCP（`mcp__sessions__*` 已放行）。
 - 评审会话用 `assistant session push` 定时归档即可（增量，重复执行无副作用）；接口细节看 `--help`。

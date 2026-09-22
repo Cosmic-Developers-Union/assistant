@@ -158,18 +158,18 @@ func TestGiteaTargetUsesManagedDefaults(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	withReviewCredential(t, "https://gitea.example.com")
 	data := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", data)
 	channel := instances.Channel{
 		Type: instances.ChannelGitea, Host: "https://gitea.example.com",
 		Reviewer: "ai", Merger: "merge",
 	}
 	command := &cobra.Command{}
-	target, err := giteaTarget(command, &instances.File{}, "", instances.Runtime{}, &channel, instances.Repo{Name: "acme/repo"}, &dispatcherOptions{})
+	target, err := giteaTarget(command, &instances.File{}, "", instances.Runtime{Root: data}, &channel,
+		instances.Repo{Name: "acme/repo"}, &dispatcherOptions{})
 	if err != nil {
 		t.Fatalf("giteaTarget: %v", err)
 	}
-	repoDir := filepath.Join(data, "Cosmic-Developers-Union", "assistant", "repos", "gitea.example.com", "acme", "repo")
-	stateDir := filepath.Join(data, "Cosmic-Developers-Union", "assistant", "state", "gitea.example.com", "acme", "repo")
+	repoDir := filepath.Join(data, "repos", "gitea.example.com", "acme", "repo")
+	stateDir := filepath.Join(data, "state", "gitea.example.com", "acme", "repo")
 	if !target.managed || target.repoDir != repoDir {
 		t.Errorf("managed=%v repoDir=%q, want %q", target.managed, target.repoDir, repoDir)
 	}
@@ -179,8 +179,7 @@ func TestGiteaTargetUsesManagedDefaults(t *testing.T) {
 	if target.config.LockFile != filepath.Join(stateDir, "dispatcher.lock") {
 		t.Errorf("LockFile = %q", target.config.LockFile)
 	}
-	wantWorktree := filepath.Join(data, "Cosmic-Developers-Union", "assistant", "review",
-		"gitea.example.com-acme--repo", "worktrees")
+	wantWorktree := filepath.Join(data, "review", "gitea.example.com-acme--repo", "worktrees")
 	if target.config.WorktreeRoot != wantWorktree {
 		t.Errorf("WorktreeRoot = %q, want %q", target.config.WorktreeRoot, wantWorktree)
 	}

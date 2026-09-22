@@ -69,7 +69,7 @@ func runSetup(command *cobra.Command, configPath string, options *setupOptions) 
 		fmt.Fprintf(stdout, "[setup] %s\n", fmt.Sprintf(format, arguments...))
 	}
 
-	// 读取已有配置（--config 允许指向尚不存在的文件；否则用平台标准配置目录），
+	// 读取已有配置（--config 允许指向尚不存在的文件；否则用当前目录的 ./config.json），
 	// 并确定写回路径。
 	_, file, err := loadInstanceFileForSetup(configPath)
 	if err != nil {

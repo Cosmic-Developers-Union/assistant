@@ -246,8 +246,9 @@ review-name-template: "${instance-name}/{username-or-org}/{name}-{pr|issue}-{ind
 }
 
 func TestResolvePath(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("ASSISTANT_RUN", "")
+	// 缺省落点锚定 cwd：切到临时目录，测试产物不落源码树
+	t.Chdir(t.TempDir())
 	// 不存在：返回空串（回退 config.json 语义），不报错
 	path, err := ResolvePath("", "")
 	if err != nil || path != "" {

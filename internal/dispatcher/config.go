@@ -89,6 +89,9 @@ type Flags struct {
 	Host          string
 	Repository    string
 	AccessToken   string
+	// SessionDir 覆盖会话配置根（Claude Code 配置根）：runtime 装配时传
+	// runtime.claude_dir 的解析值，使评审会话与对话会话共享同一配置根
+	SessionDir    string
 	Interval      string
 	Timeout       string
 	Model         string
@@ -238,9 +241,13 @@ func ResolveConfig(
 		}
 	}
 
-	sessionDir, err := instances.ClaudeDir()
-	if err != nil {
-		return Config{}, fmt.Errorf("解析会话配置根: %w", err)
+	sessionDir := strings.TrimSpace(flags.SessionDir)
+	if sessionDir == "" {
+		resolved, err := instances.ClaudeDir()
+		if err != nil {
+			return Config{}, fmt.Errorf("解析会话配置根: %w", err)
+		}
+		sessionDir = resolved
 	}
 
 	return Config{

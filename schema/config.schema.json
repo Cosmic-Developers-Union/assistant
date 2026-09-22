@@ -214,7 +214,7 @@
           "description": "本运行时启用的通道（键 = type 或 type/name，与 channels 池对应）。gitea 通道由调度引擎接管。"
         },
         "provider": { "type": "string", "description": "本运行时的缺省供应商名（agent 未指定 provider 时的回退，优先级高于 default_provider）。" },
-        "root": { "type": "string", "description": "数据根：受管克隆、状态、日志、评审工作区、对话状态都落它下面。缺省平台数据目录下的 Cosmic-Developers-Union/assistant。" },
+        "root": { "type": "string", "description": "数据根：受管克隆、状态、日志、评审工作区、对话状态都落它下面。缺省 config.json 同目录的 data/。" },
         "repos_dir": { "type": "string", "description": "受管克隆根目录；缺省 $root/repos。" },
         "review_root": { "type": "string", "description": "评审会话工作区根（PR/Issue 的 worktree 建在它下面）；缺省 $root/review。" },
         "review_name_template": {

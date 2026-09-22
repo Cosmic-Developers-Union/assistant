@@ -30,7 +30,7 @@ credentials.json（0600）。
       "provider": "zhipu",
 
       // 运行参数（原 run.yaml 并入；每 runtime 一棵独立 $root 树）
-      "root": "",                    // 缺省 <数据目录>/Cosmic-Developers-Union/assistant
+      "root": "",                    // 缺省 config.json 同目录的 data/
       "repos_dir": "",               // 缺省 $root/repos
       "review_root": "",             // 缺省 $root/review
       "review_name_template": "",    // 缺省 "{instance-name}-{username-or-org}--{name}-{pr|issue}-{index}"
@@ -50,20 +50,30 @@ credentials.json（0600）。
 }
 ```
 
-## 落点
+## 落点（显式模式）
 
-config.json 按 `--config` → `ASSISTANT_CONFIG` → 平台标准配置目录
-（`os.UserConfigDir()/Cosmic-Developers-Union/assistant`，即 XDG /
-Windows Known Folders / macOS Library）定位。`assistant config init` 会把
-schema 写到旁边（编辑器补全与悬停文档）。
+assistant 是工具不是常驻应用：配置按 `--config` → `ASSISTANT_CONFIG` →
+**当前目录的 `./config.json`** 定位，不读也不写用户的平台配置目录（XDG
+config home / Known Folders / Library）。所有产物都收在配置旁边：
+
+| 文件/目录 | 落点 | 说明 |
+| --- | --- | --- |
+| `config.json` | 配置目录（缺省当前目录） | 唯一的用户配置 |
+| `credentials.json` | 同目录 | login/setup 派生的用途令牌（0600） |
+| `daemon.json` | 同目录 | 运行中 daemon 的端点发现文件 |
+| `config.schema.json` | 同目录 | `assistant config init` 写入（编辑器补全） |
+| `data/` | 同目录（`runtime.root` 缺省） | 运行树：repos/state/review/chat/claude |
+
+把项目入库时排除它们（`.gitignore`）：`config.json`、`credentials.json`、
+`daemon.json`、`data/` 等——参考仓库根的 `.gitignore`。
 
 ## 运行与边界
 
 - `assistant run [--runtime <名>]` 零旗标起一个运行时：装配它引用的通道与
   agent，状态与产物全部落在该 runtime 的 `$root` 树下（repos / state /
   review / chat / claude），备份只看一个目录。多 runtime = 多部署形态，
-  互不串扰（daemon 端点文件：缺省 runtime 为 `daemon.json`，其余为
-  `daemon.<runtime>.json`）。
+  互不串扰（daemon 端点文件 `daemon.json` 在配置目录，MCP 会话以
+  `ASSISTANT_CONFIG` 继承同一份配置）。
 - 路径字段支持 `${VAR:-default}` 环境变量展开与 `$root` / `$state-dir`
   自引用，相对路径锚定到 config.json 所在目录（随配置目录一起挂载/备份）。
 - provider 解析链：agent 自身（仅独立执行）> main agent provider >

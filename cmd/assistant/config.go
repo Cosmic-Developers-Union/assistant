@@ -67,7 +67,7 @@ func newConfigCommand(configFlag *string) *cobra.Command {
 			"骨架还不能直接运行（channels 为空）；随后手工编辑 providers/channels/\n" +
 			"runtimes，或 assistant login <host> / setup 之后用 config init 补全。\n" +
 			"已有文件不覆盖（--force 才覆盖）。落点与 config init 一致：--config /\n" +
-			"ASSISTANT_CONFIG / 平台标准配置目录（XDG / Known Folders / Library）。",
+			"ASSISTANT_CONFIG / 当前目录。",
 		Args: cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			return runConfigNew(command, *configFlag, newOptions)

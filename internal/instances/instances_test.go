@@ -170,43 +170,17 @@ func TestRepoJSONShapes(t *testing.T) {
 	}
 }
 
-// 受管克隆/状态目录与 run 的当前目录解耦：落在数据目录下，按站点与仓库分层。
-func TestDefaultManagedPaths(t *testing.T) {
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	data := os.Getenv("XDG_DATA_HOME")
-
-	repoDir, err := DefaultRepoDir("https://gitea.example.com", "acme/repo")
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := filepath.Join(data, "Cosmic-Developers-Union", "assistant", "repos", "gitea.example.com", "acme", "repo")
-	if repoDir != want {
-		t.Errorf("DefaultRepoDir() = %q, want %q", repoDir, want)
-	}
-	stateDir, err := DefaultRepoStateDir("https://gitea.example.com:3000", "acme/repo")
-	if err != nil {
-		t.Fatal(err)
-	}
-	want = filepath.Join(data, "Cosmic-Developers-Union", "assistant", "state", "gitea.example.com-3000", "acme", "repo")
-	if stateDir != want {
-		t.Errorf("DefaultRepoStateDir() = %q, want %q", stateDir, want)
-	}
-	if _, err := DefaultRepoDir("https://gitea.example.com", "bad-name"); err == nil {
-		t.Error("非法仓库名应报错")
-	}
-}
-
-// 会话配置根由 assistant 托管（<配置目录>/claude），可用 CLAUDE_CONFIG_DIR 覆盖；
-// 不再默认用户的 ~/.claude。
+// 会话配置根兜底 = 当前目录的 claude/（显式模式；runtime.claude_dir 优先，
+// $CLAUDE_CONFIG_DIR 再优先），不碰用户的 ~/.claude。
 func TestClaudeDir(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	work := t.TempDir()
+	t.Chdir(work)
 	directory, err := ClaudeDir()
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "Cosmic-Developers-Union", "assistant", "claude")
-	if directory != want {
+	if want := filepath.Join(work, "claude"); directory != want {
 		t.Errorf("ClaudeDir() = %q, want %q", directory, want)
 	}
 	t.Setenv("CLAUDE_CONFIG_DIR", "/tmp/custom-claude")

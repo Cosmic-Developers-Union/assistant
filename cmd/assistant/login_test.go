@@ -173,30 +173,26 @@ func TestLoginRemoveKeepsOtherPlatforms(t *testing.T) {
 }
 
 // 配置解析不读当前目录 config.json：避免检出内同名文件被当成运行配置。
-func TestConfigResolutionIgnoresWorkingDirectory(t *testing.T) {
+func TestConfigResolutionPrefersWorkingDirectory(t *testing.T) {
 	t.Setenv("ASSISTANT_CONFIG", "")
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("HOME", t.TempDir())
 	work := t.TempDir()
-	if err := os.WriteFile(filepath.Join(work, "config.json"), []byte("{}"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	t.Chdir(work)
 
+	// 显式模式：当前目录的 config.json 就是配置（不再读平台配置目录）
 	path, file, err := resolveInstanceFile(commandOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if path != "" || file != nil {
-		t.Fatalf("不应加载当前目录 config.json：path=%q", path)
+	if file != nil {
+		t.Fatalf("空目录不该有配置：path=%q", path)
 	}
 
+	// 写配置落在当前目录（setup/login 的写回落点）
 	writePath, err := setupConfigWritePath("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "Cosmic-Developers-Union", "assistant", "config.json")
-	if writePath != want {
+	if want := filepath.Join(work, "config.json"); writePath != want {
 		t.Fatalf("写配置落点 = %q, want %q", writePath, want)
 	}
 }

@@ -112,6 +112,10 @@ type ChatConfig struct {
 	// Remote 是记录库服务端连接（assistant serve）：非空时每轮结束把该会话的最新
 	// 记录推上去，agent 在上下文压缩后能用 sessions MCP 回查完整历史
 	Remote sessionstore.RemoteConfig
+	// AssistantConfig 是本次运行使用的 config.json 绝对路径：注入会话环境
+	// （ASSISTANT_CONFIG），会话内的 assistant MCP（daemon/gitea）解析到同一份
+	// 配置与端点文件，而不是靠 cwd 猜
+	AssistantConfig string
 	// RunClaude 可覆盖 claude 调用（测试注入）；env 是额外进程环境变量；返回 stdout
 	RunClaude func(ctx context.Context, bin string, args []string, dir string, env []string) ([]byte, error)
 	// Log 输出
@@ -643,7 +647,7 @@ func chatSessionTitle(conversationID string) string {
 // RunClaude 返回整段输出时按行折叠，两者归集结果一致。
 func (c *Chat) run(ctx context.Context, bin string, args []string, dir string, onProgress func(string)) (chatOutcome, error) {
 	if c.config.RunClaude != nil {
-		output, err := c.config.RunClaude(ctx, bin, args, dir, claudecfg.ConfigDirEnv(c.config.SessionDir))
+		output, err := c.config.RunClaude(ctx, bin, args, dir, c.sessionEnv())
 		if err != nil {
 			return chatOutcome{}, fmt.Errorf("%s: %s", bin, truncate(err.Error(), 400))
 		}
@@ -657,7 +661,7 @@ func (c *Chat) run(ctx context.Context, bin string, args []string, dir string, o
 func (c *Chat) runStreaming(ctx context.Context, bin string, args []string, dir string, onProgress func(string)) (chatOutcome, error) {
 	command := exec.CommandContext(ctx, bin, args...)
 	command.Dir = dir
-	if env := claudecfg.ConfigDirEnv(c.config.SessionDir); len(env) > 0 {
+	if env := c.sessionEnv(); len(env) > 0 {
 		command.Env = append(os.Environ(), env...)
 	}
 	stdout, err := command.StdoutPipe()
@@ -730,6 +734,16 @@ func (c *Chat) pushSession(sessionID string) {
 	c.pushed[sessionID] = int64(len(strings.Join(session.Lines, "\n")) + 1)
 	c.mu.Unlock()
 	c.config.Log("已归档会话 %s（%d 行，来源 %s）到 %s", session.Key.String(), len(session.Lines), session.Source, c.config.Remote.URL)
+}
+
+// sessionEnv 组装会话进程的额外环境变量：托管的 CLAUDE_CONFIG_DIR + 显式的
+// ASSISTANT_CONFIG（会话内 assistant MCP 解析同一份配置与 daemon 端点）。
+func (c *Chat) sessionEnv() []string {
+	env := claudecfg.ConfigDirEnv(c.config.SessionDir)
+	if path := strings.TrimSpace(c.config.AssistantConfig); path != "" {
+		env = append(env, "ASSISTANT_CONFIG="+path)
+	}
+	return env
 }
 
 // progressLogger 把会话进度写进 daemon 日志：一行一条，便于 grep「用户在问什么、

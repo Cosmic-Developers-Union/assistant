@@ -381,7 +381,7 @@ func resolveRepoSetupTargetWithProbe(
 	}
 	if file == nil {
 		return repoSetupTarget{}, fmt.Errorf(
-			"没有 config.json（--config / ASSISTANT_CONFIG / 平台标准配置目录）：先 assistant login <host> 注册平台")
+			"没有 config.json（--config / ASSISTANT_CONFIG / 当前目录）：先 assistant login <host> 注册平台")
 	}
 
 	dir, err := os.Getwd()

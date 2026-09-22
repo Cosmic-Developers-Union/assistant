@@ -111,11 +111,9 @@ func (r *Runtime) resolve(baseDir string) error {
 	r.SessionsNameTemplate = strings.TrimSpace(r.SessionsNameTemplate)
 	r.APIListen = strings.TrimSpace(r.APIListen)
 	if r.Root == "" {
-		dataDir, err := defaultDataDir()
-		if err != nil {
-			return err
-		}
-		r.root = dataDir
+		// 缺省运行树 = config.json 同目录的 data/：工具的所有产物（受管克隆、
+		// 状态、评审工作区、对话状态）都收在配置旁边，可预期、可整体排除
+		r.root = filepath.Join(baseDir, "data")
 	} else {
 		expanded, err := expandEnv(r.Root)
 		if err != nil {
@@ -180,15 +178,25 @@ func (r Runtime) validate() error {
 	return nil
 }
 
-// DataRoot 返回解析后的数据根（绝对路径）。
+// DataRoot 返回解析后的数据根（绝对路径）：resolve 后的 root 优先，其次原始
+// Root 字段（相对路径锚定当前目录），最后兜底当前目录的 data/。
 func (r Runtime) DataRoot() string {
 	if r.root != "" {
 		return r.root
 	}
-	if root, err := defaultDataDir(); err == nil {
-		return root
+	if trimmed := strings.TrimSpace(r.Root); trimmed != "" {
+		if filepath.IsAbs(trimmed) {
+			return filepath.Clean(trimmed)
+		}
+		if cwd, err := os.Getwd(); err == nil {
+			return filepath.Join(cwd, trimmed)
+		}
+		return filepath.Clean(trimmed)
 	}
-	return r.Root
+	if cwd, err := os.Getwd(); err == nil {
+		return filepath.Join(cwd, "data")
+	}
+	return filepath.Join("data")
 }
 
 // ReposRoot 返回受管克隆根目录：缺省 $root/repos。
@@ -475,20 +483,6 @@ func absFrom(baseDir, path string) string {
 		return filepath.Clean(path)
 	}
 	return filepath.Clean(filepath.Join(baseDir, path))
-}
-
-// defaultDataDir 返回平台数据目录下的应用数据根（XDG / Windows Known Folders /
-// macOS Library），与受管克隆既有落点一致。
-func defaultDataDir() (string, error) {
-	base := strings.TrimSpace(os.Getenv("XDG_DATA_HOME"))
-	if base == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("定位用户目录: %w", err)
-		}
-		base = filepath.Join(home, ".local", "share")
-	}
-	return filepath.Join(base, configNamespace, configApp), nil
 }
 
 // trimNonEmpty 去除字符串清单各项空白并丢弃空项（nil 入 nil 出；非 nil 空

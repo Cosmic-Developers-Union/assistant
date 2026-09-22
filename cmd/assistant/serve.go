@@ -313,17 +313,14 @@ func randomToken() (string, error) {
 	return hex.EncodeToString(buffer), nil
 }
 
-// defaultSessionsRoot 返回记录库缺省目录：<数据目录>/Cosmic-Developers-Union/assistant/sessions。
+// defaultSessionsRoot 返回记录库缺省目录：当前目录的 data/sessions
+// （显式模式：一切产物收在配置旁边）。
 func defaultSessionsRoot() (string, error) {
-	dataDir := strings.TrimSpace(os.Getenv("XDG_DATA_HOME"))
-	if dataDir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		dataDir = filepath.Join(home, ".local", "share")
+	directory, err := os.Getwd()
+	if err != nil {
+		return "", err
 	}
-	return filepath.Join(dataDir, "Cosmic-Developers-Union", "assistant", "sessions"), nil
+	return filepath.Join(directory, "data", "sessions"), nil
 }
 
 // resolveConfigDir 返回配置目录（--config/ASSISTANT_CONFIG 优先，否则平台标准位置）。

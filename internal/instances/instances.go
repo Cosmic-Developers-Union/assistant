@@ -1387,27 +1387,33 @@ func ParseRepoName(name string) (owner, repository string, err error) {
 	return owner, repository, nil
 }
 
-// 平台标准配置目录下的命名空间/应用名（Linux: $XDG_CONFIG_HOME 或
-// ~/.config；macOS: ~/Library/Application Support；Windows: %AppData%）。
-const (
-	configNamespace = "Cosmic-Developers-Union"
-	configApp       = "assistant"
-)
+// 配置定位是显式模式：`--config` → `ASSISTANT_CONFIG` → 当前目录的
+// ./config.json。assistant 是工具不是常驻应用，不读也不写用户的平台配置目录
+// （XDG config home / Known Folders / Library）——所有文件都在你指定的位置或
+// 当前目录，可预期、可入库排除。
+const configFileName = "config.json"
 
-// DefaultConfigDir 返回平台标准配置目录。
+// DefaultConfigDir 返回缺省配置目录：当前工作目录（未显式指定 --config /
+// ASSISTANT_CONFIG 时，配置就在这里）。
 func DefaultConfigDir() (string, error) {
-	directory, err := os.UserConfigDir()
+	return os.Getwd()
+}
+
+// DefaultConfigPath 返回缺省配置文件路径：<当前目录>/config.json。
+func DefaultConfigPath() (string, error) {
+	directory, err := DefaultConfigDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(directory, configNamespace, configApp), nil
+	return filepath.Join(directory, configFileName), nil
 }
 
 // ClaudeDir 是 assistant 托管的 Claude Code 配置根（会话文本记录、会话状态与
-// Claude 自己的全局配置文件都落在这里）：$CLAUDE_CONFIG_DIR 优先，否则
-// <配置目录>/claude。它随配置目录一起挂载/备份，**不读也不写用户的 ~/.claude**——
-// 会话凭据由 provider 配置（config.json 的 providers/optimizations）提供，会话
-// 数据不与用户本人的 Claude 安装互相污染。
+// Claude 自己的全局配置文件都落在这里）：$CLAUDE_CONFIG_DIR 优先，否则当前
+// 目录下的 claude/。**不读也不写用户的 ~/.claude**——会话凭据由 provider 配置
+// （config.json 的 providers/optimizations）提供，会话数据不与用户本人的
+// Claude 安装互相污染。运行时通常显式配置 runtime.claude_dir（缺省
+// $root/claude），本函数只是无 runtime 时的兜底。
 func ClaudeDir() (string, error) {
 	if value := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); value != "" {
 		return value, nil
@@ -1419,68 +1425,19 @@ func ClaudeDir() (string, error) {
 	return filepath.Join(directory, "claude"), nil
 }
 
-// DefaultConfigPath 是标准配置目录下的 config.json 路径。
-func DefaultConfigPath() (string, error) {
-	directory, err := DefaultConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(directory, "config.json"), nil
-}
-
 // DaemonEndpointPath 返回 daemon 端点文件的落点：
-// <配置目录>/daemon.json（含 API 地址/令牌/PID，0600；assistant mcp daemon
-// 靠它自举发现运行中的 daemon）。
+// <配置文件所在目录>/daemon.json（含 API 地址/令牌/PID，0600；assistant mcp
+// daemon 靠它自举发现运行中的 daemon）。ASSISTANT_CONFIG 指向别处时端点文件
+// 跟着配置走。
 func DaemonEndpointPath() (string, error) {
+	if value := strings.TrimSpace(os.Getenv("ASSISTANT_CONFIG")); value != "" {
+		return filepath.Join(filepath.Dir(value), "daemon.json"), nil
+	}
 	directory, err := DefaultConfigDir()
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(directory, "daemon.json"), nil
-}
-
-// DefaultRepoDir 返回受管克隆（基线检出）的默认落点：
-// <数据目录>/Cosmic-Developers-Union/assistant/repos/<host>/<owner>/<name>；
-// 未配置 repo.dir 的仓库在这里自动 clone 并保持与 origin/<base> 一致，run 与
-// 当前目录彻底解耦。数据目录取 XDG_DATA_HOME，缺省 ~/.local/share。
-func DefaultRepoDir(host, fullName string) (string, error) {
-	root, slug, owner, name, err := managedPathParts(host, fullName)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(root, "repos", slug, owner, name), nil
-}
-
-// DefaultRepoStateDir 返回受管仓库的状态目录（日志、单飞锁）：
-// <数据目录>/Cosmic-Developers-Union/assistant/state/<host>/<owner>/<name>；
-// 放在检出之外，避免被 SyncMirror 的 clean -fd 波及。
-func DefaultRepoStateDir(host, fullName string) (string, error) {
-	root, slug, owner, name, err := managedPathParts(host, fullName)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(root, "state", slug, owner, name), nil
-}
-
-func managedPathParts(host, fullName string) (root, slug, owner, name string, err error) {
-	home := strings.TrimSpace(os.Getenv("XDG_DATA_HOME"))
-	if home == "" {
-		userHome, homeErr := os.UserHomeDir()
-		if homeErr != nil {
-			return "", "", "", "", fmt.Errorf("定位用户目录: %w", homeErr)
-		}
-		home = filepath.Join(userHome, ".local", "share")
-	}
-	owner, name, err = ParseRepoName(fullName)
-	if err != nil {
-		return "", "", "", "", err
-	}
-	slug, err = HostSlug(host)
-	if err != nil {
-		return "", "", "", "", err
-	}
-	root = filepath.Join(home, configNamespace, configApp)
-	return root, slug, owner, name, nil
 }
 
 // HostSlug 把站点地址折成目录/路径名：去 scheme，保留 host[:port]，其余字符

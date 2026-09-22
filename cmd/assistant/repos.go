@@ -131,7 +131,7 @@ func runReposAdd(command *cobra.Command, configPath, repoArg, hostFlag, dirFlag 
 	}
 	if file == nil {
 		return fmt.Errorf(
-			"没有 config.json（--config / ASSISTANT_CONFIG / 平台标准配置目录）：先 assistant login <host> 注册平台")
+			"没有 config.json（--config / ASSISTANT_CONFIG / 当前目录）：先 assistant login <host> 注册平台")
 	}
 	explicitDir := strings.TrimSpace(dirFlag) != ""
 	hintHost, checkoutDir := "", ""
@@ -197,7 +197,7 @@ func runReposRemove(command *cobra.Command, configPath, repoArg, hostFlag string
 	}
 	if file == nil {
 		return fmt.Errorf(
-			"没有 config.json（--config / ASSISTANT_CONFIG / 平台标准配置目录）：先 assistant login <host> 注册平台")
+			"没有 config.json（--config / ASSISTANT_CONFIG / 当前目录）：先 assistant login <host> 注册平台")
 	}
 	if !repoRegistered(file, repoName) {
 		return fmt.Errorf("仓库 %s 不在任何平台的 repos[] 中（assistant repos list 查看）", repoName)

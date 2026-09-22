@@ -75,14 +75,10 @@ func TestResolveInstanceFileTreatsSkeletonAsAbsent(t *testing.T) {
 
 // 骨架被填过（instances 非空）后恢复配置文件语义；坏文件仍然报错。
 func TestResolveInstanceFileReportsRealProblems(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("ASSISTANT_CONFIG", "")
-	configDir := filepath.Join(dir, "Cosmic-Developers-Union", "assistant")
-	if err := os.MkdirAll(configDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	filled := filepath.Join(configDir, "config.json")
+	dir := t.TempDir()
+	t.Chdir(dir)
+	filled := filepath.Join(dir, "config.json")
 	if err := os.WriteFile(filled, []byte(`{"instances":[{"host":"https://g.example","reviewer":{"name":"a"},"merger":{"name":"b"},"repos":["o/r"]}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
