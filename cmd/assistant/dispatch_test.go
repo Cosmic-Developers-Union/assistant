@@ -383,7 +383,6 @@ func TestGiteaTargetProviderCascade(t *testing.T) {
 	// 引用了未定义的 provider 在配置校验期就会被拒绝
 	file.DefaultProvider = "missing"
 	file.Channels = []instances.Channel{channel}
-	file.Weixin = &instances.Weixin{BotToken: "t"}
 	file.Normalize()
 	if err := file.Validate(); err == nil {
 		t.Error("未定义的 provider 引用应报错")

@@ -41,16 +41,11 @@ type File struct {
 	// Instances 已废弃：载入时自动迁移为 gitea 通道（见 canonicalize）。
 	// 保留字段只为兼容解析旧配置；Save 不再落盘。
 	Instances []Instance `json:"instances,omitempty"`
-	// Weixin 是微信（openclaw ilink）对话桥配置：可选；未配置时 daemon 不启动
-	// 对话能力。多微信账号请改用 Channels 列表（本块等价于一条匿名 weixin 实例）。
-	Weixin *Weixin `json:"weixin,omitempty"`
-	// QQ 是 QQ 开放平台机器人（官方 Bot API v2，WebSocket 网关）对话桥配置：
-	// 可选；未配置时 daemon 不启动 QQ 通道。多 QQ 机器人请改用 Channels 列表。
-	QQ *QQ `json:"qq,omitempty"`
-	// Channels 是通道池（推荐写法）：type 决定平台（weixin/qq/telegram/gitea），
+	// Channels 是通道池：type 决定平台（weixin/qq/telegram/gitea），
 	// name 是可选实例标签——多开同一平台时用它区分。会话键为 type（未命名）或
 	// type/name（命名）。runtime 按键引用；列表里有条目即定义（enabled=false 可
-	// 保留定义但停用）。
+	// 保留定义但停用）。channels 是唯一的对话通道架构（旧版顶层 qq:/weixin:
+	// 单实例节点已删除，出现即报迁移错误）。
 	Channels []Channel `json:"channels,omitempty"`
 	// Agents 是命名 agent 定义池：每个 agent 一份独立的 provider/model/系统提示
 	// 词/MCP。内置预设（main/ops/coder/writer/review）为基，同名覆盖。runtime 从
@@ -309,64 +304,8 @@ type Agent struct {
 	SessionTimeoutMS int64 `json:"session_timeout_ms,omitzero"`
 }
 
-// Weixin 是微信对话桥（Tencent/openclaw-weixin 兼容 ilink 协议）的配置。
-type Weixin struct {
-	// Enabled 为 true 时 assistant run 启动对话桥（--weixin 亦可强制开启）
-	Enabled bool `json:"enabled,omitempty"`
-	// BaseURL 是 ilink API 根地址（缺省官方地址）
-	BaseURL string `json:"base_url,omitempty"`
-	// BotToken 是扫码登录得到的 Bot token
-	BotToken string `json:"bot_token,omitempty"`
-	// LoginUserID / BotID 是扫码登录返回的身份信息（诊断用）
-	LoginUserID string `json:"login_user_id,omitempty"`
-	BotID       string `json:"ilink_bot_id,omitempty"`
-	// BotAgent 是观测标识（缺省 OpenClaw）
-	BotAgent string `json:"bot_agent,omitempty"`
-	// ChannelVersion 是声明的渠道版本（缺省取 assistant 自身版本）
-	ChannelVersion string `json:"channel_version,omitempty"`
-	// RouteTag 是可选的部署路由标签（SKRouteTag）
-	RouteTag string `json:"route_tag,omitempty"`
-	// AdminUsers 是允许对话的用户 ID 白名单；空表示只允许扫码登录的用户；
-	// 含 "*" 表示放开所有用户（公网平台慎用）
-	AdminUsers []string `json:"admin_users,omitempty"`
-	// Agent 是该通道对话的默认 agent 名（缺省回退 default_agent）
-	Agent string `json:"agent,omitempty"`
-	// Provider 覆盖对话会话使用的 provider 名（缺省回退全局 default_provider）
-	Provider string `json:"provider,omitempty"`
-	// ClaudeBin / Model / SessionTimeout 是对话会话的执行参数（可选覆盖）。
-	// 配置了 agent 池时这些字段仍是「内置缺省 agent」的取值。
-	ClaudeBin string `json:"claude_bin,omitempty"`
-	Model     string `json:"model,omitempty"`
-	// SessionTimeoutMS 是单轮对话的 claude 超时（缺省 180000 = 3 分钟）
-	SessionTimeoutMS int64 `json:"session_timeout_ms,omitzero"`
-}
-
 // DefaultQQAPIBaseURL 是 QQ 开放平台机器人 API（v2）的默认地址。
 const DefaultQQAPIBaseURL = "https://api.sgroup.qq.com"
-
-// QQ 是 QQ 开放平台机器人（q.qq.com，官方 Bot API v2）的配置：WebSocket 网关
-// 收事件、REST 发消息，凭据是开放平台控制台的 AppID/AppSecret。收发均为被动
-// 回复（带 msg_id，15 分钟窗口）。
-type QQ struct {
-	// Enabled 为 true 时 assistant run 启动 QQ 通道（--qq 亦可强制开启）
-	Enabled bool `json:"enabled,omitzero"`
-	// AppID 是开放平台机器人的 AppID
-	AppID string `json:"app_id,omitempty"`
-	// AppSecret 是开放平台机器人的 AppSecret（与 bot_token 同级敏感，config.json
-	// 为 0600）
-	AppSecret string `json:"app_secret,omitempty"`
-	// APIBaseURL 是 Bot API 根地址（缺省官方地址）
-	APIBaseURL string `json:"api_base_url,omitempty"`
-	// Sandbox 预留：沙箱环境开关（当前版本仅透传日志标记）
-	Sandbox bool `json:"sandbox,omitzero"`
-	// AdminUsers 是允许对话的用户 openid 白名单；空时拒绝所有用户；含 "*"
-	// 表示放开所有用户（群聊场景慎用，任何 @ 机器人的人都会消耗 AI 额度）
-	AdminUsers []string `json:"admin_users,omitempty"`
-	// Agent 是该通道对话的默认 agent 名（缺省回退 default_agent）
-	Agent string `json:"agent,omitempty"`
-	// SplitLimit 是回复切块的 rune 上限（缺省 1000；平台对 content 长度有限制）
-	SplitLimit int `json:"split_limit,omitzero"`
-}
 
 // Instance 是一台 Gitea 站点及其仓库。
 //
@@ -619,6 +558,22 @@ func Parse(path string) (*File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("读取配置 %s: %w", path, err)
 	}
+	// 遗留顶层节点先探测：DisallowUnknownFields 对它们的报错不可读，这里给出
+	// 迁移对照写法（channels 是唯一的对话通道架构）。
+	var legacy struct {
+		Weixin json.RawMessage `json:"weixin"`
+		QQ     json.RawMessage `json:"qq"`
+	}
+	if err := json.Unmarshal(data, &legacy); err == nil {
+		if legacy.Weixin != nil {
+			return nil, fmt.Errorf("配置 %s 使用了已删除的顶层 weixin 节：改为 channels 列表条目 "+
+				`{"type":"weixin","bot_token":"...","admin_users":[...]}（assistant weixin login 会直接写入）`, path)
+		}
+		if legacy.QQ != nil {
+			return nil, fmt.Errorf("配置 %s 使用了已删除的顶层 qq 节：改为 channels 列表条目 "+
+				`{"type":"qq","app_id":"...","app_secret":"...","admin_users":[...]}`, path)
+		}
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	var file File
@@ -698,8 +653,6 @@ func (f *File) Normalize() {
 		}
 		f.Runtimes = normalized
 	}
-	f.Weixin.Normalize()
-	f.QQ.Normalize()
 }
 
 // canonicalize 完成 Normalize 做不了的规范化：遗留 instances 的校验与迁移、
@@ -822,48 +775,6 @@ func (p Provider) Validate(name string) error {
 // DefaultWeixinBaseURL 是 ilink 协议的默认 API 地址。
 const DefaultWeixinBaseURL = "https://ilinkai.weixin.qq.com"
 
-// Normalize 填充微信桥默认值并清理空白，幂等。
-func (w *Weixin) Normalize() {
-	if w == nil {
-		return
-	}
-	w.BaseURL = strings.TrimRight(strings.TrimSpace(w.BaseURL), "/")
-	if w.BaseURL == "" {
-		w.BaseURL = DefaultWeixinBaseURL
-	}
-	w.BotToken = strings.TrimSpace(w.BotToken)
-	w.BotAgent = strings.TrimSpace(w.BotAgent)
-	if w.BotAgent == "" {
-		w.BotAgent = "OpenClaw"
-	}
-	w.ChannelVersion = strings.TrimSpace(w.ChannelVersion)
-	w.RouteTag = strings.TrimSpace(w.RouteTag)
-	w.Provider = strings.TrimSpace(w.Provider)
-	w.ClaudeBin = strings.TrimSpace(w.ClaudeBin)
-	w.Model = strings.TrimSpace(w.Model)
-	w.Agent = strings.TrimSpace(w.Agent)
-	for index, user := range w.AdminUsers {
-		w.AdminUsers[index] = strings.TrimSpace(user)
-	}
-}
-
-// Normalize 填充 QQ 通道默认值并清理空白，幂等。
-func (q *QQ) Normalize() {
-	if q == nil {
-		return
-	}
-	q.APIBaseURL = strings.TrimRight(strings.TrimSpace(q.APIBaseURL), "/")
-	if q.APIBaseURL == "" {
-		q.APIBaseURL = DefaultQQAPIBaseURL
-	}
-	q.AppID = strings.TrimSpace(q.AppID)
-	q.AppSecret = strings.TrimSpace(q.AppSecret)
-	q.Agent = strings.TrimSpace(q.Agent)
-	for index, user := range q.AdminUsers {
-		q.AdminUsers[index] = strings.TrimSpace(user)
-	}
-}
-
 // normalized 清理 agent 定义内的空白，幂等。
 func (a Agent) normalized() Agent {
 	a.Description = strings.TrimSpace(a.Description)
@@ -892,7 +803,7 @@ func (i *Instance) Normalize() {
 
 // Validate 校验 host、账号与仓库。必须在 Normalize 之后调用。
 func (f *File) Validate() error {
-	if len(f.Instances) == 0 && f.Weixin == nil && f.QQ == nil && len(f.Channels) == 0 && len(f.Runtimes) == 0 {
+	if len(f.Instances) == 0 && len(f.Channels) == 0 && len(f.Runtimes) == 0 {
 		return fmt.Errorf("配置为空：runtimes/channels 至少配置一项")
 	}
 	seen := make(map[string]int, len(f.Instances))
@@ -906,12 +817,6 @@ func (f *File) Validate() error {
 	}
 	if err := f.validateAgents(); err != nil {
 		return err
-	}
-	if err := f.Weixin.Validate(); err != nil {
-		return fmt.Errorf("weixin: %w", err)
-	}
-	if err := f.QQ.Validate(); err != nil {
-		return fmt.Errorf("qq: %w", err)
 	}
 	if err := f.validateChannels(); err != nil {
 		return err
@@ -958,16 +863,6 @@ func (f *File) validateSecretRefs() error {
 		if _, err := envref.ExpandMCPEnv(f.Agents[name].MCP, envref.Options{
 			Field: fmt.Sprintf("agents[%s].mcp", name),
 		}); err != nil {
-			return err
-		}
-	}
-	if f.Weixin != nil {
-		if err := envref.Validate(f.Weixin.BotToken, envref.Options{Field: "weixin.bot_token"}); err != nil {
-			return err
-		}
-	}
-	if f.QQ != nil {
-		if err := envref.Validate(f.QQ.AppSecret, envref.Options{Field: "qq.app_secret"}); err != nil {
 			return err
 		}
 	}
@@ -1176,16 +1071,6 @@ func (f *File) validateAgents() error {
 	if err := f.referenceAgent("default_agent", f.DefaultAgent); err != nil {
 		return err
 	}
-	if f.Weixin != nil {
-		if err := f.referenceAgent("weixin.agent", f.Weixin.Agent); err != nil {
-			return err
-		}
-	}
-	if f.QQ != nil {
-		if err := f.referenceAgent("qq.agent", f.QQ.Agent); err != nil {
-			return err
-		}
-	}
 	for index := range f.Channels {
 		if err := f.referenceAgent(fmt.Sprintf("channels[%d].agent", index), f.Channels[index].Agent); err != nil {
 			return err
@@ -1202,8 +1087,7 @@ func (f *File) validateAgents() error {
 	return nil
 }
 
-// validateChannels 校验通道实例列表：type 合法、实例键唯一、与旧版单实例块的
-// 匿名键不冲突（同一个会话键起两份通道会让消息路由不确定）。
+// validateChannels 校验通道实例列表：type 合法、实例键唯一。
 func (f *File) validateChannels() error {
 	seen := map[string]int{}
 	for index := range f.Channels {
@@ -1216,18 +1100,6 @@ func (f *File) validateChannels() error {
 				index, previous, channel.Key())
 		}
 		seen[channel.Key()] = index
-		if channel.Name == "" {
-			switch channel.Type {
-			case ChannelWeixin:
-				if f.Weixin != nil {
-					return fmt.Errorf("channels[%d]: 匿名 weixin 实例与旧版 weixin 节冲突——给实例起 name 或删掉 weixin 节", index)
-				}
-			case ChannelQQ:
-				if f.QQ != nil {
-					return fmt.Errorf("channels[%d]: 匿名 qq 实例与旧版 qq 节冲突——给实例起 name 或删掉 qq 节", index)
-				}
-			}
-		}
 	}
 	return nil
 }
@@ -1274,11 +1146,6 @@ func (f *File) validateProviders() error {
 	}
 	if err := reference("default_provider", f.DefaultProvider); err != nil {
 		return err
-	}
-	if f.Weixin != nil {
-		if err := reference("weixin.provider", f.Weixin.Provider); err != nil {
-			return err
-		}
 	}
 	for index := range f.Channels {
 		channel := &f.Channels[index]
@@ -1347,14 +1214,6 @@ func (f *File) GiteaProviderName(runtime Runtime, channel *Channel, repo *Repo) 
 	return f.DefaultProvider
 }
 
-// WeixinProviderName 返回微信对话会话生效的 provider 名：weixin.provider >
-// 全局默认。
-func (f *File) WeixinProviderName() string {
-	if f.Weixin != nil && f.Weixin.Provider != "" {
-		return f.Weixin.Provider
-	}
-	return f.DefaultProvider
-}
 
 // AgentProviderName 返回命名 agent 生效的 provider 名：agents[name].provider >
 // 全局默认；名字不存在时回退全局默认（Validate 已保证引用存在）。
@@ -1463,39 +1322,6 @@ func (i Instance) Validate() error {
 		if _, _, err := ParseRepoName(repo.Name); err != nil {
 			return err
 		}
-	}
-	return nil
-}
-
-// Validate 校验微信桥配置（必须在 Normalize 之后调用）。
-func (w *Weixin) Validate() error {
-	if w == nil {
-		return nil
-	}
-	parsed, err := url.Parse(w.BaseURL)
-	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return fmt.Errorf("weixin.base_url 必须是绝对 HTTP(S) URL：%q", w.BaseURL)
-	}
-	if w.Enabled && w.BotToken == "" {
-		return fmt.Errorf("weixin.enabled 需要 bot_token：先 assistant weixin login")
-	}
-	return nil
-}
-
-// Validate 校验 QQ 通道配置（必须在 Normalize 之后调用）。
-func (q *QQ) Validate() error {
-	if q == nil {
-		return nil
-	}
-	parsed, err := url.Parse(q.APIBaseURL)
-	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return fmt.Errorf("qq.api_base_url 必须是绝对 HTTP(S) URL：%q", q.APIBaseURL)
-	}
-	if q.Enabled && (q.AppID == "" || q.AppSecret == "") {
-		return fmt.Errorf("qq.enabled 需要 app_id 与 app_secret：在 q.qq.com 开放平台创建机器人后填入")
-	}
-	if q.SplitLimit < 0 {
-		return fmt.Errorf("qq.split_limit 不能为负：%d", q.SplitLimit)
 	}
 	return nil
 }

@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync"
 
-	"assistant/internal/instances"
 	"assistant/internal/qq"
 )
 
@@ -22,6 +21,17 @@ const qqEventQueueSize = 64
 // qqMsgSeqCacheLimit 是 msg_seq 计数的缓存上限：msg_id 只有 15 分钟被动窗口，
 // 超限整体清空（最坏情况是极旧消息的重发被平台去重）。
 const qqMsgSeqCacheLimit = 256
+
+// QQChannelConfig 是 QQ 通道的装配配置（形态对齐 WeixinChannelConfig/
+// TelegramChannelConfig）。
+type QQChannelConfig struct {
+	AppID      string
+	AppSecret  string
+	APIBaseURL string
+	Sandbox    bool
+	AdminUsers []string
+	SplitLimit int
+}
 
 // QQChannel 是 QQ 开放平台机器人通道：WebSocket 网关收事件（出站连接）、
 // REST 被动回复；准入靠 openid 白名单，群聊事件平台只在被 @ 时派发。
@@ -48,10 +58,10 @@ type QQChannel struct {
 	msgSeq map[string]int
 }
 
-// NewQQChannel 创建 QQ 通道。config 需先经 instances.Normalize（api_base_url
-// 已填缺省）；token 端点用官方地址。key 是通道实例键（空 = "qq"；多开同平台
+// NewQQChannel 创建 QQ 通道。config.APIBaseURL 需先填缺省（instances.Normalize
+// 已做）；token 端点用官方地址。key 是通道实例键（空 = "qq"；多开同平台
 // 机器人时为 "qq/<name>"）。
-func NewQQChannel(config instances.QQ, key string, debug bool, log func(string, ...any)) *QQChannel {
+func NewQQChannel(config QQChannelConfig, key string, debug bool, log func(string, ...any)) *QQChannel {
 	client := qq.NewClient(qq.Config{
 		AppID:      config.AppID,
 		AppSecret:  config.AppSecret,
@@ -63,7 +73,7 @@ func NewQQChannel(config instances.QQ, key string, debug bool, log func(string, 
 }
 
 // newQQChannelWithClient 是可注入客户端的内部构造（测试用假 API）。
-func newQQChannelWithClient(config instances.QQ, client *qq.Client, key string, debug bool, log func(string, ...any)) *QQChannel {
+func newQQChannelWithClient(config QQChannelConfig, client *qq.Client, key string, debug bool, log func(string, ...any)) *QQChannel {
 	if log == nil {
 		log = func(string, ...any) {}
 	}

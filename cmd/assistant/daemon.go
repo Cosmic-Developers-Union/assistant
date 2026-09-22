@@ -52,7 +52,7 @@ func endpointPathHint() string {
 
 type weixinLoginOptions struct {
 	BaseURL string
-	// Name 非空时写入 channels 列表的命名实例（多微信账号）；缺省写旧版 weixin 节
+	// Name 非空时写入 channels 列表的命名实例（多微信账号）；缺省写匿名实例
 	Name string
 }
 
@@ -66,13 +66,13 @@ func newWeixinCommand(configFlag *string) *cobra.Command {
 	loginOptions := &weixinLoginOptions{}
 	loginCommand := &cobra.Command{
 		Use:   "login",
-		Short: "扫码登录微信 Bot，把凭据写入 config.json 的 weixin 节",
+		Short: "扫码登录微信 Bot，把凭据写入 config.json 的 channels 列表",
 		Long: "按 openclaw-weixin（ilink）协议拉起扫码登录：终端展示二维码内容，\n" +
-			"手机扫码确认后把 Bot token 写入 config.json；之后 assistant run 即可\n" +
-			"通过微信与 daemon 对话（--weixin 或 weixin.enabled=true）。\n" +
+			"手机扫码确认后把 Bot token 写入 config.json 的 channels 列表；之后\n" +
+			"assistant run 即可通过微信与 daemon 对话（channels 里有条目即启用）。\n" +
 			"需要验证码时会提示输入手机上显示的验证码。\n" +
-			"多微信账号用 --name <实例名>：凭据写入 channels 列表的命名实例，\n" +
-			"会话键为 weixin/<实例名>，各实例互不串会话。",
+			"多微信账号用 --name <实例名>：凭据写入同名命名实例，会话键为\n" +
+			"weixin/<实例名>，各实例互不串会话；缺省写匿名实例（会话键 weixin）。",
 		Args: cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			return runWeixinLogin(command, *configFlag, loginOptions)
@@ -81,7 +81,7 @@ func newWeixinCommand(configFlag *string) *cobra.Command {
 	loginCommand.Flags().StringVar(&loginOptions.BaseURL, "base-url", "",
 		"ilink API 根地址（缺省 "+instances.DefaultWeixinBaseURL+"）")
 	loginCommand.Flags().StringVar(&loginOptions.Name, "name", "",
-		"写入 channels 列表的实例名（多微信账号用；缺省写旧版 weixin 节）")
+		"写入 channels 列表的实例名（多微信账号用；缺省写匿名实例）")
 	statusCommand := &cobra.Command{
 		Use:   "status",
 		Short: "显示微信桥配置状态（不显示令牌）",
@@ -92,22 +92,59 @@ func newWeixinCommand(configFlag *string) *cobra.Command {
 				return err
 			}
 			stdout := command.OutOrStdout()
-			if file == nil || file.Weixin == nil {
+			if file == nil {
 				fmt.Fprintln(stdout, "未配置微信桥（先 assistant weixin login）")
 				return nil
 			}
-			config := file.Weixin
-			login := config.LoginUserID
-			if login == "" {
-				login = "-"
+			configs := weixinChannelViews(file)
+			if len(configs) == 0 {
+				fmt.Fprintln(stdout, "未配置微信桥（先 assistant weixin login）")
+				return nil
 			}
-			fmt.Fprintf(stdout, "enabled=%v base_url=%s login=%s bot_id=%s token=%s admins=%d\n",
-				config.Enabled, config.BaseURL, login, orDash(config.BotID), tokenState(config.BotToken), len(config.AdminUsers))
+			for _, view := range configs {
+				login := view.LoginUserID
+				if login == "" {
+					login = "-"
+				}
+				fmt.Fprintf(stdout, "key=%s enabled=%v base_url=%s login=%s bot_id=%s token=%s admins=%d\n",
+					view.Key, view.Enabled, view.BaseURL, login, orDash(view.BotID), tokenState(view.BotToken), len(view.AdminUsers))
+			}
 			return nil
 		},
 	}
 	command.AddCommand(loginCommand, statusCommand)
 	return command
+}
+
+// weixinChannelView 是 weixin status 的展示条目（通道键 + 生效字段）。
+type weixinChannelView struct {
+	Key         string
+	Enabled     bool
+	BaseURL     string
+	LoginUserID string
+	BotID       string
+	BotToken    string
+	AdminUsers  []string
+}
+
+// weixinChannelViews 列出 channels 里的 weixin 实例（未启用的也列出，标注状态）。
+func weixinChannelViews(file *instances.File) []weixinChannelView {
+	var views []weixinChannelView
+	for _, channel := range file.Channels {
+		if channel.Type != instances.ChannelWeixin {
+			continue
+		}
+		views = append(views, weixinChannelView{
+			Key:         channel.Key(),
+			Enabled:     channel.IsEnabled(),
+			BaseURL:     channel.BaseURL,
+			LoginUserID: channel.LoginUserID,
+			BotID:       channel.BotID,
+			BotToken:    channel.BotToken,
+			AdminUsers:  channel.AdminUsers,
+		})
+	}
+	return views
 }
 
 func orDash(value string) string {
@@ -191,15 +228,23 @@ func runWeixinLogin(command *cobra.Command, configPath string, options *weixinLo
 		fmt.Fprintln(stdout, "启动对话：assistant run（channels 列表里有条目即启用）")
 		return nil
 	}
-	if file.Weixin == nil {
-		file.Weixin = &instances.Weixin{}
+	// 缺省写匿名实例（Key()="weixin"，与旧版单实例会话键一致，老用户无感）
+	entry := instances.Channel{Type: instances.ChannelWeixin}
+	found := false
+	for index := range file.Channels {
+		if file.Channels[index].Type == instances.ChannelWeixin && strings.TrimSpace(file.Channels[index].Name) == "" {
+			entry = file.Channels[index]
+			found = true
+			break
+		}
 	}
-	weixinConfig := file.Weixin
-	weixinConfig.Enabled = true
-	weixinConfig.BaseURL = credentials.BaseURL
-	weixinConfig.BotToken = credentials.BotToken
-	weixinConfig.BotID = credentials.BotID
-	weixinConfig.LoginUserID = credentials.UserID
+	entry.BaseURL = credentials.BaseURL
+	entry.BotToken = credentials.BotToken
+	entry.BotID = credentials.BotID
+	entry.LoginUserID = credentials.UserID
+	if !found {
+		file.Channels = append(file.Channels, entry)
+	}
 	file.Normalize()
 	if err := file.Validate(); err != nil {
 		return err
@@ -207,9 +252,9 @@ func runWeixinLogin(command *cobra.Command, configPath string, options *weixinLo
 	if err := instances.Save(writePath, file); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "登录成功：bot_id=%s login=%s，凭据已写入 %s（0600）\n",
+	fmt.Fprintf(stdout, "登录成功：bot_id=%s login=%s，凭据已写入 %s 的 channels 实例 weixin（0600）\n",
 		orDash(credentials.BotID), orDash(credentials.UserID), writePath)
-	fmt.Fprintln(stdout, "启动对话：assistant run（或 --weixin 强制开启）")
+	fmt.Fprintln(stdout, "启动对话：assistant run（channels 列表里有条目即启用）")
 	return nil
 }
 
@@ -235,9 +280,6 @@ func startDaemonServices(
 		return err
 	}
 	if file == nil {
-		if options.Weixin || options.QQ {
-			return fmt.Errorf("--weixin/--qq 需要 config.json 配置：先 assistant config init（或 weixin login）")
-		}
 		// 静默跳过是最难排查的一种：明确说清通道没起以及为什么
 		logf("对话通道未启用：config.json 里没有通道配置")
 		return nil
@@ -283,7 +325,6 @@ func startDaemonServices(
 	checkChatCredentials(command, file, mainAgent, subagents, logf)
 
 	// 通道：只启动 runtime 引用的通道；gitea 通道由调度引擎接管（本函数跳过）。
-	// 旧版单实例 weixin/qq 块继续按 enabled/--旗标语义工作。
 	referenced := map[string]bool{}
 	for _, key := range runtime.Channels {
 		referenced[key] = true
@@ -309,12 +350,6 @@ func startDaemonServices(
 	}
 	if len(runtime.Channels) > 0 && started == 0 {
 		logf("runtime 未引用任何对话通道：只运行 gitea 通道（调度引擎）与状态 API")
-	}
-	if err := startWeixinChannel(command, file, options, chat, logf); err != nil {
-		return err
-	}
-	if err := startQQChannel(command, file, options, chat, logf); err != nil {
-		return err
 	}
 	return nil
 }
@@ -406,14 +441,12 @@ func startChannelEntry(
 		}, logf)
 		startChannel(command, channel, chat, options.Debug, logf)
 	case instances.ChannelQQ:
-		channel := daemon.NewQQChannel(instances.QQ{
-			Enabled:    true,
+		channel := daemon.NewQQChannel(daemon.QQChannelConfig{
 			AppID:      entry.AppID,
 			AppSecret:  entry.AppSecret,
 			APIBaseURL: entry.APIBaseURL,
 			Sandbox:    entry.Sandbox,
 			AdminUsers: entry.AdminUsers,
-			Agent:      entry.Agent,
 			SplitLimit: entry.SplitLimit,
 		}, key, options.Debug, logf)
 		startChannel(command, channel, chat, options.Debug, logf)
@@ -673,88 +706,3 @@ func displayName(name string, file *instances.File) string {
 	return name
 }
 
-// startWeixinChannel 按配置与 --weixin 旗标启动微信通道。
-func startWeixinChannel(
-	command *cobra.Command,
-	file *instances.File,
-	options *dispatcherOptions,
-	chat *daemon.Chat,
-	logf func(string, ...any),
-) error {
-	weixinConfig := file.Weixin
-	if weixinConfig == nil {
-		if options.Weixin {
-			return fmt.Errorf("--weixin 需要 config.json 的 weixin 配置：先 assistant weixin login")
-		}
-		logf("通道 weixin 未启用：config.json 里没有 weixin 配置（需要时先 `assistant weixin login` 扫码）")
-		return nil
-	}
-	if !options.Weixin && !weixinConfig.Enabled {
-		logf("通道 weixin 未启用：weixin.enabled=false（`assistant weixin login` 会置为 true；--weixin 可强制开启）")
-		return nil
-	}
-	if strings.TrimSpace(weixinConfig.BotToken) == "" {
-		return fmt.Errorf("weixin.bot_token 未配置：先 assistant weixin login")
-	}
-	channel := daemon.NewWeixinChannel(daemon.WeixinChannelConfig{
-		Weixin: weixin.Config{
-			BaseURL:        weixinConfig.BaseURL,
-			BotToken:       weixinConfig.BotToken,
-			BotAgent:       weixinConfig.BotAgent,
-			ChannelVersion: firstNonEmpty(weixinConfig.ChannelVersion, version),
-			RouteTag:       weixinConfig.RouteTag,
-		},
-		AdminUsers:  weixinConfig.AdminUsers,
-		LoginUserID: weixinConfig.LoginUserID,
-	}, logf)
-	channelConfig := daemon.ChannelConfig{
-		Chat:  chat,
-		Log:   logf,
-		Debug: options.Debug,
-	}
-	go func() {
-		if err := daemon.RunChannel(command.Context(), channel, channelConfig); err != nil {
-			logf("通道 weixin 退出：%v", err)
-		}
-	}()
-	logf("通道 weixin 已启动（白名单 %d 人）", len(weixinConfig.AdminUsers))
-	return nil
-}
-
-// startQQChannel 按配置与 --qq 旗标启动 QQ 通道。
-func startQQChannel(
-	command *cobra.Command,
-	file *instances.File,
-	options *dispatcherOptions,
-	chat *daemon.Chat,
-	logf func(string, ...any),
-) error {
-	qqConfig := file.QQ
-	if qqConfig == nil {
-		if options.QQ {
-			return fmt.Errorf("--qq 需要 config.json 的 qq 配置：把 q.qq.com 开放平台的 app_id/app_secret 写入 qq 节")
-		}
-		logf("通道 qq 未启用：config.json 里没有 qq 配置（需要时在 q.qq.com 创建机器人后填入）")
-		return nil
-	}
-	if !options.QQ && !qqConfig.Enabled {
-		logf("通道 qq 未启用：qq.enabled=false（--qq 可强制开启）")
-		return nil
-	}
-	if qqConfig.AppID == "" || qqConfig.AppSecret == "" {
-		return fmt.Errorf("qq.app_id/qq.app_secret 未配置：在 q.qq.com 开放平台创建机器人后填入")
-	}
-	channel := daemon.NewQQChannel(*qqConfig, "qq", options.Debug, logf)
-	channelConfig := daemon.ChannelConfig{
-		Chat:  chat,
-		Log:   logf,
-		Debug: options.Debug,
-	}
-	go func() {
-		if err := daemon.RunChannel(command.Context(), channel, channelConfig); err != nil {
-			logf("通道 qq 退出：%v", err)
-		}
-	}()
-	logf("通道 qq 已启动（白名单 %d 人，api=%s）", len(qqConfig.AdminUsers), qqConfig.APIBaseURL)
-	return nil
-}

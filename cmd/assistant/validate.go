@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 
@@ -125,9 +124,6 @@ func validateConfigFile(path string, file *instances.File) []validateFinding {
 	for _, runtime := range file.Runtimes {
 		addReference(runtime.Provider, "runtimes")
 	}
-	if file.Weixin != nil {
-		addReference(file.Weixin.Provider, "weixin.provider")
-	}
 	for _, name := range file.AgentNames() {
 		if agent, ok := file.Agents[name]; ok {
 			addReference(agent.Provider, "agents."+name)
@@ -207,62 +203,6 @@ func validateConfigFile(path string, file *instances.File) []validateFinding {
 				reference + " 指向的 schema 文件不存在：编辑器补全与悬停文档不可用（assistant config init 会写一份）"})
 		} else {
 			findings = append(findings, validateFinding{"OK", "$schema", reference + "（编辑器补全与悬停文档）"})
-		}
-	}
-
-	// 微信桥（channels 里已有同平台条目时旧块不再赘述）
-	hasWeixinChannel := slices.ContainsFunc(file.Channels, func(c instances.Channel) bool {
-		return c.Type == instances.ChannelWeixin
-	})
-	if file.Weixin == nil {
-		if !hasWeixinChannel {
-			findings = append(findings, validateFinding{"SKIP", "weixin",
-				"未配置：微信对话桥不会启动（需要时 assistant weixin login）"})
-		}
-	} else {
-		weixin := file.Weixin
-		detail := "enabled=" + fmt.Sprintf("%t", weixin.Enabled)
-		if weixin.Provider != "" {
-			detail += "；provider=" + weixin.Provider
-		}
-		if weixin.Agent != "" {
-			detail += "；agent=" + weixin.Agent
-		}
-		if strings.TrimSpace(weixin.BotToken) == "" {
-			findings = append(findings, validateFinding{"ERROR", "weixin",
-				detail + "；缺少 bot_token——先 assistant weixin login"})
-		} else if !weixin.Enabled {
-			findings = append(findings, validateFinding{"WARN", "weixin",
-				detail + "；enabled=false：assistant run 不会启动对话桥（--weixin 可强制开启）"})
-		} else {
-			findings = append(findings, validateFinding{"OK", "weixin", detail + "；凭据已写入"})
-		}
-	}
-
-	// QQ 通道（channels 里已有同平台条目时旧块不再赘述）
-	hasQQChannel := slices.ContainsFunc(file.Channels, func(c instances.Channel) bool {
-		return c.Type == instances.ChannelQQ
-	})
-	if file.QQ == nil {
-		if !hasQQChannel {
-			findings = append(findings, validateFinding{"SKIP", "qq",
-				"未配置：QQ 对话桥不会启动（在 q.qq.com 开放平台创建机器人后把 app_id/app_secret 写入 qq 节或 channels）"})
-		}
-	} else {
-		qqConfig := file.QQ
-		detail := "enabled=" + fmt.Sprintf("%t", qqConfig.Enabled)
-		if qqConfig.Agent != "" {
-			detail += "；agent=" + qqConfig.Agent
-		}
-		switch {
-		case qqConfig.AppID == "" || strings.TrimSpace(qqConfig.AppSecret) == "":
-			findings = append(findings, validateFinding{"ERROR", "qq",
-				detail + "；缺少 app_id/app_secret——在 q.qq.com 开放平台创建机器人后填入"})
-		case !qqConfig.Enabled:
-			findings = append(findings, validateFinding{"WARN", "qq",
-				detail + "；enabled=false：assistant run 不会启动 QQ 通道（--qq 可强制开启）"})
-		default:
-			findings = append(findings, validateFinding{"OK", "qq", detail + "；凭据已写入"})
 		}
 	}
 

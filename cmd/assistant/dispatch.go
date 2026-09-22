@@ -32,8 +32,6 @@ type dispatcherOptions struct {
 	RepoDir       string
 	Token         string
 	APIListen     string
-	Weixin        bool
-	QQ            bool
 	Verbose       bool
 	Reviewer      string
 	Model         string
@@ -132,18 +130,6 @@ func newDispatcherCommands(repoFlag, configFlag *string) []*cobra.Command {
 		"api-listen",
 		"",
 		"daemon 状态 API 监听地址（Bearer 鉴权，端点写入配置目录 daemon.json；缺省取 runtime 的 api_listen=127.0.0.1:8770；off 关闭）",
-	)
-	runCommand.Flags().BoolVar(
-		&runOptions.Weixin,
-		"weixin",
-		false,
-		"启动微信对话桥（也可在 config.json 设 weixin.enabled=true；凭证用 assistant weixin login 扫码获取）",
-	)
-	runCommand.Flags().BoolVar(
-		&runOptions.QQ,
-		"qq",
-		false,
-		"启动 QQ 对话桥（也可在 config.json 设 qq.enabled=true；凭据在 q.qq.com 开放平台创建机器人后写入 qq 节）",
 	)
 
 	listOptions := &dispatcherOptions{}
@@ -417,7 +403,7 @@ func hasChatService(file *instances.File) bool {
 			return true
 		}
 	}
-	return file.Weixin != nil || file.QQ != nil
+	return false
 }
 
 // maskTokenForLog 令牌打码（日志展示用）：只保留前后各 4 位。

@@ -64,14 +64,13 @@ func TestStartDaemonServicesStartsChannels(t *testing.T) {
 			"ops": {Model: "test-model"},
 		},
 		DefaultAgent: "ops",
-		QQ: &instances.QQ{
-			Enabled:    true,
+		Channels: []instances.Channel{{
+			Type:       instances.ChannelQQ,
 			AppID:      "app-1",
 			AppSecret:  "sec-1",
 			APIBaseURL: "http://127.0.0.1:1", // 不可达：通道保持重试，不影响启动
 			AdminUsers: []string{"*"},
-			Agent:      "ops",
-		},
+		}},
 	}
 	if err := instances.Save(configPath, file); err != nil {
 		t.Fatal(err)
@@ -96,7 +95,6 @@ func TestStartDaemonServicesStartsChannels(t *testing.T) {
 		"runtime 装配：main agent = main", // 缺省主 agent（用户 agents.ops 覆盖内置同名预设）
 		"子代理     = coder、ops、review、writer",
 		"通道 qq 已启动",
-		"通道 weixin 未启用",
 	} {
 		if !strings.Contains(logs, want) {
 			t.Errorf("日志缺少 %q：\n%s", want, logs)

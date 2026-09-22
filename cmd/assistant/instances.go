@@ -51,7 +51,7 @@ func resolveInstanceFile(options commandOptions) (string, *instances.File, error
 		// instances 后配置文件自然接管。其余错误（语法坏、语义错）照报。
 		if skeleton, parseErr := instances.Parse(path); parseErr == nil &&
 			len(skeleton.Instances) == 0 && len(skeleton.Channels) == 0 &&
-			len(skeleton.Runtimes) == 0 && skeleton.Weixin == nil && skeleton.QQ == nil {
+			len(skeleton.Runtimes) == 0 {
 			return "", nil, nil
 		}
 		return "", nil, err

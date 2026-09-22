@@ -291,20 +291,7 @@ func TestProviderValidation(t *testing.T) {
 			}
 		})
 	}
-	// weixin.provider 生效：优先于全局默认
-	file := &File{
-		DefaultProvider: "gw",
-		Weixin:          &Weixin{Provider: "weixin-gw"},
-		Providers:       map[string]Provider{"gw": {}, "weixin-gw": {}},
-	}
-	if got := file.WeixinProviderName(); got != "weixin-gw" {
-		t.Errorf("WeixinProviderName() = %q, want weixin-gw", got)
-	}
-	file.Weixin.Provider = ""
-	if got := file.WeixinProviderName(); got != "gw" {
-		t.Errorf("WeixinProviderName() fallback = %q, want gw", got)
-	}
-	if overrides := file.ProviderNameOf("gw").Overrides(); !overrides.Empty() {
+	if overrides := (&File{Providers: map[string]Provider{"gw": {}}}).ProviderNameOf("gw").Overrides(); !overrides.Empty() {
 		t.Errorf("空 provider 应为空覆盖：%+v", overrides)
 	}
 }
@@ -443,9 +430,9 @@ func TestProviderPresetValidation(t *testing.T) {
 	}
 }
 
-// agent 池与 QQ 通道的加载、默认值与校验：引用不存在的 agent/provider 直接报错；
-// qq.enabled 需要 app_id+app_secret；Normalize 填 api_base_url 缺省。
-func TestLoadAgentsAndQQ(t *testing.T) {
+// agent 池的加载、默认值与校验：引用不存在的 agent/provider 直接报错；
+// 遗留顶层 qq:/weixin: 节报迁移错误。
+func TestLoadAgentsAndLegacyMigration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	content := `{
 		"providers": {"zhipu": {"api_key": "k"}},
@@ -454,8 +441,7 @@ func TestLoadAgentsAndQQ(t *testing.T) {
 			"coder": {"model": "m-coder"}
 		},
 		"default_agent": "ops",
-		"qq": {"enabled": true, "app_id": "111", "app_secret": "sec", "admin_users": ["*"], "agent": "coder"},
-		"weixin": {"enabled": true, "bot_token": "tok", "agent": "ops"}
+		"channels": [{"type": "qq", "app_id": "111", "app_secret": "sec"}]
 	}`
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
@@ -476,22 +462,33 @@ func TestLoadAgentsAndQQ(t *testing.T) {
 	if got := file.AgentProviderName("coder"); got != "" {
 		t.Errorf("AgentProviderName(coder) 应回退全局默认 = %q", got)
 	}
-	if file.QQ.APIBaseURL != DefaultQQAPIBaseURL {
-		t.Errorf("qq.api_base_url 缺省未填：%q", file.QQ.APIBaseURL)
-	}
-	if file.Weixin.Agent != "ops" || file.QQ.Agent != "coder" {
-		t.Errorf("通道 agent 未保留：weixin=%q qq=%q", file.Weixin.Agent, file.QQ.Agent)
+
+	// 遗留顶层节点：给出可读的迁移报错（channels 对照写法）
+	for name, bad := range map[string]string{
+		"legacy qq":     `{"qq": {"enabled": true, "app_id": "1", "app_secret": "s"}}`,
+		"legacy weixin": `{"weixin": {"enabled": true, "bot_token": "t"}}`,
+	} {
+		t.Run("migration error: "+name, func(t *testing.T) {
+			badPath := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(badPath, []byte(bad), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(badPath)
+			if err == nil {
+				t.Fatalf("Load 应拒绝遗留节点：%s", bad)
+			}
+			if !strings.Contains(err.Error(), "channels") {
+				t.Errorf("迁移错误应给出 channels 对照写法：%v", err)
+			}
+		})
 	}
 
 	rejects := map[string]string{
 		"unknown default_agent":  `{"agents": {"ops": {}}, "default_agent": "nope", "instances": []}`,
-		"unknown weixin.agent":   `{"agents": {"ops": {}}, "weixin": {"enabled": true, "bot_token": "t", "agent": "nope"}, "instances": []}`,
-		"unknown qq.agent":       `{"agents": {"ops": {}}, "qq": {"enabled": true, "app_id": "1", "app_secret": "s", "agent": "nope"}, "instances": []}`,
 		"unknown agent provider": `{"agents": {"ops": {"provider": "nope"}}, "instances": []}`,
-		"qq enabled no secret":   `{"qq": {"enabled": true, "app_id": "111"}, "instances": []}`,
-		"qq enabled no appid":    `{"qq": {"enabled": true, "app_secret": "s"}, "instances": []}`,
-		"qq bad base url":        `{"qq": {"api_base_url": "api.sgroup.qq.com"}, "instances": []}`,
-		"qq negative split":      `{"qq": {"enabled": true, "app_id": "1", "app_secret": "s", "split_limit": -5}, "instances": []}`,
+		"qq channel no secret":   `{"channels": [{"type": "qq", "app_id": "1"}]}`,
+		"qq channel no appid":    `{"channels": [{"type": "qq", "app_secret": "s"}]}`,
+		"qq negative split":      `{"channels": [{"type": "qq", "app_id": "1", "app_secret": "s", "split_limit": -5}]}`,
 	}
 	for name, bad := range rejects {
 		t.Run(name, func(t *testing.T) {
@@ -553,8 +550,6 @@ func TestLoadChannels(t *testing.T) {
 		"tg no token":             `{"channels": [{"type": "telegram"}]}`,
 		"dup key":                 `{"channels": [{"type": "weixin", "bot_token": "a"}, {"type": "weixin", "bot_token": "b"}]}`,
 		"name with slash":         `{"channels": [{"type": "weixin", "name": "a/b", "bot_token": "t"}]}`,
-		"unnamed vs weixin block": `{"weixin": {"enabled": true, "bot_token": "t"}, "channels": [{"type": "weixin", "bot_token": "t2"}]}`,
-		"unnamed vs qq block":     `{"qq": {"enabled": true, "app_id": "1", "app_secret": "s"}, "channels": [{"type": "qq", "app_id": "1", "app_secret": "s"}]}`,
 		"unknown agent ref":       `{"channels": [{"type": "weixin", "bot_token": "t", "agent": "nope"}]}`,
 	}
 	for name, bad := range rejects {
@@ -573,7 +568,7 @@ func TestLoadChannels(t *testing.T) {
 // 用户 agent 的 mcp 字段：原样读回（透传给运行时合并）。
 func TestAgentMCPField(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	content := `{"agents": {"ops": {"mcp": {"search": {"command": "search-mcp", "args": ["-v"]}}}}, "qq": {"enabled": true, "app_id": "1", "app_secret": "s"}}`
+	content := `{"agents": {"ops": {"mcp": {"search": {"command": "search-mcp", "args": ["-v"]}}}}, "channels": [{"type": "qq", "app_id": "1", "app_secret": "s"}]}`
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}

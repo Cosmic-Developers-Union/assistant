@@ -145,7 +145,7 @@ func channelInstance(channel *instances.Channel) instances.Instance {
 // configHasNoPlatform 判断配置是否已没有任何平台与运行内容（login remove 用它
 // 决定要不要删掉整个 config.json）。
 func configHasNoPlatform(file *instances.File) bool {
-	return len(file.Channels) == 0 && file.Weixin == nil && file.QQ == nil &&
+	return len(file.Channels) == 0 &&
 		len(file.Runtimes) == 0 && len(file.Providers) == 0 && len(file.Agents) == 0 &&
 		file.DefaultProvider == "" && file.DefaultRuntime == "" &&
 		len(file.Optimizations.Env) == 0 && len(file.Optimizations.Settings) == 0 &&

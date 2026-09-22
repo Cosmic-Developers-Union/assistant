@@ -82,8 +82,6 @@ func TestSchemaMatchesConfigStructs(t *testing.T) {
 		{"$defs.repoObject", defs["repoObject"].propertyNames(), jsonTagNames(Repo{})},
 		{"$defs.account", defs["account"].propertyNames(), jsonTagNames(Account{})},
 		{"$defs.provider", defs["provider"].propertyNames(), jsonTagNames(Provider{})},
-		{"$defs.weixin", defs["weixin"].propertyNames(), jsonTagNames(Weixin{})},
-		{"$defs.qq", defs["qq"].propertyNames(), jsonTagNames(QQ{})},
 		{"$defs.agent", defs["agent"].propertyNames(), jsonTagNames(Agent{})},
 		{"$defs.channel", defs["channel"].propertyNames(), jsonTagNames(Channel{})},
 		{"$defs.runtime", defs["runtime"].propertyNames(), jsonTagNames(Runtime{})},
@@ -98,7 +96,7 @@ func TestSchemaMatchesConfigStructs(t *testing.T) {
 
 	// additionalProperties 必须与加载器的严格程度一致：provider 之外的未知键都会
 	// 被 DisallowUnknownFields 拒绝；provider 内部的未识别键则原样保留。
-	for _, name := range []string{"instance", "repoObject", "account", "weixin", "qq", "agent", "channel", "runtime"} {
+	for _, name := range []string{"instance", "repoObject", "account", "agent", "channel", "runtime"} {
 		if additional := defs[name].AdditionalProperties; additional == nil || *additional {
 			t.Errorf("$defs.%s 必须 additionalProperties: false", name)
 		}

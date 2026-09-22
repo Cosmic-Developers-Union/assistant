@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"assistant/internal/instances"
 	"assistant/internal/qq"
 	"github.com/coder/websocket"
 )
@@ -143,7 +142,7 @@ func readWSFrame(t *testing.T, conn *websocket.Conn, timeout time.Duration) ([]b
 
 // newQQChannelForTest 起一个 QQ 通道 + fake API + RunChannel（返回的 cancel
 // 由调用方在断言后触发）。
-func newQQChannelForTest(t *testing.T, config instances.QQ) (*fakeQQ, *QQChannel, context.CancelFunc, chan error) {
+func newQQChannelForTest(t *testing.T, config QQChannelConfig) (*fakeQQ, *QQChannel, context.CancelFunc, chan error) {
 	t.Helper()
 	fake := newFakeQQ(t)
 	client := qq.NewClient(qq.Config{
@@ -175,7 +174,7 @@ func newQQChannelForTest(t *testing.T, config instances.QQ) (*fakeQQ, *QQChannel
 
 // 私聊：白名单用户的消息 → claude 回复以被动消息发回（带 msg_id、msg_seq=1）。
 func TestQQChannelRepliesWithMsgID(t *testing.T) {
-	fake, _, cancel, done := newQQChannelForTest(t, instances.QQ{
+	fake, _, cancel, done := newQQChannelForTest(t, QQChannelConfig{
 		AppID: "app-1", AppSecret: "sec-1", AdminUsers: []string{"u1"},
 	})
 	fake.setWS(func(t *testing.T, conn *websocket.Conn) {
@@ -201,7 +200,7 @@ func TestQQChannelRepliesWithMsgID(t *testing.T) {
 
 // 群聊：@ 消息（残留提及前缀被清理）→ 回到对应群，白名单按成员 openid 判定。
 func TestQQChannelGroupReply(t *testing.T) {
-	fake, _, cancel, done := newQQChannelForTest(t, instances.QQ{
+	fake, _, cancel, done := newQQChannelForTest(t, QQChannelConfig{
 		AppID: "app-1", AppSecret: "sec-1", AdminUsers: []string{"*"},
 	})
 	fake.setWS(func(t *testing.T, conn *websocket.Conn) {
@@ -229,7 +228,7 @@ func TestQQChannelGroupReply(t *testing.T) {
 
 // 准入：未配置白名单时全部拒绝（不回复也不建会话）。
 func TestQQChannelDeniesWithoutWhitelist(t *testing.T) {
-	fake, channel, cancel, done := newQQChannelForTest(t, instances.QQ{
+	fake, channel, cancel, done := newQQChannelForTest(t, QQChannelConfig{
 		AppID: "app-1", AppSecret: "sec-1",
 	})
 	if allowed, reason := channel.Allowed("anyone"); allowed || reason == "" {
