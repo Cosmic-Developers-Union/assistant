@@ -15,6 +15,40 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// 记录库连接解析：config.json 的 sessions 节优先于环境变量与 sidecar，
+// 来源标签随日志输出（记录去向可感知）。
+func TestResolveSessionsRemoteConfigPriority(t *testing.T) {
+	t.Setenv("ASSISTANT_SESSIONS_URL", "http://env.example.com:8771")
+	t.Setenv("ASSISTANT_SESSIONS_TOKEN", "env-token")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	file := &instances.File{
+		Sessions: &instances.SessionsConfig{Remote: &instances.RemoteSessions{
+			URL:   "http://config.example.com:8771",
+			Token: "$SESSIONS_TOKEN",
+		}},
+		Providers: map[string]instances.Provider{"_": {}},
+	}
+	t.Setenv("SESSIONS_TOKEN", "config-token")
+	remote, source := resolveSessionsRemote(file, configPath)
+	if remote.URL != "http://config.example.com:8771" || remote.Token != "config-token" || source != "config" {
+		t.Errorf("config 节应优先：remote=%+v source=%q", remote, source)
+	}
+	// 无 config 节：回落 env
+	file.Sessions = nil
+	remote, source = resolveSessionsRemote(file, configPath)
+	if remote.URL != "http://env.example.com:8771" || remote.Token != "env-token" || source != "env/sidecar" {
+		t.Errorf("应回落 env：remote=%+v source=%q", remote, source)
+	}
+	// 都没有：未配置
+	t.Setenv("ASSISTANT_SESSIONS_URL", "")
+	t.Setenv("ASSISTANT_SESSIONS_TOKEN", "")
+	remote, source = resolveSessionsRemote(file, configPath)
+	if remote.URL != "" || source != "未配置" {
+		t.Errorf("应报告未配置：remote=%+v source=%q", remote, source)
+	}
+}
+
 // run 的 daemon 服务面：状态 API 起来后端点可自举发现，MCP/对话都用它。
 func TestStartDaemonServicesServesAPI(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())

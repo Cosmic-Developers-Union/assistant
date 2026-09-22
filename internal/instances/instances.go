@@ -73,6 +73,10 @@ type File struct {
 	// DefaultRuntime 是 `assistant run` 未指定 --runtime 时使用的运行时名；
 	// 只有一个 runtime 时可省。
 	DefaultRuntime string `json:"default_runtime,omitempty"`
+	// Sessions 是对话会话记录配置：remote 定义远端记录库（assistant serve 的
+	// 存储服务端），daemon 每轮对话结束把会话转录增量推送过去。优先级高于
+	// 环境变量与 sidecar 文件（sessions-remote.json/serve.json 保留为兜底）。
+	Sessions *SessionsConfig `json:"sessions,omitempty"`
 
 	// notes 是载入规范化产生的备注（迁移/废弃提示）：cmd 层取走打日志。
 	notes []string
@@ -306,6 +310,21 @@ type Agent struct {
 
 // DefaultQQAPIBaseURL 是 QQ 开放平台机器人 API（v2）的默认地址。
 const DefaultQQAPIBaseURL = "https://api.sgroup.qq.com"
+
+// SessionsConfig 是对话会话记录配置（config.json 的 sessions 节）。
+type SessionsConfig struct {
+	// Remote 是远端记录库（assistant serve 的存储服务端）：URL 必填，
+	// token 支持 $VAR/${VAR} 环境变量引用（未定义启动即报错）。
+	Remote *RemoteSessions `json:"remote,omitempty"`
+}
+
+// RemoteSessions 是远端记录库的连接参数。
+type RemoteSessions struct {
+	// URL 是记录库服务端地址（assistant serve --url 输出的那个）。
+	URL string `json:"url,omitempty"`
+	// Token 是访问令牌；支持 $VAR/${VAR} 引用，令牌不落配置文件。
+	Token string `json:"token,omitempty"`
+}
 
 // Instance 是一台 Gitea 站点及其仓库。
 //
@@ -640,6 +659,10 @@ func (f *File) Normalize() {
 		}
 		f.Agents = normalized
 	}
+	if f.Sessions != nil && f.Sessions.Remote != nil {
+		f.Sessions.Remote.URL = strings.TrimSpace(f.Sessions.Remote.URL)
+		f.Sessions.Remote.Token = strings.TrimSpace(f.Sessions.Remote.Token)
+	}
 	for index := range f.Instances {
 		f.Instances[index].Normalize()
 	}
@@ -863,6 +886,11 @@ func (f *File) validateSecretRefs() error {
 		if _, err := envref.ExpandMCPEnv(f.Agents[name].MCP, envref.Options{
 			Field: fmt.Sprintf("agents[%s].mcp", name),
 		}); err != nil {
+			return err
+		}
+	}
+	if f.Sessions != nil && f.Sessions.Remote != nil && f.Sessions.Remote.Token != "" {
+		if err := envref.Validate(f.Sessions.Remote.Token, envref.Options{Field: "sessions.remote.token"}); err != nil {
 			return err
 		}
 	}

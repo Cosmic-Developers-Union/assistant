@@ -1,11 +1,13 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
 
+	"assistant/internal/envref"
 	"assistant/internal/instances"
 	"assistant/internal/sessionstore"
 
@@ -100,17 +102,30 @@ func runSessionPush(ctx context.Context, command *cobra.Command, configPath stri
 		return nil
 	}
 
+	// 记录库地址解析：旗标 > config.json 的 sessions.remote > env/sidecar
 	remote := sessionstore.RemoteConfig{URL: strings.TrimSpace(options.URL), Token: strings.TrimSpace(options.Token)}
-	resolved := sessionstore.ResolveRemote(configDir)
+	remoteSource := "flag"
 	if remote.URL == "" {
+		if _, file, err := resolveInstanceFile(commandOptions{ConfigPath: configPath}); err == nil && file != nil &&
+			file.Sessions != nil && file.Sessions.Remote != nil && strings.TrimSpace(file.Sessions.Remote.URL) != "" {
+			remote.URL = strings.TrimSpace(file.Sessions.Remote.URL)
+			remote.Token = strings.TrimSpace(file.Sessions.Remote.Token)
+			if expanded, expandErr := envref.Expand(remote.Token, envref.Options{Field: "sessions.remote.token"}); expandErr == nil {
+				remote.Token = expanded
+			}
+			remoteSource = "config"
+		}
+	}
+	if remote.URL == "" {
+		resolved := sessionstore.ResolveRemote(configDir)
 		remote.URL = resolved.URL
-	}
-	if remote.Token == "" {
-		remote.Token = resolved.Token
+		remote.Token = cmp.Or(remote.Token, resolved.Token)
+		remoteSource = "env/sidecar"
 	}
 	if remote.URL == "" {
-		return fmt.Errorf("没有记录库服务端地址：先在同一台机器上 assistant serve，或设置 --url / ASSISTANT_SESSIONS_URL，或写 <配置目录>/%s", sessionstore.RemoteFile)
+		return fmt.Errorf("没有记录库服务端地址：config.json 加 sessions.remote，或先在同一台机器上 assistant serve，或设置 --url / ASSISTANT_SESSIONS_URL，或写 <配置目录>/%s", sessionstore.RemoteFile)
 	}
+	logf("记录库 = %s（来源 %s）", remote.URL, remoteSource)
 	result, err := sessionstore.Push(ctx, collectOptions, sessionstore.NewClient(remote.URL, remote.Token), logf)
 	if err != nil {
 		return err

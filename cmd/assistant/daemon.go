@@ -310,7 +310,7 @@ func startDaemonServices(
 	if err != nil {
 		return err
 	}
-	remote := sessionstore.ResolveRemote(filepath.Dir(configPath))
+	remote, remoteSource := resolveSessionsRemote(file, resolvedPath)
 	chat, err := daemon.NewChat(daemon.ChatConfig{
 		MainAgent:  mainAgent,
 		Subagents:  subagents,
@@ -325,7 +325,7 @@ func startDaemonServices(
 	if err != nil {
 		return err
 	}
-	logChatSummary(logf, mainAgent, subagents, chat, remote)
+	logChatSummary(logf, mainAgent, subagents, chat, remote, remoteSource)
 	checkChatCredentials(command, file, mainAgent, subagents, logf)
 
 	// 通道：只启动 runtime 引用的通道；gitea 通道由调度引擎接管（本函数跳过）。
@@ -696,14 +696,15 @@ func truncateDescription(prompt string) string {
 	return prompt
 }
 
-// logChatSummary 打印对话会话的前提：claude 与最小模式、目录布局、主 agent 与
-// 子代理、记录库。一次说清，别让「为什么没生效」靠猜。
+// logChatSummary 打印对话会话的前提：claude 与最小模式、主 agent 与子代理、
+// 记录库去向（来源标明 config/env/sidecar）。一次说清，别让「为什么没生效」靠猜。
 func logChatSummary(
 	logf func(string, ...any),
 	mainAgent daemon.AgentRuntime,
 	subagents []daemon.SubagentDefinition,
 	chat *daemon.Chat,
 	remote sessionstore.RemoteConfig,
+	remoteSource string,
 ) {
 	bareLabel := "关（claude 不支持 --bare 或未探测到）"
 	if mainAgent.Bare {
@@ -719,10 +720,33 @@ func logChatSummary(
 	// 配置根/会话目录已在启动读写清单里列出，这里只留操作者要用的续聊提示
 	logf("  续聊       = cd <会话目录> && claude --continue（目录见读写清单的对话状态行）")
 	if remote.URL != "" {
-		logf("  记录库     = %s（每轮结束归档该会话，可用 sessions MCP 回查）", remote.URL)
+		logf("  记录库     = %s（来源 %s；每轮结束归档该会话，可用 sessions MCP 回查）", remote.URL, remoteSource)
 	} else {
-		logf("  记录库     = 未配置（assistant serve + session push 可远端留存记录）")
+		logf("  记录库     = 未配置（config.json 加 sessions.remote，或 assistant serve + session push 可远端留存记录）")
 	}
+}
+
+// resolveSessionsRemote 解析远端记录库连接：config.json 的 sessions 节优先
+// （token 经 $VAR/${VAR} 展开），环境变量与 sidecar 文件（sessions-remote.json/
+// serve.json）兜底。返回连接配置与来源标签。
+func resolveSessionsRemote(file *instances.File, configPath string) (sessionstore.RemoteConfig, string) {
+	if file.Sessions != nil && file.Sessions.Remote != nil && strings.TrimSpace(file.Sessions.Remote.URL) != "" {
+		config := sessionstore.RemoteConfig{URL: strings.TrimSpace(file.Sessions.Remote.URL)}
+		if file.Sessions.Remote.Token != "" {
+			expanded, err := envref.Expand(file.Sessions.Remote.Token, envref.Options{Field: "sessions.remote.token"})
+			if err != nil {
+				// 装载期 validateSecretRefs 已拦截未定义引用；这里兜底保留原值
+				expanded = file.Sessions.Remote.Token
+			}
+			config.Token = expanded
+		}
+		return config, "config"
+	}
+	config := sessionstore.ResolveRemote(filepath.Dir(configPath))
+	if config.URL != "" {
+		return config, "env/sidecar"
+	}
+	return config, "未配置"
 }
 
 // subagentNames 返回子代理名（保持 runtime 声明顺序）。

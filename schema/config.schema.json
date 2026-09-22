@@ -60,6 +60,16 @@
     "default_runtime": {
       "type": "string",
       "description": "`assistant run` 未指定 --runtime 时使用的运行时名；只有一个 runtime 时可省。"
+    },
+    "sessions": {
+      "type": "object",
+      "description": "对话会话记录配置：remote 定义远端记录库（assistant serve 的存储服务端），daemon 每轮对话结束把会话转录增量推送过去。优先级高于环境变量（ASSISTANT_SESSIONS_URL/TOKEN）与 sidecar 文件。",
+      "additionalProperties": false,
+      "properties": {
+        "remote": {
+          "$ref": "#/$defs/remoteSessions"
+        }
+      }
     }
   },
   "$defs": {
@@ -420,6 +430,21 @@
       "required": [
         "type"
       ]
+    },
+    "remoteSessions": {
+      "type": "object",
+      "description": "远端记录库连接参数（assistant serve 启动时输出的地址与令牌）。",
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "记录库服务端地址（如 http://127.0.0.1:8771）。"
+        },
+        "token": {
+          "type": "string",
+          "description": "访问令牌。支持 $VAR/${VAR} 环境变量引用（config.json 同目录 .env 自动载入；未定义启动即报错），令牌不落配置文件。"
+        }
+      }
     }
   }
 }
