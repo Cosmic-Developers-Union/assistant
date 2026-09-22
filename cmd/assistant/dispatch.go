@@ -17,6 +17,7 @@ import (
 	"assistant/internal/credentials"
 	"assistant/internal/daemon"
 	"assistant/internal/dispatcher"
+	"assistant/internal/envref"
 	"assistant/internal/instances"
 	"assistant/internal/provider"
 	"assistant/internal/statestore"
@@ -469,9 +470,15 @@ func giteaTarget(
 	flags.Repository = repo.Name
 	// 会话配置根与对话会话共享（runtime 的 claude 目录）
 	flags.SessionDir = runtime.ClaudeConfigDir()
-	// 评审身份：通道显式 token 优先，否则凭据库 purpose=review（会话提交的
-	// review 以该令牌账号落库）
-	if token := strings.TrimSpace(channel.Token); token != "" {
+	// 评审身份：通道显式 token 优先（$VAR/${VAR} 引用在消费点展开），否则
+	// 凭据库 purpose=review（会话提交的 review 以该令牌账号落库）
+	channelToken, err := envref.Expand(channel.Token, envref.Options{
+		Field: fmt.Sprintf("channels[%s].token", channel.Key()),
+	})
+	if err != nil {
+		return dispatchTarget{}, err
+	}
+	if token := strings.TrimSpace(channelToken); token != "" {
 		flags.AccessToken = token
 	} else {
 		reviewCredential, err := tokenForPurpose(configPath, channel.Host, credentials.PurposeReview)
@@ -541,7 +548,11 @@ func giteaTarget(
 	}
 	config.Provider = effective
 	config.ProviderName = providerName
-	config.Optimizations = file.Optimizations.Overrides()
+	optimizations, err := file.EffectiveOptimizations()
+	if err != nil {
+		return dispatchTarget{}, err
+	}
+	config.Optimizations = optimizations
 	client, err := newDispatchClient(config, options.Debug)
 	if err != nil {
 		return dispatchTarget{}, err

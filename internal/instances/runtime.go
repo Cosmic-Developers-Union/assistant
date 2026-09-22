@@ -440,37 +440,10 @@ func expandRoot(text, root string) string {
 }
 
 // expandBare 展开 $VAR 形式（不带花括号）的变量引用；未定义展开为空串。
+// 只用于路径字段的缺省段（路径允许未定义回落空串）；密钥字段的严格展开在
+// internal/envref（未定义报错）。
 func expandBare(text string) string {
 	return os.Expand(text, func(name string) string { return os.Getenv(name) })
-}
-
-// checkBracedRefs 校验 ${…} 引用闭合（expandBare 不报错，未闭合引用会被它
-// 静默消费，这里先行拦截）。
-func checkBracedRefs(text string) error {
-	for {
-		start := strings.Index(text, "${")
-		if start < 0 {
-			return nil
-		}
-		end := strings.Index(text[start:], "}")
-		if end < 0 {
-			return fmt.Errorf("未闭合的 ${ 引用：%q", text[start:])
-		}
-		text = text[start+end+1:]
-	}
-}
-
-// ExpandSecret 对支持凭据引用的字段做 ${VAR}/$VAR 展开：gitea 通道 token 等
-// 新字段允许引用环境变量（令牌不落配置文件）；先校验闭合再展开。
-func ExpandSecret(text string) (string, error) {
-	text = strings.TrimSpace(text)
-	if !strings.Contains(text, "${") {
-		return text, nil
-	}
-	if err := checkBracedRefs(text); err != nil {
-		return "", err
-	}
-	return expandBare(text), nil
 }
 
 // absFrom 把相对路径锚定到 config.json 所在目录；绝对路径原样返回。

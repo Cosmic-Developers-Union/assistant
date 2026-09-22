@@ -13,6 +13,7 @@ import (
 	builtinagents "assistant/internal/agents"
 	"assistant/internal/claudecfg"
 	"assistant/internal/daemon"
+	"assistant/internal/envref"
 	"assistant/internal/instances"
 	"assistant/internal/provider"
 	"assistant/internal/sessionstore"
@@ -370,6 +371,24 @@ func startChannelEntry(
 	logf func(string, ...any),
 ) error {
 	key := entry.Key()
+	// 密钥的 $VAR/${VAR} 引用在消费点展开（File 里的原始定义不动）；未定义
+	// 变量在这里拦下，不让字面量发往平台。
+	if secretField, secretValue := entry.SecretField(); secretField != "" {
+		expanded, err := envref.Expand(secretValue, envref.Options{
+			Field: fmt.Sprintf("channels[%s].%s", key, secretField),
+		})
+		if err != nil {
+			return fmt.Errorf("通道 %s 启动失败：%w", key, err)
+		}
+		switch secretField {
+		case "app_secret":
+			entry.AppSecret = expanded
+		case "bot_token":
+			entry.BotToken = expanded
+		case "token":
+			entry.Token = expanded
+		}
+	}
 	switch entry.Type {
 	case instances.ChannelWeixin:
 		channel := daemon.NewWeixinChannel(daemon.WeixinChannelConfig{
@@ -455,7 +474,13 @@ func buildMainAgentRuntime(
 		definition.Description = cmp.Or(user.Description, definition.Description)
 		definition.SystemPrompt = cmp.Or(user.SystemPrompt, definition.SystemPrompt)
 		definition.Model = cmp.Or(user.Model, definition.Model)
-		definition.MCP = user.MCP
+		expanded, err := envref.ExpandMCPEnv(user.MCP, envref.Options{
+			Field: fmt.Sprintf("agents[%s].mcp", name),
+		})
+		if err != nil {
+			return daemon.AgentRuntime{}, err
+		}
+		definition.MCP, _ = expanded.(map[string]any)
 	}
 	return agentRuntimeFromDefinition(file, definition, runtime, options)
 }
@@ -481,7 +506,13 @@ func buildSubagents(
 				definition.Description = cmp.Or(user.Description, definition.Description)
 				definition.SystemPrompt = cmp.Or(user.SystemPrompt, definition.SystemPrompt)
 				definition.Model = cmp.Or(user.Model, definition.Model)
-				definition.MCP = user.MCP
+				expanded, err := envref.ExpandMCPEnv(user.MCP, envref.Options{
+					Field: fmt.Sprintf("agents[%s].mcp", name),
+				})
+				if err != nil {
+					return nil, err
+				}
+				definition.MCP, _ = expanded.(map[string]any)
 			}
 			definitions = append(definitions, definition)
 		}

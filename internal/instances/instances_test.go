@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"assistant/internal/envref"
 )
 
 // 载入即规范化：instances 迁移为 gitea 通道（host 去尾斜杠、账号缺省、repo
@@ -310,6 +312,8 @@ func TestProviderValidation(t *testing.T) {
 // 仓库自带的示例配置必须始终可加载（providers 等字段的回归护栏），并且示范
 // $schema（编辑器补全的来源）。
 func TestConfigExampleLoads(t *testing.T) {
+	// 示例配置的 token 用 ${GITEA_REVIEW_TOKEN} 引用；严格校验要求变量已定义
+	t.Setenv("GITEA_REVIEW_TOKEN", "example-token")
 	file, err := Load(filepath.Join("..", "..", "config.example.json"))
 	if err != nil {
 		t.Fatalf("config.example.json 无法加载：%v", err)
@@ -587,7 +591,8 @@ func TestAgentMCPField(t *testing.T) {
 	}
 }
 
-// gitea 通道：host 校验、repo 名校验、token 的 ${VAR} 展开与 enabled 开关。
+// gitea 通道：host 校验、repo 名校验、token 的引用保留（展开在消费点）与
+// enabled 开关。
 func TestGiteaChannel(t *testing.T) {
 	t.Setenv("ASSISTANT_TEST_TOKEN", "sec-ret")
 	path := filepath.Join(t.TempDir(), "config.json")
@@ -606,8 +611,14 @@ func TestGiteaChannel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got := file.Channels[0].Token; got != "sec-ret" {
-		t.Errorf("token 应展开环境变量引用：%q", got)
+	// 非破坏性：File 保留原始引用，Save 不会把明文洗回配置文件；展开在
+	// 消费点（cmd/assistant 的通道/调度装配）。
+	if got := file.Channels[0].Token; got != "${ASSISTANT_TEST_TOKEN}" {
+		t.Errorf("token 应保留原始引用（展开在消费点）：%q", got)
+	}
+	expanded, err := envref.Expand(file.Channels[0].Token, envref.Options{Field: "channels[gitea].token"})
+	if err != nil || expanded != "sec-ret" {
+		t.Errorf("消费点展开失败：%q %v", expanded, err)
 	}
 	if file.Channels[0].Key() != "gitea" || file.Channels[1].Key() != "gitea/mirror" {
 		t.Errorf("Key = %q %q", file.Channels[0].Key(), file.Channels[1].Key())

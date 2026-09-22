@@ -10,6 +10,7 @@ import (
 	"cmp"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 
 	builtinagents "assistant/internal/agents"
 	"assistant/internal/claudecfg"
+	"assistant/internal/envref"
 	"assistant/internal/provider"
 )
 
@@ -271,9 +273,6 @@ func (c Channel) Validate() error {
 			if _, _, err := ParseRepoName(repo.Name); err != nil {
 				return err
 			}
-		}
-		if _, err := ExpandSecret(c.Token); err != nil {
-			return fmt.Errorf("type=gitea: token: %w", err)
 		}
 	default:
 		return fmt.Errorf("type 必须是 weixin/qq/telegram/gitea：%q", c.Type)
@@ -704,28 +703,15 @@ func (f *File) Normalize() {
 }
 
 // canonicalize 完成 Normalize 做不了的规范化：遗留 instances 的校验与迁移、
-// runtime 路径解析（含环境变量展开）与 gitea 通道 token 的凭据引用展开。
-// 幂等；Normalize 之后、Validate 之前调用。（缺省 runtime 不落盘：
-// ResolveRuntime 在没有配置 runtime 时即时合成 main。）
+// runtime 路径解析（含环境变量展开）。幂等；Normalize 之后、Validate 之前调用。
+// 密钥的 $VAR/${VAR} 引用不在这里展开——File 保留原始引用，展开只发生在
+// EffectiveOverrides 等消费点，Save 才不会把明文写回配置。
+// （缺省 runtime 不落盘：ResolveRuntime 在没有配置 runtime 时即时合成 main。）
 func (f *File) canonicalize(baseDir string) error {
 	if err := f.validateMigratingInstances(); err != nil {
 		return err
 	}
 	f.migrateInstances()
-	for index := range f.Channels {
-		channel := &f.Channels[index]
-		if channel.Type != ChannelGitea || channel.Token == "" {
-			continue
-		}
-		expanded, err := ExpandSecret(channel.Token)
-		if err != nil {
-			return fmt.Errorf("channels[%s]: token: %w", channel.Key(), err)
-		}
-		if expanded != channel.Token {
-			f.note("channels[%s].token 引用了环境变量，已展开", channel.Key())
-			channel.Token = expanded
-		}
-	}
 	names := make([]string, 0, len(f.Runtimes))
 	for name := range f.Runtimes {
 		names = append(names, name)
@@ -910,6 +896,11 @@ func (f *File) Validate() error {
 		return fmt.Errorf("配置为空：runtimes/channels 至少配置一项")
 	}
 	seen := make(map[string]int, len(f.Instances))
+	// 密钥引用校验先于 provider 合并：未定义引用若漏到合并层会以空值参与
+	// 校验，报出来的错误（如「缺少 BASE_URL」）与真实原因南辕北辙。
+	if err := f.validateSecretRefs(); err != nil {
+		return err
+	}
 	if err := f.validateProviders(); err != nil {
 		return err
 	}
@@ -938,6 +929,90 @@ func (f *File) Validate() error {
 		seen[f.Instances[index].Host] = index
 	}
 	return nil
+}
+
+// validateSecretRefs 校验全部密钥字段的 $VAR/${VAR} 引用：语法合法且变量
+// 已定义（fail fast——密钥以字面量或空串发出去都难以排查）。要表达「可为
+// 空」用显式空缺省 ${VAR:-}。File 始终保留原始引用，展开在消费点。
+func (f *File) validateSecretRefs() error {
+	for _, name := range slices.Sorted(maps.Keys(f.Providers)) {
+		if err := validateProviderSecretRefs(fmt.Sprintf("providers[%s]", name), f.Providers[name]); err != nil {
+			return err
+		}
+	}
+	if err := validateProviderSecretRefs("optimizations", f.Optimizations); err != nil {
+		return err
+	}
+	for index := range f.Channels {
+		channel := f.Channels[index]
+		field, value := channel.SecretField()
+		if field == "" {
+			continue
+		}
+		if err := envref.Validate(value, envref.Options{Field: fmt.Sprintf("channels[%s].%s", channel.Key(), field)}); err != nil {
+			return err
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(f.Agents)) {
+		// 展开（丢弃结果）兼做遍历校验：MCP 结构小，代价可忽略
+		if _, err := envref.ExpandMCPEnv(f.Agents[name].MCP, envref.Options{
+			Field: fmt.Sprintf("agents[%s].mcp", name),
+		}); err != nil {
+			return err
+		}
+	}
+	if f.Weixin != nil {
+		if err := envref.Validate(f.Weixin.BotToken, envref.Options{Field: "weixin.bot_token"}); err != nil {
+			return err
+		}
+	}
+	if f.QQ != nil {
+		if err := envref.Validate(f.QQ.AppSecret, envref.Options{Field: "qq.app_secret"}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateProviderSecretRefs 校验单个 provider（含全局 optimizations）的
+// api_key/auth_token 与 env 值里的引用。
+func validateProviderSecretRefs(label string, provider Provider) error {
+	for _, secret := range []struct {
+		field string
+		value string
+	}{
+		{"api_key", provider.APIKey},
+		{"auth_token", provider.AuthToken},
+	} {
+		if err := envref.Validate(secret.value, envref.Options{
+			Field: fmt.Sprintf("%s.%s", label, secret.field),
+		}); err != nil {
+			return err
+		}
+	}
+	for _, key := range slices.Sorted(maps.Keys(provider.Env)) {
+		if err := envref.Validate(provider.Env[key], envref.Options{
+			Field: fmt.Sprintf("%s.env[%s]", label, key),
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SecretField 返回通道的密钥字段名与值（qq 的 app_secret、weixin/telegram 的
+// bot_token、gitea 的 token；无密钥的平台返回空）。消费点用它做 $VAR/${VAR}
+// 展开（File 里的原始定义不动）。
+func (c Channel) SecretField() (field, value string) {
+	switch c.Type {
+	case ChannelQQ:
+		return "app_secret", c.AppSecret
+	case ChannelWeixin, ChannelTelegram:
+		return "bot_token", c.BotToken
+	case ChannelGitea:
+		return "token", c.Token
+	}
+	return "", ""
 }
 
 // validateRuntimes 校验 runtime 集合与全部引用：main_agent/subagents 必须是
@@ -1308,7 +1383,8 @@ func (f *File) ProviderNameOf(name string) Provider {
 	return provider
 }
 
-// EffectiveOverrides 返回实体生效的运行时覆盖：
+// EffectiveOverrides 返回实体生效的运行时覆盖（密钥的 $VAR/${VAR} 引用已
+// 展开；File 里的原始配置不动）：
 //
 //	托管默认 < 内置预设（provider 包，开箱即用） < 全局 optimizations <
 //	用户 provider 覆盖 < api_key/auth_token 简写
@@ -1316,7 +1392,53 @@ func (f *File) ProviderNameOf(name string) Provider {
 // 未识别的 provider 名没有预设，行为与纯手写配置一致。
 func (f *File) EffectiveOverrides(providerName string) (claudecfg.Overrides, error) {
 	user := f.ProviderNameOf(providerName)
-	return provider.Resolve(providerName, f.Optimizations.Overrides(), user.Overrides(), user.Token())
+	global, err := f.EffectiveOptimizations()
+	if err != nil {
+		return claudecfg.Overrides{}, err
+	}
+	userOverrides, token, err := expandProviderSecrets(providerName, user)
+	if err != nil {
+		return claudecfg.Overrides{}, err
+	}
+	return provider.Resolve(providerName, global, userOverrides, token)
+}
+
+// EffectiveOptimizations 返回全局优化点的生效覆盖（密钥引用已展开）。
+func (f *File) EffectiveOptimizations() (claudecfg.Overrides, error) {
+	overrides, _, err := expandProviderSecrets("optimizations", f.Optimizations)
+	return overrides, err
+}
+
+// expandProviderSecrets 展开 provider（或全局 optimizations）密钥字段里的
+// 环境变量引用：api_key/auth_token 与 env 值。返回的 Provider 是浅拷贝，
+// 原始定义不被修改。
+func expandProviderSecrets(label string, provider Provider) (claudecfg.Overrides, string, error) {
+	for _, secret := range []struct {
+		field string
+		value string
+	}{
+		{"api_key", provider.APIKey},
+		{"auth_token", provider.AuthToken},
+	} {
+		expanded, err := envref.Expand(secret.value, envref.Options{
+			Field: fmt.Sprintf("%s.%s", label, secret.field),
+		})
+		if err != nil {
+			return claudecfg.Overrides{}, "", err
+		}
+		if secret.field == "api_key" {
+			provider.APIKey = expanded
+			continue
+		}
+		provider.AuthToken = expanded
+	}
+	env, err := envref.ExpandEnvMap(provider.Env, envref.Options{Field: label})
+	if err != nil {
+		return claudecfg.Overrides{}, "", err
+	}
+	provider.Env = env
+	// Token 简写按展开后的值取（api_key 优先），供 provider.Resolve 注入
+	return provider.Overrides(), provider.Token(), nil
 }
 
 // ValidateHost 校验站点地址必须是绝对 HTTP(S) URL（instance 与 run.yaml 的
