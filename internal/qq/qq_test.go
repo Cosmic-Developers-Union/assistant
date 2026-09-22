@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	jsonv2 "encoding/json/v2"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -279,6 +281,81 @@ func TestGatewayIdentifyAndDispatch(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("Run 未退出")
+	}
+}
+
+// token 错误分类：凭据/参数被拒（2xx + 平台业务码、4xx）是致命错误；限流、
+// 5xx 与未知响应形态维持可重试的普通错误。
+func TestTokenErrorClassification(t *testing.T) {
+	cases := []struct {
+		name      string
+		status    int
+		body      string
+		wantFatal bool
+	}{
+		{"平台业务码拒绝", http.StatusOK, `{"code":100007,"message":"appid invalid"}`, true},
+		{"HTTP 401 被拒", http.StatusUnauthorized, `{"message":"unauthorized"}`, true},
+		{"HTTP 429 限流", http.StatusTooManyRequests, `{"code":11253,"message":"too many requests"}`, false},
+		{"HTTP 500", http.StatusInternalServerError, `{}`, false},
+		{"未知响应形态", http.StatusOK, `{}`, false},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.Header().Set("Content-Type", "application/json")
+				writer.WriteHeader(testCase.status)
+				_, _ = writer.Write([]byte(testCase.body))
+			}))
+			t.Cleanup(server.Close)
+			client := NewClient(Config{
+				AppID:      "app-1",
+				AppSecret:  "sec-1",
+				APIBaseURL: server.URL,
+				TokenURL:   server.URL + "/token",
+				HTTPClient: server.Client(),
+			})
+			err := client.VerifyCredential(context.Background())
+			if err == nil {
+				t.Fatal("应报错")
+			}
+			if _, fatal := errors.AsType[*FatalError](err); fatal != testCase.wantFatal {
+				t.Errorf("致命判定 = %v（want %v）：err = %v", fatal, testCase.wantFatal, err)
+			}
+		})
+	}
+}
+
+// 凭据被平台拒绝时网关不退避：Run 立即透传致命错误返回，token 端点只请求一次。
+func TestGatewayStopsOnFatalCredentialError(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"code":100007,"message":"appid invalid"}`))
+	}))
+	t.Cleanup(server.Close)
+	client := NewClient(Config{
+		AppID:      "app-1",
+		AppSecret:  "sec-1",
+		APIBaseURL: server.URL,
+		TokenURL:   server.URL + "/token",
+		HTTPClient: server.Client(),
+	})
+	gateway := NewGateway(client, IntentGroupAndC2CEvent)
+	done := make(chan error, 1)
+	go func() {
+		done <- gateway.Run(context.Background(), func(string, json.RawMessage) {})
+	}()
+	select {
+	case err := <-done:
+		if _, fatal := errors.AsType[*FatalError](err); !fatal {
+			t.Errorf("Run 应透传致命错误，got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run 未停止（致命错误不应退避重试）")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("token 端点应只请求一次（不重试），got %d", got)
 	}
 }
 

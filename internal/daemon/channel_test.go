@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -143,6 +144,50 @@ func startChat(t *testing.T, config ChatConfig) (*Chat, *fakeChannel, *[][]strin
 		t.Fatal(err)
 	}
 	return chat, newFakeChannel("fake"), &calls
+}
+
+// fatalStubError 模拟通道层自报的致命错误（如 QQ 凭据被平台拒绝）。
+type fatalStubError struct{ message string }
+
+func (e fatalStubError) Error() string { return e.message }
+
+// Fatal 实现 RunChannel 的停止标记。
+func (e fatalStubError) Fatal() bool { return true }
+
+// dyingChannel 的 Receive 始终返回致命错误并计数（验证 RunChannel 不重试）。
+type dyingChannel struct {
+	name  string
+	err   error
+	calls atomic.Int32
+}
+
+func (d *dyingChannel) Name() string                            { return d.name }
+func (d *dyingChannel) SplitLimit() int                         { return 0 }
+func (d *dyingChannel) Allowed(string) (bool, string)           { return true, "" }
+func (d *dyingChannel) Receive(context.Context) (Inbound, error) {
+	d.calls.Add(1)
+	return nil, d.err
+}
+
+// RunChannel 收到致命错误应立即返回该错误：不退避、不吞掉、只调用一次 Receive。
+func TestRunChannelStopsOnFatalError(t *testing.T) {
+	chat, _, _ := startChat(t, ChatConfig{})
+	dying := &dyingChannel{name: "dying", err: fatalStubError{"凭据被拒绝"}}
+	done := make(chan error, 1)
+	go func() {
+		done <- RunChannel(context.Background(), dying, ChannelConfig{Chat: chat})
+	}()
+	select {
+	case err := <-done:
+		if err == nil || err.Error() != "凭据被拒绝" {
+			t.Errorf("RunChannel 应回传致命错误，got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("RunChannel 未退出（致命错误不应退避）")
+	}
+	if got := dying.calls.Load(); got != 1 {
+		t.Errorf("Receive 应只调用一次（不重试），got %d", got)
+	}
 }
 
 // 通用桥端到端：普通对话进 Chat（由主 agent 接待）、控制命令不进 Chat、

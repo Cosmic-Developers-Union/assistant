@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json" // 仅用 RawMessage（json/v2 不提供；RawMessage 与 v2 编解码的互操作已验证）
 	jsonv2 "encoding/json/v2"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -65,7 +66,8 @@ func NewGateway(client *Client, intents int) *Gateway {
 
 // Run 阻塞运行网关直到 ctx 取消：连接失败按指数退避重试（1s→60s）；服务端
 // 要求重连（op 7）或会话失效（op 9）时立即重连。Resume 需要的 session 与 seq
-// 在 Gateway 内维护，跨重连保留。
+// 在 Gateway 内维护，跨重连保留。凭据/配置类致命错误（*FatalError）不重试，
+// 直接返回让通道层停下——修正配置前重试只会刷屏。
 func (g *Gateway) Run(ctx context.Context, onEvent func(eventType string, payload json.RawMessage)) error {
 	backoff := time.Second
 	for !ctxDone(ctx) {
@@ -74,6 +76,10 @@ func (g *Gateway) Run(ctx context.Context, onEvent func(eventType string, payloa
 			return nil
 		}
 		if err != nil {
+			if _, fatal := errors.AsType[*FatalError](err); fatal {
+				g.log("网关遇到不可恢复错误，停止重试（修正配置后重启 assistant）：%v", err)
+				return err
+			}
 			g.log("网关断开：%v（%s 后重连）", err, backoff)
 			sleepCtx(ctx, backoff)
 			backoff = min(backoff*2, 60*time.Second)

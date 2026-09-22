@@ -38,6 +38,11 @@ type QQChannel struct {
 	// runCtx 在 Start 时记录：队列满时 onEvent 借它感知关闭，避免永久阻塞
 	runCtx context.Context
 
+	// dead 在网关因不可恢复错误（如凭据被平台拒绝）退出时关闭，Receive 借它
+	// 把 fatalErr 交给通用桥；正常退出（ctx 取消）不走这条路。
+	dead     chan struct{}
+	fatalErr error
+
 	// seqMu 保护 msg_seq 计数（同一 msg_id 的多块回复需要递增序号）
 	seqMu  sync.Mutex
 	msgSeq map[string]int
@@ -77,6 +82,7 @@ func newQQChannelWithClient(config instances.QQ, client *qq.Client, key string, 
 		splitLimit: limit,
 		log:        log,
 		events:     make(chan Inbound, qqEventQueueSize),
+		dead:       make(chan struct{}),
 		msgSeq:     map[string]int{},
 	}
 }
@@ -105,21 +111,28 @@ func (c *QQChannel) Allowed(user string) (bool, string) {
 	return false, "未配置 qq.admin_users（配置 [\"*\"] 可放开所有人）"
 }
 
-// Start 实现 starter：后台拉起网关（重连内建），事件经队列交付。
+// Start 实现 starter：后台拉起网关（重连内建），事件经队列交付；网关因不可
+// 恢复错误退出时记录原因并关闭 dead，让 Receive 把错误交给通用桥。
 func (c *QQChannel) Start(ctx context.Context) error {
 	c.runCtx = ctx
 	go func() {
-		c.gateway.Run(ctx, c.onEvent)
+		if err := c.gateway.Run(ctx, c.onEvent); err != nil {
+			c.fatalErr = err
+			close(c.dead)
+			return
+		}
 		c.log("QQ 网关已退出")
 	}()
 	return nil
 }
 
-// Receive 实现 Channel：从事件队列取下一条。
+// Receive 实现 Channel：从事件队列取下一条；网关致命退出时返回该错误。
 func (c *QQChannel) Receive(ctx context.Context) (Inbound, error) {
 	select {
 	case message := <-c.events:
 		return message, nil
+	case <-c.dead:
+		return nil, c.fatalErr
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
