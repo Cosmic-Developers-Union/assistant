@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	builtinagents "assistant/internal/agents"
 	"assistant/internal/claudecfg"
 	"assistant/internal/provider"
 )
@@ -34,11 +35,16 @@ type File struct {
 	Schema    string     `json:"$schema,omitempty"`
 	Instances []Instance `json:"instances"`
 	// Weixin 是微信（openclaw ilink）对话桥配置：可选；未配置时 daemon 不启动
-	// 对话能力。
+	// 对话能力。多微信账号请改用 Channels 列表（本块等价于一条匿名 weixin 实例）。
 	Weixin *Weixin `json:"weixin,omitempty"`
 	// QQ 是 QQ 开放平台机器人（官方 Bot API v2，WebSocket 网关）对话桥配置：
-	// 可选；未配置时 daemon 不启动 QQ 通道。
+	// 可选；未配置时 daemon 不启动 QQ 通道。多 QQ 机器人请改用 Channels 列表。
 	QQ *QQ `json:"qq,omitempty"`
+	// Channels 是多实例对话通道列表（推荐写法）：type 决定平台（weixin/qq/
+	// telegram），name 是可选实例标签——多开同一平台（多个微信号、多个 QQ 机器
+	// 人、多个 Telegram bot）时用它区分。会话键为 type（未命名，与旧版单实例
+	// 一致）或 type/name（命名）。列表里有条目即启用。
+	Channels []Channel `json:"channels,omitempty"`
 	// Agents 是命名 agent 池：每个 agent 一份独立的 provider/model/系统提示词/
 	// 执行参数，对话服务端按「会话 /agent 选择 > 通道默认 > default_agent」解析。
 	Agents map[string]Agent `json:"agents,omitempty"`
@@ -58,6 +64,130 @@ type File struct {
 	Optimizations Provider `json:"optimizations,omitempty"`
 }
 
+// DefaultTelegramAPIBaseURL 是 Telegram Bot API 的默认地址（被墙环境可换成
+// 自建反代/代理地址）。
+const DefaultTelegramAPIBaseURL = "https://api.telegram.org"
+
+// 通道实例的平台类型。
+const (
+	ChannelWeixin   = "weixin"
+	ChannelQQ       = "qq"
+	ChannelTelegram = "telegram"
+)
+
+// Channel 是对话通道列表里的一条实例：type 决定平台，name 是可选实例标签
+// （多开同一平台时区分用）。字段按 type 生效（union 平铺：weixin 认 base_url/
+// bot_token 等，qq 认 app_id/app_secret 等，telegram 认 bot_token/api_base_url）。
+type Channel struct {
+	// Type 是平台类型：weixin | qq | telegram
+	Type string `json:"type"`
+	// Name 是实例标签（日志/诊断用，也是会话键的一部分）；缺省 = type
+	Name string `json:"name,omitempty"`
+
+	// —— weixin（openclaw ilink）——
+	// BaseURL 是 ilink API 根地址（缺省官方地址）
+	BaseURL string `json:"base_url,omitempty"`
+	// BotToken 是凭据：weixin 为扫码登录的 Bot token；telegram 为 BotFather 发放的 token
+	BotToken string `json:"bot_token,omitempty"`
+	// LoginUserID / BotID 是 weixin 扫码登录返回的身份信息（诊断用）
+	LoginUserID string `json:"login_user_id,omitempty"`
+	BotID       string `json:"ilink_bot_id,omitempty"`
+	// BotAgent 是 weixin 观测标识（缺省 OpenClaw）
+	BotAgent string `json:"bot_agent,omitempty"`
+	// ChannelVersion 是 weixin 声明的渠道版本（缺省取 assistant 自身版本）
+	ChannelVersion string `json:"channel_version,omitempty"`
+	// RouteTag 是 weixin 可选的部署路由标签（SKRouteTag）
+	RouteTag string `json:"route_tag,omitempty"`
+
+	// —— qq（开放平台 Bot API v2）——
+	AppID     string `json:"app_id,omitempty"`
+	AppSecret string `json:"app_secret,omitempty"`
+
+	// —— qq / telegram 共用 ——
+	// APIBaseURL 是 Bot API 根地址（qq 缺省 https://api.sgroup.qq.com；
+	// telegram 缺省 https://api.telegram.org，可换自建反代）
+	APIBaseURL string `json:"api_base_url,omitempty"`
+	// Sandbox 预留：沙箱环境开关（当前版本仅透传日志标记）
+	Sandbox bool `json:"sandbox,omitzero"`
+
+	// —— 通用 ——
+	// AdminUsers 是允许对话的用户白名单（qq/telegram 为 openid/数字 id）；
+	// 空时 weixin 只允许 LoginUserID、qq/telegram 全拒；含 "*" 放开所有人
+	AdminUsers []string `json:"admin_users,omitempty"`
+	// Agent 是该通道实例的默认 agent 名（缺省回退 default_agent）
+	Agent string `json:"agent,omitempty"`
+	// SplitLimit 是回复切块的 rune 上限（缺省按平台：weixin 1800 / qq 1000 /
+	// telegram 4000）
+	SplitLimit int `json:"split_limit,omitzero"`
+}
+
+// Key 是通道实例的会话键：未命名 = type（与旧版单实例一致，老用户迁移无感）；
+// 命名 = type/name（同一平台的多个实例各有一套会话）。
+func (c Channel) Key() string {
+	if name := strings.TrimSpace(c.Name); name != "" && name != c.Type {
+		return c.Type + "/" + name
+	}
+	return c.Type
+}
+
+// Normalize 填充通道实例默认值并清理空白（必须在 Validate 之前），幂等。
+func (c *Channel) Normalize() {
+	c.Type = strings.TrimSpace(c.Type)
+	c.Name = strings.TrimSpace(c.Name)
+	c.Agent = strings.TrimSpace(c.Agent)
+	for index, user := range c.AdminUsers {
+		c.AdminUsers[index] = strings.TrimSpace(user)
+	}
+	switch c.Type {
+	case ChannelWeixin:
+		c.BaseURL = strings.TrimRight(strings.TrimSpace(c.BaseURL), "/")
+		if c.BaseURL == "" {
+			c.BaseURL = DefaultWeixinBaseURL
+		}
+		c.BotAgent = strings.TrimSpace(c.BotAgent)
+		if c.BotAgent == "" {
+			c.BotAgent = "OpenClaw"
+		}
+	case ChannelQQ:
+		c.APIBaseURL = strings.TrimRight(strings.TrimSpace(c.APIBaseURL), "/")
+		if c.APIBaseURL == "" {
+			c.APIBaseURL = DefaultQQAPIBaseURL
+		}
+	case ChannelTelegram:
+		c.APIBaseURL = strings.TrimRight(strings.TrimSpace(c.APIBaseURL), "/")
+		if c.APIBaseURL == "" {
+			c.APIBaseURL = DefaultTelegramAPIBaseURL
+		}
+	}
+}
+
+// Validate 校验通道实例（必须在 Normalize 之后调用）。
+func (c Channel) Validate() error {
+	switch c.Type {
+	case ChannelWeixin:
+		if strings.TrimSpace(c.BotToken) == "" {
+			return fmt.Errorf("type=weixin 需要 bot_token（assistant weixin login 获取；多账号用 --name 写入 channels）")
+		}
+	case ChannelQQ:
+		if c.AppID == "" || c.AppSecret == "" {
+			return fmt.Errorf("type=qq 需要 app_id 与 app_secret（q.qq.com 开放平台）")
+		}
+	case ChannelTelegram:
+		if strings.TrimSpace(c.BotToken) == "" {
+			return fmt.Errorf("type=telegram 需要 bot_token（@BotFather 发放）")
+		}
+	default:
+		return fmt.Errorf("type 必须是 weixin/qq/telegram：%q", c.Type)
+	}
+	if c.Name != strings.TrimSpace(c.Name) || strings.ContainsAny(c.Name, "/ \t") {
+		return fmt.Errorf("name 不能含空白或 /：%q", c.Name)
+	}
+	if c.SplitLimit < 0 {
+		return fmt.Errorf("split_limit 不能为负：%d", c.SplitLimit)
+	}
+	return nil
+}
+
 // Agent 是命名 agent 池中的一员：对话服务端（multi-agent）的一个可选人格。
 // 只配 provider/model 时等价于给不同用户群不同的模型；配 system_prompt 时
 // 整体替换对话会话的基础系统提示词。
@@ -68,6 +198,10 @@ type Agent struct {
 	Model string `json:"model,omitempty"`
 	// SystemPrompt 非空时整体替换对话会话的基础系统提示词
 	SystemPrompt string `json:"system_prompt,omitempty"`
+	// MCP 是该 agent 专属的 MCP server 定义（.mcp.json 形态）：合并进会话
+	// MCP 配置，同名 server 覆盖自举（daemon/sessions）与供应商的；适合给
+	// 不同 agent 挂不同工具面
+	MCP map[string]any `json:"mcp,omitempty"`
 	// ClaudeBin 是该 agent 使用的 claude 可执行文件（缺省 PATH 上的 claude）
 	ClaudeBin string `json:"claude_bin,omitempty"`
 	// SessionTimeoutMS 是该 agent 的单轮对话超时（缺省 180000 = 3 分钟）
@@ -446,6 +580,9 @@ func (f *File) Normalize() {
 	for index := range f.Instances {
 		f.Instances[index].Normalize()
 	}
+	for index := range f.Channels {
+		f.Channels[index].Normalize()
+	}
 	f.Weixin.Normalize()
 	f.QQ.Normalize()
 }
@@ -551,7 +688,7 @@ func (i *Instance) Normalize() {
 
 // Validate 校验 host、账号与仓库。必须在 Normalize 之后调用。
 func (f *File) Validate() error {
-	if len(f.Instances) == 0 && f.Weixin == nil && f.QQ == nil {
+	if len(f.Instances) == 0 && f.Weixin == nil && f.QQ == nil && len(f.Channels) == 0 {
 		return fmt.Errorf("instances 不能为空")
 	}
 	seen := make(map[string]int, len(f.Instances))
@@ -567,6 +704,9 @@ func (f *File) Validate() error {
 	if err := f.QQ.Validate(); err != nil {
 		return fmt.Errorf("qq: %w", err)
 	}
+	if err := f.validateChannels(); err != nil {
+		return err
+	}
 	for index := range f.Instances {
 		if err := f.Instances[index].Validate(); err != nil {
 			return fmt.Errorf("instances[%d]: %w", index, err)
@@ -580,7 +720,8 @@ func (f *File) Validate() error {
 }
 
 // validateAgents 校验 agent 池与所有 agent 引用（default_agent、weixin.agent、
-// qq.agent）：引用不存在的名字视为配置错误，避免对话轮才静默回退。
+// qq.agent、channels[].agent）：引用名必须是用户 agents 或内置预设（internal/
+// agents，随二进制分发）；引用不存在的名字视为配置错误，避免对话轮才静默回退。
 func (f *File) validateAgents() error {
 	for name, agent := range f.Agents {
 		if name == "" {
@@ -604,11 +745,14 @@ func (f *File) validateAgents() error {
 		if name == "" {
 			return nil
 		}
-		if _, ok := f.Agents[name]; !ok {
-			return fmt.Errorf("%s 引用的 agent %q 未在 agents 中定义（可用：%s）",
-				label, name, strings.Join(f.agentNames(), "、"))
+		if _, ok := f.Agents[name]; ok {
+			return nil
 		}
-		return nil
+		if builtinagents.Has(name) {
+			return nil
+		}
+		return fmt.Errorf("%s 引用的 agent %q 未定义（用户 agents：%s；内置：%s）",
+			label, name, strings.Join(f.agentNames(), "、"), strings.Join(builtinagents.Names(), "、"))
 	}
 	if err := reference("default_agent", f.DefaultAgent); err != nil {
 		return err
@@ -621,6 +765,41 @@ func (f *File) validateAgents() error {
 	if f.QQ != nil {
 		if err := reference("qq.agent", f.QQ.Agent); err != nil {
 			return err
+		}
+	}
+	for index := range f.Channels {
+		if err := reference(fmt.Sprintf("channels[%d].agent", index), f.Channels[index].Agent); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateChannels 校验通道实例列表：type 合法、实例键唯一、与旧版单实例块的
+// 匿名键不冲突（同一个会话键起两份通道会让消息路由不确定）。
+func (f *File) validateChannels() error {
+	seen := map[string]int{}
+	for index := range f.Channels {
+		channel := &f.Channels[index]
+		if err := channel.Validate(); err != nil {
+			return fmt.Errorf("channels[%d]: %w", index, err)
+		}
+		if previous, ok := seen[channel.Key()]; ok {
+			return fmt.Errorf("channels[%d] 与 channels[%d] 的实例键重复：%s（多开同平台请用 name 区分）",
+				index, previous, channel.Key())
+		}
+		seen[channel.Key()] = index
+		if channel.Name == "" {
+			switch channel.Type {
+			case ChannelWeixin:
+				if f.Weixin != nil {
+					return fmt.Errorf("channels[%d]: 匿名 weixin 实例与旧版 weixin 节冲突——给实例起 name 或删掉 weixin 节", index)
+				}
+			case ChannelQQ:
+				if f.QQ != nil {
+					return fmt.Errorf("channels[%d]: 匿名 qq 实例与旧版 qq 节冲突——给实例起 name 或删掉 qq 节", index)
+				}
+			}
 		}
 	}
 	return nil

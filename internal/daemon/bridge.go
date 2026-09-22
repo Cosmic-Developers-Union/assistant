@@ -18,7 +18,10 @@ const DefaultWeixinSplitLimit = 1800
 
 // WeixinChannelConfig 是微信通道的适配配置（通道私有部分；通用部分见 ChannelConfig）。
 type WeixinChannelConfig struct {
-	Weixin weixin.Config
+	// Name 是通道实例键（会话映射层的 transport 键）：空 = "weixin"；多开
+	// 同平台账号时为 "weixin/<name>"
+	Name        string
+	Weixin      weixin.Config
 	// AdminUsers 是允许对话的用户白名单；空时只允许 LoginUserID；含 "*" 放开所有人
 	AdminUsers []string
 	// LoginUserID 是扫码登录的微信用户
@@ -30,6 +33,7 @@ type WeixinChannelConfig struct {
 // WeixinChannel 是微信（openclaw ilink）通道：长轮询收消息、SendText 回复、
 // typing 票据缓存与上下线通知。
 type WeixinChannel struct {
+	name        string
 	client      *weixin.Client
 	adminUsers  []string
 	loginUserID string
@@ -51,7 +55,12 @@ func NewWeixinChannel(config WeixinChannelConfig, log func(string, ...any)) *Wei
 	if limit <= 0 {
 		limit = DefaultWeixinSplitLimit
 	}
+	name := strings.TrimSpace(config.Name)
+	if name == "" {
+		name = "weixin"
+	}
 	return &WeixinChannel{
+		name:        name,
 		client:      weixin.NewClient(config.Weixin),
 		adminUsers:  config.AdminUsers,
 		loginUserID: config.LoginUserID,
@@ -62,7 +71,7 @@ func NewWeixinChannel(config WeixinChannelConfig, log func(string, ...any)) *Wei
 }
 
 // Name 实现 Channel：会话映射层的 transport 键。
-func (c *WeixinChannel) Name() string { return "weixin" }
+func (c *WeixinChannel) Name() string { return c.name }
 
 // SplitLimit 实现 Channel。
 func (c *WeixinChannel) SplitLimit() int { return c.splitLimit }

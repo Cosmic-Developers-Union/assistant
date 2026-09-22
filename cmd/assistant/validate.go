@@ -247,6 +247,38 @@ func validateConfigFile(path string, file *instances.File) []validateFinding {
 		}
 	}
 
+	// channels 通道实例列表（有条目即启用）
+	for _, entry := range file.Channels {
+		label := "channels." + entry.Key()
+		detail := "type=" + entry.Type
+		if entry.Agent != "" {
+			detail += "；agent=" + entry.Agent
+		}
+		var problems []string
+		switch entry.Type {
+		case instances.ChannelWeixin:
+			if strings.TrimSpace(entry.BotToken) == "" {
+				problems = append(problems, "缺少 bot_token——assistant weixin login --name "+entry.Name)
+			}
+		case instances.ChannelQQ:
+			if entry.AppID == "" || strings.TrimSpace(entry.AppSecret) == "" {
+				problems = append(problems, "缺少 app_id/app_secret——q.qq.com 开放平台")
+			}
+		case instances.ChannelTelegram:
+			if strings.TrimSpace(entry.BotToken) == "" {
+				problems = append(problems, "缺少 bot_token——@BotFather 发放")
+			}
+		default:
+			problems = append(problems, "未知 type（应为 weixin/qq/telegram）")
+		}
+		if len(problems) > 0 {
+			findings = append(findings, validateFinding{"ERROR", label,
+				detail + "；" + strings.Join(problems, "；")})
+			continue
+		}
+		findings = append(findings, validateFinding{"OK", label, detail + "；凭据已写入"})
+	}
+
 	findings = append(findings, validateProviderDirectory(path)...)
 	return append(findings, validateCredentials(path, file)...)
 }

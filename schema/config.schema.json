@@ -39,11 +39,16 @@
     },
     "weixin": {
       "$ref": "#/$defs/weixin",
-      "description": "微信对话桥（openclaw ilink 协议）。通常由 `assistant weixin login` 写入，不需要手写。"
+      "description": "微信对话桥（openclaw ilink 协议）。通常由 `assistant weixin login` 写入，不需要手写。多微信账号请改用 channels 列表。"
     },
     "qq": {
       "$ref": "#/$defs/qq",
-      "description": "QQ 对话桥（QQ 开放平台官方 Bot API v2：WebSocket 网关收事件 + REST 发消息）。在 q.qq.com 创建机器人后把 AppID/AppSecret 写在这里。"
+      "description": "QQ 对话桥（QQ 开放平台官方 Bot API v2：WebSocket 网关收事件 + REST 发消息）。在 q.qq.com 创建机器人后把 AppID/AppSecret 写在这里。多 QQ 机器人请改用 channels 列表。"
+    },
+    "channels": {
+      "type": "array",
+      "description": "多实例对话通道列表（推荐写法）：type 决定平台（weixin/qq/telegram），name 是可选实例标签——多开同一平台（多个微信号、多个 QQ 机器人、多个 Telegram bot）时用它区分。会话键为 type（未命名，与旧版单实例一致）或 type/name（命名）。列表里有条目即启用。",
+      "items": { "$ref": "#/$defs/channel" }
     }
   },
   "$defs": {
@@ -168,15 +173,51 @@
     },
     "agent": {
       "type": "object",
-      "description": "命名 agent 池中的一员：provider/model/系统提示词/执行参数独立。只配 provider/model 即可让不同用户群用不同模型；system_prompt 会整体替换对话会话的基础提示词。",
+      "description": "命名 agent 池中的一员：provider/model/系统提示词/MCP/执行参数独立。只配 provider/model 即可让不同用户群用不同模型；system_prompt 会整体替换对话会话的基础提示词；mcp 给该 agent 挂专属工具面。同名覆盖内置预设（ops/coder/writer）。",
       "additionalProperties": false,
       "properties": {
         "provider": { "type": "string", "description": "该 agent 使用的供应商名（缺省回退 default_provider）。" },
         "model": { "type": "string", "description": "该 agent 的模型覆盖（claude --model）。" },
         "system_prompt": { "type": "string", "description": "该 agent 的系统提示词（整体替换基础提示词；留空用内置）。" },
+        "mcp": {
+          "type": "object",
+          "description": "该 agent 专属的 MCP server 定义（.mcp.json 形态）：合并进会话 MCP 配置，同名 server 覆盖自举（daemon/sessions）与供应商的。"
+        },
         "claude_bin": { "type": "string", "description": "该 agent 的 claude 可执行文件（缺省 PATH 上的 claude）。" },
         "session_timeout_ms": { "type": "integer", "minimum": 0, "description": "该 agent 的单轮对话超时（毫秒，缺省 180000）。" }
       }
+    },
+    "channel": {
+      "type": "object",
+      "description": "对话通道实例：type 决定平台，字段按 type 生效（union 平铺）。weixin 认 base_url/bot_token/login_user_id/ilink_bot_id/bot_agent/channel_version/route_tag；qq 认 app_id/app_secret/sandbox；telegram 认 bot_token/api_base_url；api_base_url 与 admin_users/agent/split_limit 多平台共用。",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["weixin", "qq", "telegram"],
+          "description": "平台类型：weixin（openclaw ilink）/ qq（开放平台 Bot API v2）/ telegram（Bot API 长轮询）。"
+        },
+        "name": { "type": "string", "pattern": "^[^/\\s]+$", "description": "实例标签（多开同平台时区分）。会话键：未命名 = type，命名 = type/name。" },
+        "base_url": { "type": "string", "description": "（weixin）ilink API 根地址（缺省官方地址）。" },
+        "bot_token": { "type": "string", "description": "凭据：（weixin）扫码登录的 Bot token；（telegram）@BotFather 发放的 token。" },
+        "login_user_id": { "type": "string", "description": "（weixin）扫码登录的用户 ID（诊断用；空白名单时只允许此人）。" },
+        "ilink_bot_id": { "type": "string", "description": "（weixin）Bot ID（诊断用）。" },
+        "bot_agent": { "type": "string", "description": "（weixin）观测标识（缺省 OpenClaw）。" },
+        "channel_version": { "type": "string", "description": "（weixin）声明的渠道版本（缺省取 assistant 自身版本）。" },
+        "route_tag": { "type": "string", "description": "（weixin）可选的路由标签（SKRouteTag）。" },
+        "app_id": { "type": "string", "description": "（qq）开放平台机器人的 AppID。" },
+        "app_secret": { "type": "string", "description": "（qq）开放平台机器人的 AppSecret（config.json 为 0600）。" },
+        "api_base_url": { "type": "string", "description": "Bot API 根地址：（qq）缺省 https://api.sgroup.qq.com；（telegram）缺省 https://api.telegram.org（被墙环境可换自建反代）。" },
+        "sandbox": { "type": "boolean", "description": "沙箱环境标记（当前版本仅用于日志区分）。" },
+        "admin_users": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "允许对话的用户白名单（qq/telegram 为 openid/数字 id）；空时 weixin 只允许 LoginUserID、qq/telegram 全拒；含 \"*\" 放开所有人。"
+        },
+        "agent": { "type": "string", "description": "该通道实例的默认 agent 名（缺省回退 default_agent；内置 ops/coder/writer 可直接引用）。" },
+        "split_limit": { "type": "integer", "minimum": 0, "description": "回复切块的字符上限（缺省按平台：weixin 1800 / qq 1000 / telegram 4000）。" }
+      },
+      "required": ["type"]
     }
   }
 }

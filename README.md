@@ -68,21 +68,57 @@ Gitea 上的例行事务与评审自动化，两块能力：
 
 ## 对话服务端（multi-user / multi-session / multi-agent）
 
-`assistant run` 就是聊天服务端：并行承载多个消息通道，每个（通道, 用户）映射到独立会话，会话之间并发、同会话串行，互不串扰。
+`assistant run` 就是聊天服务端：并行承载多个消息通道实例，每个（通道实例, 用户）映射到独立会话，会话之间并发、同会话串行，互不串扰。
 
-- **通道可插拔**：内置 `weixin`（openclaw ilink 长轮询）与 `qq`（QQ 开放平台官方 Bot API v2：WebSocket 网关收事件 + REST 被动回复，出站连接无需公网 IP）。`weixin.enabled` / `qq.enabled` 或 `run --weixin` / `--qq` 开启。
-- **命名 agent 池（multi-agent）**：`agents` 节定义多个 agent（各自 `provider`/`model`/`system_prompt`/`claude_bin`/`session_timeout_ms`），`default_agent` 兜底；每个通道可用 `weixin.agent` / `qq.agent` 指定默认。用户在聊天里：
-  - `/agent` 列出可用 agent 与当前生效；`/agent <名>` 切换（按会话记忆，下一条消息生效，可随时切回）；
-  - `/new`（或 `/reset`、`重新开始`）重开 claude 会话（工作目录保留）；`/help` 看命令。
-- **准入（multi-user）**：每通道 `admin_users` 白名单；含 `"*"` 放开所有人（公网平台慎用）；weixin 空白名单时只允许扫码登录者，qq 空白名单时全拒。群聊事件平台只在 @ 机器人时派发。
+### 通道怎么配（单实例、多实例、Telegram）
 
-QQ 通道接入步骤：
+- **旧版单实例块**（继续可用）：`weixin` 节（`assistant weixin login` 写入）+ `qq` 节，`enabled=true` 或 `run --weixin` / `--qq` 开启。
+- **`channels` 列表（推荐，支持多实例）**：`type` 决定平台（`weixin` / `qq` / `telegram`），列表里有条目即启用；`name` 是可选实例标签。会话键 = `type`（未命名，与旧版一致，老会话无感迁移）或 `type/name`（命名，多开互不串会话）：
 
-1. 在 [q.qq.com](https://q.qq.com) QQ 开放平台创建机器人（群/私聊场景），拿到 AppID/AppSecret，按平台要求配置 IP 白名单；
-2. 写入 `config.json`：`"qq": {"enabled": true, "app_id": "...", "app_secret": "...", "admin_users": ["<用户openid>"]}`（openid 在机器人收到第一条消息的日志里可见）；
-3. `assistant qq status` 自检凭据，`assistant run` 启动后 QQ 里 @ 机器人即可对话（回复是被动消息：机器人只能回复收到的消息，15 分钟窗口内）。
+```json
+"channels": [
+  { "type": "weixin", "name": "work",  "bot_token": "…", "agent": "ops",   "admin_users": ["wx-user-id"] },
+  { "type": "weixin", "name": "life",  "bot_token": "…", "agent": "writer", "admin_users": ["*"] },
+  { "type": "qq",     "name": "support", "app_id": "…", "app_secret": "…", "admin_users": ["openid"] },
+  { "type": "telegram", "bot_token": "…", "agent": "ops", "admin_users": ["123456789"] }
+]
+```
 
-> 限制：QQ 平台不允许主动发消息，对话必须由用户先开口；机器人回复为纯文本（富媒体留待后续）。
+- 多微信账号：`assistant weixin login --name work`（`--name` 缺省时仍写旧版 `weixin` 节），重复执行换不同实例名即可多开。
+- 多 QQ 机器人：在 q.qq.com 为每个机器人创建条目，各配各的 `agent` / `admin_users`。
+- **Telegram bot**：@BotFather `/newbot` 拿 token 写入 `channels`（`assistant telegram status` 自检）；长轮询出站连接，无需公网 IP 与 webhook；群聊收全量消息需在 BotFather 关闭隐私模式（`/setprivacy` → Disable）；白名单用数字用户 id（首条消息的「忽略用户」日志里可见）；被墙环境把 `api_base_url` 指向自建反代。
+- 同一平台匿名条目（无 `name`）与旧版单实例块互斥（validate 会拦），多开必须命名。
+
+### 自定义 agent 怎么配
+
+`agents` 节定义命名 agent，每个 agent 一份独立运行时：
+
+```json
+"agents": {
+  "ops":   { "provider": "opencode", "model": "claude-sonnet-5", "session_timeout_ms": 180000 },
+  "qa":    { "provider": "zhipu", "system_prompt": "你是测试助手，只回答与测试相关的问题。",
+             "mcp": { "fetch": { "command": "uvx", "args": ["mcp-server-fetch"] } } },
+  "boss":  { "claude_bin": "/usr/local/bin/claude-privileged" }
+}
+```
+
+字段：`provider`（缺省回退 `default_provider`）、`model`（`--model` 覆盖）、`system_prompt`（整体替换基础提示词）、`mcp`（该 agent 专属 MCP server，同名覆盖自举与供应商的）、`claude_bin`、`session_timeout_ms`。引用：`default_agent` 全局兜底，`weixin.agent` / `qq.agent` / `channels[].agent` 每通道默认；用户在聊天里 `/agent`（列出）、`/agent <名>`（切换，按会话记忆）、`/new`（重开会话）、`/help`。
+
+### 内置 agent（随二进制内嵌）
+
+assistant 内嵌了三个开箱即用的 agent 预设（system prompt 打包在二进制里，不需要配置文件）：
+
+| 名字 | 用途 |
+| --- | --- |
+| `ops` | 运维对话助手：daemon/sessions MCP 只读查询评审调度状态 |
+| `coder` | 编程与工程助手：讨论代码、排查问题、最小可行方案 |
+| `writer` | 中文写作助手：润色、改写、起草消息与短文 |
+
+直接引用即可：`"default_agent": "ops"`、`"agent": "writer"`、聊天里 `/agent coder`。用户 `agents` 里写同名条目即整体覆盖该内置预设（改提示词、换模型都行）；内置预设的 `mcp` 字段同样支持挂专属工具面（预设自身保持零依赖，不要求装任何外部 MCP）。
+
+### 准入（multi-user）
+
+每通道实例 `admin_users` 白名单；含 `"*"` 放开所有人（公网平台慎用）；weixin 空白名单时只允许扫码登录者，qq/telegram 空白名单时全拒。群聊事件：QQ 平台只在被 @ 时派发；Telegram 取决于隐私模式设置。
 
 ## 运行与观测
 

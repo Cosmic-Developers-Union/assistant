@@ -154,7 +154,7 @@ func newQQChannelForTest(t *testing.T, config instances.QQ) (*fakeQQ, *QQChannel
 		HTTPClient: fake.server.Client(),
 		Log:        t.Logf,
 	})
-	channel := newQQChannelWithClient(config, client, false, t.Logf)
+	channel := newQQChannelWithClient(config, client, "", false, t.Logf)
 	chat, err := NewChat(ChatConfig{
 		StateDir:   t.TempDir(),
 		SessionDir: t.TempDir(),

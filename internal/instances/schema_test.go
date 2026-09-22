@@ -85,6 +85,7 @@ func TestSchemaMatchesConfigStructs(t *testing.T) {
 		{"$defs.weixin", defs["weixin"].propertyNames(), jsonTagNames(Weixin{})},
 		{"$defs.qq", defs["qq"].propertyNames(), jsonTagNames(QQ{})},
 		{"$defs.agent", defs["agent"].propertyNames(), jsonTagNames(Agent{})},
+		{"$defs.channel", defs["channel"].propertyNames(), jsonTagNames(Channel{})},
 	}
 	for _, testCase := range cases {
 		from := strings.Join(testCase.from, ",")
@@ -96,7 +97,7 @@ func TestSchemaMatchesConfigStructs(t *testing.T) {
 
 	// additionalProperties 必须与加载器的严格程度一致：provider 之外的未知键都会
 	// 被 DisallowUnknownFields 拒绝；provider 内部的未识别键则原样保留。
-	for _, name := range []string{"instance", "repoObject", "account", "weixin", "qq", "agent"} {
+	for _, name := range []string{"instance", "repoObject", "account", "weixin", "qq", "agent", "channel"} {
 		if additional := defs[name].AdditionalProperties; additional == nil || *additional {
 			t.Errorf("$defs.%s 必须 additionalProperties: false", name)
 		}

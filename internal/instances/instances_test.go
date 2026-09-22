@@ -494,3 +494,88 @@ func TestLoadAgentsAndQQ(t *testing.T) {
 		})
 	}
 }
+
+// channels 多实例通道：type/name、平台缺省值、会话键、唯一性与旧块冲突校验、
+// 内置 agent 引用。
+func TestLoadChannels(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	content := `{
+		"channels": [
+			{"type": "weixin", "name": "work", "bot_token": "wx-tok", "agent": "ops"},
+			{"type": "weixin", "name": "life", "bot_token": "wx-tok-2", "admin_users": ["*"]},
+			{"type": "qq", "app_id": "111", "app_secret": "sec", "agent": "coder"},
+			{"type": "telegram", "bot_token": "123:ABC", "api_base_url": "https://tg.example.com"}
+		]
+	}`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	file, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	channels := file.Channels
+	if channels[0].Key() != "weixin/work" || channels[1].Key() != "weixin/life" {
+		t.Errorf("命名实例的会话键应为 type/name：%q %q", channels[0].Key(), channels[1].Key())
+	}
+	if channels[2].Key() != "qq" || channels[3].Key() != "telegram" {
+		t.Errorf("未命名实例的会话键应为 type：%q %q", channels[2].Key(), channels[3].Key())
+	}
+	if channels[0].BaseURL != DefaultWeixinBaseURL {
+		t.Errorf("weixin 实例缺省 base_url 未填：%q", channels[0].BaseURL)
+	}
+	if channels[2].APIBaseURL != DefaultQQAPIBaseURL {
+		t.Errorf("qq 实例缺省 api_base_url 未填：%q", channels[2].APIBaseURL)
+	}
+	if channels[3].APIBaseURL != "https://tg.example.com" {
+		t.Errorf("telegram 自定义 api_base_url 丢失：%q", channels[3].APIBaseURL)
+	}
+	// 内置 agent（ops/coder）可直接引用；未知名仍报错
+	if err := file.Validate(); err != nil {
+		t.Errorf("引用内置 agent 应通过校验：%v", err)
+	}
+
+	rejects := map[string]string{
+		"bad type":        `{"channels": [{"type": "slack", "bot_token": "x"}]}`,
+		"weixin no token": `{"channels": [{"type": "weixin"}]}`,
+		"qq no secret":    `{"channels": [{"type": "qq", "app_id": "1"}]}`,
+		"tg no token":     `{"channels": [{"type": "telegram"}]}`,
+		"dup key":         `{"channels": [{"type": "weixin", "bot_token": "a"}, {"type": "weixin", "bot_token": "b"}]}`,
+		"name with slash": `{"channels": [{"type": "weixin", "name": "a/b", "bot_token": "t"}]}`,
+		"unnamed vs weixin block": `{"weixin": {"enabled": true, "bot_token": "t"}, "channels": [{"type": "weixin", "bot_token": "t2"}]}`,
+		"unnamed vs qq block":     `{"qq": {"enabled": true, "app_id": "1", "app_secret": "s"}, "channels": [{"type": "qq", "app_id": "1", "app_secret": "s"}]}`,
+		"unknown agent ref":       `{"channels": [{"type": "weixin", "bot_token": "t", "agent": "nope"}]}`,
+	}
+	for name, bad := range rejects {
+		t.Run(name, func(t *testing.T) {
+			badPath := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(badPath, []byte(bad), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(badPath); err == nil {
+				t.Errorf("Load 应拒绝：%s", bad)
+			}
+		})
+	}
+}
+
+// 用户 agent 的 mcp 字段：原样读回（透传给运行时合并）。
+func TestAgentMCPField(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	content := `{"agents": {"ops": {"mcp": {"search": {"command": "search-mcp", "args": ["-v"]}}}}, "qq": {"enabled": true, "app_id": "1", "app_secret": "s"}}`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	file, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	mcp := file.Agents["ops"].MCP
+	if mcp == nil {
+		t.Fatal("agent.mcp 未读回")
+	}
+	search, ok := mcp["search"].(map[string]any)
+	if !ok || search["command"] != "search-mcp" {
+		t.Errorf("agent.mcp = %+v", mcp)
+	}
+}

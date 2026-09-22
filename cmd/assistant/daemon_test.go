@@ -92,7 +92,7 @@ func TestStartDaemonServicesStartsChannels(t *testing.T) {
 
 	logs := output.String()
 	for _, want := range []string{
-		"agent 池 = ops（默认 ops",
+		"agent 池 = coder、ops*、writer（默认 ops", // 内置 coder/writer + 用户 ops*
 		"通道 qq 已启动",
 		"通道 weixin 未启用",
 	} {
@@ -118,4 +118,46 @@ func (b *safeBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.raw.String()
+}
+
+// channels 多实例接线：命名 weixin + 命名 qq + telegram 一次起齐，内置 agent
+// 引用直接生效。端点指向不可达地址，只验证启动面与日志。
+func TestStartDaemonServicesStartsChannelList(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	dead := "http://127.0.0.1:1"
+	file := &instances.File{
+		Channels: []instances.Channel{
+			{Type: instances.ChannelWeixin, Name: "work", BaseURL: dead, BotToken: "wx", Agent: "ops"},
+			{Type: instances.ChannelQQ, Name: "support", APIBaseURL: dead, AppID: "1", AppSecret: "s"},
+			{Type: instances.ChannelTelegram, APIBaseURL: dead, BotToken: "123:abc"},
+		},
+	}
+	if err := instances.Save(configPath, file); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	command := &cobra.Command{}
+	output := &safeBuffer{}
+	command.SetContext(ctx)
+	command.SetOut(output)
+	command.SetErr(&safeBuffer{})
+	if err := startDaemonServices(command, configPath, &dispatcherOptions{APIListen: "none"}, daemon.NewStore("test-version"), nil); err != nil {
+		t.Fatalf("startDaemonServices: %v", err)
+	}
+	cancel()
+
+	logs := output.String()
+	for _, want := range []string{
+		"通道 weixin/work 已启动",
+		"通道 qq/support 已启动",
+		"通道 telegram 已启动",
+		"agent 池 = coder、ops、writer（默认 内置缺省", // 纯内置：无用户 agent
+	} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("日志缺少 %q：\n%s", want, logs)
+		}
+	}
 }

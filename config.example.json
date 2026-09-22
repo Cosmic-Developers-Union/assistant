@@ -30,7 +30,13 @@
     },
     "qa": {
       "provider": "zhipu",
-      "system_prompt": "你是测试助手，只回答与测试相关的问题。"
+      "system_prompt": "你是测试助手，只回答与测试相关的问题。",
+      "mcp": {
+        "fetch": {
+          "command": "uvx",
+          "args": ["mcp-server-fetch"]
+        }
+      }
     }
   },
   "default_agent": "ops",
@@ -74,5 +80,24 @@
     "admin_users": [
       "qq-openid-1"
     ]
-  }
+  },
+  "channels": [
+    {
+      "type": "weixin",
+      "name": "work",
+      "bot_token": "created-by-assistant-weixin-login--name-work",
+      "agent": "ops",
+      "admin_users": [
+        "wx-user-id"
+      ]
+    },
+    {
+      "type": "telegram",
+      "bot_token": "123456:ABC-your-botfather-token",
+      "agent": "writer",
+      "admin_users": [
+        "123456789"
+      ]
+    }
+  ]
 }

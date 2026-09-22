@@ -26,6 +26,7 @@ const qqMsgSeqCacheLimit = 256
 // QQChannel 是 QQ 开放平台机器人通道：WebSocket 网关收事件（出站连接）、
 // REST 被动回复；准入靠 openid 白名单，群聊事件平台只在被 @ 时派发。
 type QQChannel struct {
+	name       string
 	client     *qq.Client
 	gateway    *qq.Gateway
 	adminUsers []string
@@ -43,8 +44,9 @@ type QQChannel struct {
 }
 
 // NewQQChannel 创建 QQ 通道。config 需先经 instances.Normalize（api_base_url
-// 已填缺省）；token 端点用官方地址。
-func NewQQChannel(config instances.QQ, debug bool, log func(string, ...any)) *QQChannel {
+// 已填缺省）；token 端点用官方地址。key 是通道实例键（空 = "qq"；多开同平台
+// 机器人时为 "qq/<name>"）。
+func NewQQChannel(config instances.QQ, key string, debug bool, log func(string, ...any)) *QQChannel {
 	client := qq.NewClient(qq.Config{
 		AppID:      config.AppID,
 		AppSecret:  config.AppSecret,
@@ -52,19 +54,23 @@ func NewQQChannel(config instances.QQ, debug bool, log func(string, ...any)) *QQ
 		Debug:      debug,
 		Log:        log,
 	})
-	return newQQChannelWithClient(config, client, debug, log)
+	return newQQChannelWithClient(config, client, key, debug, log)
 }
 
 // newQQChannelWithClient 是可注入客户端的内部构造（测试用假 API）。
-func newQQChannelWithClient(config instances.QQ, client *qq.Client, debug bool, log func(string, ...any)) *QQChannel {
+func newQQChannelWithClient(config instances.QQ, client *qq.Client, key string, debug bool, log func(string, ...any)) *QQChannel {
 	if log == nil {
 		log = func(string, ...any) {}
+	}
+	if strings.TrimSpace(key) == "" {
+		key = "qq"
 	}
 	limit := config.SplitLimit
 	if limit <= 0 {
 		limit = DefaultQQSplitLimit
 	}
 	return &QQChannel{
+		name:       strings.TrimSpace(key),
 		client:     client,
 		gateway:    qq.NewGateway(client, qq.IntentGroupAndC2CEvent),
 		adminUsers: config.AdminUsers,
@@ -76,7 +82,7 @@ func newQQChannelWithClient(config instances.QQ, client *qq.Client, debug bool, 
 }
 
 // Name 实现 Channel：会话映射层的 transport 键。
-func (c *QQChannel) Name() string { return "qq" }
+func (c *QQChannel) Name() string { return c.name }
 
 // SplitLimit 实现 Channel。
 func (c *QQChannel) SplitLimit() int { return c.splitLimit }

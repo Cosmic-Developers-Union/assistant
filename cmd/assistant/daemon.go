@@ -3,11 +3,14 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
+	builtinagents "assistant/internal/agents"
 	"assistant/internal/claudecfg"
 	"assistant/internal/daemon"
 	"assistant/internal/instances"
@@ -48,6 +51,8 @@ func endpointPathHint() string {
 
 type weixinLoginOptions struct {
 	BaseURL string
+	// Name 非空时写入 channels 列表的命名实例（多微信账号）；缺省写旧版 weixin 节
+	Name string
 }
 
 // newWeixinCommand 管理微信对话桥：扫码登录（换 Bot token 写入 config.json）。
@@ -64,7 +69,9 @@ func newWeixinCommand(configFlag *string) *cobra.Command {
 		Long: "按 openclaw-weixin（ilink）协议拉起扫码登录：终端展示二维码内容，\n" +
 			"手机扫码确认后把 Bot token 写入 config.json；之后 assistant run 即可\n" +
 			"通过微信与 daemon 对话（--weixin 或 weixin.enabled=true）。\n" +
-			"需要验证码时会提示输入手机上显示的验证码。",
+			"需要验证码时会提示输入手机上显示的验证码。\n" +
+			"多微信账号用 --name <实例名>：凭据写入 channels 列表的命名实例，\n" +
+			"会话键为 weixin/<实例名>，各实例互不串会话。",
 		Args: cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			return runWeixinLogin(command, *configFlag, loginOptions)
@@ -72,6 +79,8 @@ func newWeixinCommand(configFlag *string) *cobra.Command {
 	}
 	loginCommand.Flags().StringVar(&loginOptions.BaseURL, "base-url", "",
 		"ilink API 根地址（缺省 "+instances.DefaultWeixinBaseURL+"）")
+	loginCommand.Flags().StringVar(&loginOptions.Name, "name", "",
+		"写入 channels 列表的实例名（多微信账号用；缺省写旧版 weixin 节）")
 	statusCommand := &cobra.Command{
 		Use:   "status",
 		Short: "显示微信桥配置状态（不显示令牌）",
@@ -150,6 +159,36 @@ func runWeixinLogin(command *cobra.Command, configPath string, options *weixinLo
 	credentials, err := weixin.Login(command.Context(), baseURL, onQR, promptVerify, nil)
 	if err != nil {
 		return err
+	}
+	if name := strings.TrimSpace(options.Name); name != "" {
+		// channels 列表的命名实例：找同名实例更新凭据，没有就追加
+		entry := instances.Channel{Type: instances.ChannelWeixin, Name: name}
+		found := false
+		for index := range file.Channels {
+			if file.Channels[index].Type == instances.ChannelWeixin && file.Channels[index].Name == name {
+				entry = file.Channels[index]
+				found = true
+				break
+			}
+		}
+		entry.BaseURL = credentials.BaseURL
+		entry.BotToken = credentials.BotToken
+		entry.BotID = credentials.BotID
+		entry.LoginUserID = credentials.UserID
+		if !found {
+			file.Channels = append(file.Channels, entry)
+		}
+		file.Normalize()
+		if err := file.Validate(); err != nil {
+			return err
+		}
+		if err := instances.Save(writePath, file); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "登录成功：bot_id=%s login=%s，凭据已写入 %s 的 channels 实例 weixin/%s（0600）\n",
+			orDash(credentials.BotID), orDash(credentials.UserID), writePath, name)
+		fmt.Fprintln(stdout, "启动对话：assistant run（channels 列表里有条目即启用）")
+		return nil
 	}
 	if file.Weixin == nil {
 		file.Weixin = &instances.Weixin{}
@@ -252,10 +291,16 @@ func startDaemonServices(
 	if err != nil {
 		return err
 	}
-	logChatSummary(logf, file, chat, claudeBin, bare, remote)
+	logChatSummary(logf, file, chat, claudeBin, bare, remote, agents)
 	checkChatCredentials(command, file, providerName, providerOverrides, agents, logf)
 
-	// 通道：weixin / qq 各按「--旗标 强制 或 config enabled」启用
+	// 通道：channels 列表（多实例，推荐）逐条启动；旧版单实例 weixin/qq 块
+	// 继续按 enabled/--旗标语义工作
+	for index := range file.Channels {
+		if err := startChannelEntry(command, file.Channels[index], options, chat, logf); err != nil {
+			return err
+		}
+	}
 	if err := startWeixinChannel(command, file, weixinConfig, options, chat, logf); err != nil {
 		return err
 	}
@@ -265,10 +310,92 @@ func startDaemonServices(
 	return nil
 }
 
-// buildAgentRuntimes 把 config.json 的 agents 定义解析成生效运行时：provider
-// 链解析与 bare 探测逐 agent 进行。
+// startChannelEntry 启动 channels 列表里的一条通道实例（列表里有条目即启用）。
+func startChannelEntry(
+	command *cobra.Command,
+	entry instances.Channel,
+	options *dispatcherOptions,
+	chat *daemon.Chat,
+	logf func(string, ...any),
+) error {
+	key := entry.Key()
+	switch entry.Type {
+	case instances.ChannelWeixin:
+		channel := daemon.NewWeixinChannel(daemon.WeixinChannelConfig{
+			Name: key,
+			Weixin: weixin.Config{
+				BaseURL:        entry.BaseURL,
+				BotToken:       entry.BotToken,
+				BotAgent:       entry.BotAgent,
+				ChannelVersion: firstNonEmpty(entry.ChannelVersion, version),
+				RouteTag:       entry.RouteTag,
+			},
+			AdminUsers:  entry.AdminUsers,
+			LoginUserID: entry.LoginUserID,
+			SplitLimit:  entry.SplitLimit,
+		}, logf)
+		startChannel(command, channel, chat, entry.Agent, options.Debug, logf)
+	case instances.ChannelQQ:
+		channel := daemon.NewQQChannel(instances.QQ{
+			Enabled:    true,
+			AppID:      entry.AppID,
+			AppSecret:  entry.AppSecret,
+			APIBaseURL: entry.APIBaseURL,
+			Sandbox:    entry.Sandbox,
+			AdminUsers: entry.AdminUsers,
+			Agent:      entry.Agent,
+			SplitLimit: entry.SplitLimit,
+		}, key, options.Debug, logf)
+		startChannel(command, channel, chat, entry.Agent, options.Debug, logf)
+	case instances.ChannelTelegram:
+		channel := daemon.NewTelegramChannel(daemon.TelegramChannelConfig{
+			Name:       key,
+			BotToken:   entry.BotToken,
+			APIBaseURL: entry.APIBaseURL,
+			AdminUsers: entry.AdminUsers,
+			SplitLimit: entry.SplitLimit,
+		}, logf)
+		startChannel(command, channel, chat, entry.Agent, options.Debug, logf)
+	default:
+		return fmt.Errorf("channels: 未知平台类型 %q（应为 weixin/qq/telegram）", entry.Type)
+	}
+	logf("通道 %s 已启动（白名单 %d 人）", key, len(entry.AdminUsers))
+	return nil
+}
+
+// startChannel 是通道启动的公共包装：通用桥配置 + 后台协程。
+func startChannel(
+	command *cobra.Command,
+	channel daemon.Channel,
+	chat *daemon.Chat,
+	agent string,
+	debug bool,
+	logf func(string, ...any),
+) {
+	config := daemon.ChannelConfig{Chat: chat, DefaultAgent: agent, Log: logf, Debug: debug}
+	go func() {
+		if err := daemon.RunChannel(command.Context(), channel, config); err != nil {
+			logf("通道 %s 退出：%v", channel.Name(), err)
+		}
+	}()
+}
+
+// buildAgentRuntimes 组装生效的 agent 池：内嵌预设（internal/agents，随二进制
+// 分发，system prompt/MCP 开箱即用）打底，config.json 的 agents 同名覆盖其上、
+// 其余为新增。provider 链解析与 bare 探测逐 agent 进行。
 func buildAgentRuntimes(file *instances.File, options *dispatcherOptions) (map[string]daemon.AgentRuntime, error) {
-	agents := make(map[string]daemon.AgentRuntime, len(file.Agents))
+	agents := make(map[string]daemon.AgentRuntime, len(file.Agents)+len(builtinagents.List()))
+	defaultClaudeBin := firstNonEmpty(options.ClaudeBin, "claude")
+	defaultBare := claudecfg.SupportsBare(defaultClaudeBin)
+	for _, definition := range builtinagents.List() {
+		agents[definition.Name] = daemon.AgentRuntime{
+			Name:         definition.Name,
+			Model:        definition.Model,
+			SystemPrompt: definition.SystemPrompt,
+			ClaudeBin:    defaultClaudeBin,
+			Bare:         defaultBare,
+		}
+	}
 	for _, name := range file.AgentNames() {
 		definition := file.Agents[name]
 		providerName := file.AgentProviderName(name)
@@ -277,6 +404,13 @@ func buildAgentRuntimes(file *instances.File, options *dispatcherOptions) (map[s
 			return nil, fmt.Errorf("agents[%s] provider %s: %w", name, providerName, err)
 		}
 		claudeBin := firstNonEmpty(definition.ClaudeBin, options.ClaudeBin, "claude")
+		// agent 专属 MCP 合并进 provider 覆盖（同名 server 覆盖自举与供应商的）
+		if len(definition.MCP) > 0 {
+			if overrides.MCP == nil {
+				overrides.MCP = map[string]any{}
+			}
+			maps.Copy(overrides.MCP, definition.MCP)
+		}
 		agents[name] = daemon.AgentRuntime{
 			Name:         name,
 			Provider:     overrides,
@@ -300,6 +434,7 @@ func logChatSummary(
 	claudeBin string,
 	bare bool,
 	remote sessionstore.RemoteConfig,
+	agents map[string]daemon.AgentRuntime,
 ) {
 	bareLabel := "关（claude 不支持 --bare 或未探测到）"
 	if bare {
@@ -311,21 +446,35 @@ func logChatSummary(
 	logf("  配置根   = %s", chat.SessionDir())
 	logf("  会话目录 = %s（每个会话一个稳定工作目录 <chat-xxxxxxxx>，含 session.json）", chat.StateDir())
 	logf("  续聊     = cd <会话目录> && claude --continue")
-	agentNames := file.AgentNames()
-	if len(agentNames) == 0 {
-		logf("  agent 池 = 未配置（config.json 的 agents 节；未配置时所有会话用内置缺省）")
+	if len(agents) == 0 {
+		logf("  agent 池 = 空（所有会话用内置缺省；/agent 不可用）")
 	} else {
 		defaultAgent := file.DefaultAgent
 		if defaultAgent == "" {
 			defaultAgent = "内置缺省"
 		}
-		logf("  agent 池 = %s（默认 %s；用户聊天里 /agent 可切换）", strings.Join(agentNames, "、"), defaultAgent)
+		logf("  agent 池 = %s（默认 %s；带 * 为用户定义，其余为内置预设；聊天里 /agent 可切换）",
+			agentPoolSummary(file, agents), defaultAgent)
 	}
 	if remote.URL != "" {
 		logf("  记录库   = %s（每轮结束归档该会话，可用 sessions MCP 回查）", remote.URL)
 	} else {
 		logf("  记录库   = 未配置（assistant serve + session push 可远端留存记录）")
 	}
+}
+
+// agentPoolSummary 是 agent 池的日志展示：名字排序，用户定义的带 * 标记。
+func agentPoolSummary(file *instances.File, agents map[string]daemon.AgentRuntime) string {
+	names := slices.Sorted(maps.Keys(agents))
+	labeled := make([]string, 0, len(names))
+	for _, name := range names {
+		if _, ok := file.Agents[name]; ok {
+			labeled = append(labeled, name+"*")
+			continue
+		}
+		labeled = append(labeled, name)
+	}
+	return strings.Join(labeled, "、")
 }
 
 // checkChatCredentials 对内置缺省与每个 agent 的 provider 做最小请求实测：
@@ -449,7 +598,7 @@ func startQQChannel(
 	if qqConfig.AppID == "" || qqConfig.AppSecret == "" {
 		return fmt.Errorf("qq.app_id/qq.app_secret 未配置：在 q.qq.com 开放平台创建机器人后填入")
 	}
-	channel := daemon.NewQQChannel(*qqConfig, options.Debug, logf)
+	channel := daemon.NewQQChannel(*qqConfig, "qq", options.Debug, logf)
 	channelConfig := daemon.ChannelConfig{
 		Chat:         chat,
 		DefaultAgent: qqConfig.Agent,
