@@ -236,7 +236,7 @@ func validateConfigFile(path string, file *instances.File) []validateFinding {
 	// QQ 通道
 	if file.QQ == nil {
 		findings = append(findings, validateFinding{"SKIP", "qq",
-			"未配置：QQ 对话桥不会启动（在 q.qq.com 开放平台创建机器人后把 app_id/app_secret 写入 qq 节）"})
+			"旧版 qq 节未配置（对话通道看 channels 里的 qq 条目；旧块用 q.qq.com 的 app_id/app_secret）"})
 	} else {
 		qqConfig := file.QQ
 		detail := "enabled=" + fmt.Sprintf("%t", qqConfig.Enabled)
@@ -307,7 +307,7 @@ func validateConfigFile(path string, file *instances.File) []validateFinding {
 			mainAgent = instances.DefaultMainAgent
 		}
 		subagents := runtime.Subagents
-		if len(subagents) == 0 {
+		if subagents == nil {
 			subagents = builtinagents.SubagentNames()
 		}
 		detail := fmt.Sprintf("main agent=%s；子代理=%s；通道=%s",

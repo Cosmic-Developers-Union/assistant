@@ -206,7 +206,7 @@
         "subagents": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "子代理名清单：以 claude 自定义 agent 注入会话，主模型经原生 Task 工具按 description 委派。缺省 = 全部内置子代理（ops/coder/writer/review）。"
+          "description": "子代理名清单：以 claude 自定义 agent 注入会话，主模型经原生 Task 工具按 description 委派。不写 = 全部内置子代理（ops/coder/writer/review）；写空数组 [] = 不注入任何子代理（主 agent 亲自处理一切）。"
         },
         "channels": {
           "type": "array",

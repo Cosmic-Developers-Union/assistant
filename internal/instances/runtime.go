@@ -101,7 +101,11 @@ const DefaultSessionsNameTemplate = "{instance-name}-{username-or-org}--{name}/{
 func (r *Runtime) resolve(baseDir string) error {
 	r.MainAgent = strings.TrimSpace(r.MainAgent)
 	r.Provider = strings.TrimSpace(r.Provider)
-	r.Subagents = trimNonEmpty(r.Subagents)
+	// Subagents 保留「显式空数组」语义：nil（未写）= 全部内置子代理；
+	// 非 nil 空（写了 []）= 不注入任何子代理
+	if r.Subagents != nil {
+		r.Subagents = trimNonEmpty(r.Subagents)
+	}
 	r.Channels = trimNonEmpty(r.Channels)
 	r.ReviewNameTemplate = strings.TrimSpace(r.ReviewNameTemplate)
 	r.SessionsNameTemplate = strings.TrimSpace(r.SessionsNameTemplate)
@@ -487,9 +491,10 @@ func defaultDataDir() (string, error) {
 	return filepath.Join(base, configNamespace, configApp), nil
 }
 
-// trimNonEmpty 去除字符串清单各项空白并丢弃空项。
+// trimNonEmpty 去除字符串清单各项空白并丢弃空项（nil 入 nil 出；非 nil 空
+// 清单返回空非 nil，保留调用方的「显式为空」语义）。
 func trimNonEmpty(values []string) []string {
-	if len(values) == 0 {
+	if values == nil {
 		return nil
 	}
 	kept := make([]string, 0, len(values))

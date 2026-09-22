@@ -325,7 +325,7 @@ func logRuntimeSummary(logf func(string, ...any), file *instances.File, runtime 
 		mainAgent = instances.DefaultMainAgent
 	}
 	subagents := runtime.Subagents
-	if len(subagents) == 0 {
+	if subagents == nil {
 		subagents = builtinagents.SubagentNames()
 	}
 	logf("runtime 装配：main agent = %s；子代理 = %s；通道 = %s",
@@ -469,7 +469,7 @@ func buildSubagents(
 	options *dispatcherOptions,
 ) ([]daemon.SubagentDefinition, error) {
 	definitions := make([]builtinagents.Definition, 0, len(runtime.Subagents))
-	if len(runtime.Subagents) == 0 {
+	if runtime.Subagents == nil {
 		definitions = builtinagents.Subagents()
 	} else {
 		for _, name := range runtime.Subagents {

@@ -74,10 +74,14 @@ func targetToken(target dispatchTarget) string {
 	return target.config.AccessToken
 }
 
-// countRepos 统计 gitea 通道的仓库总数（--repo-dir 单目标校验用）。
-func countRepos(file *instances.File) int {
+// countRepos 统计 runtime 引用的 gitea 通道仓库总数（--repo-dir 单目标校验用；
+// referenced 为空表示引用全部）。
+func countRepos(file *instances.File, referenced map[string]bool) int {
 	total := 0
 	for _, channel := range giteaChannels(file) {
+		if len(referenced) > 0 && !referenced[channel.Key()] {
+			continue
+		}
 		total += len(channel.Repos)
 	}
 	return total
@@ -351,17 +355,26 @@ func resolveDispatchTargets(
 	if err != nil {
 		return nil, err
 	}
+	// 调度只吃本 runtime 引用的 gitea 通道：未引用/已停用的不产生评审目标
+	// （runtime.Channels 为空表示引用全部，合成 main 的形态）
+	referenced := map[string]bool{}
+	for _, key := range runtime.Channels {
+		referenced[key] = true
+	}
 
 	// --repo-dir 是单目标覆盖：配置里出现多个仓库时要求 --repo 收敛到唯一仓库，
 	// 避免把同一个检出强加到多个循环（锁/worktree 会互相踩）
-	if override := strings.TrimSpace(options.RepoDir); override != "" && repoFlag == "" && countRepos(file) > 1 {
-		return nil, fmt.Errorf("--repo-dir 只适用于单个仓库：请加 --repo owner/name 指定（当前配置 %d 个仓库）", countRepos(file))
+	if override := strings.TrimSpace(options.RepoDir); override != "" && repoFlag == "" && countRepos(file, referenced) > 1 {
+		return nil, fmt.Errorf("--repo-dir 只适用于单个仓库：请加 --repo owner/name 指定（当前配置 %d 个仓库）", countRepos(file, referenced))
 	}
 
 	var targets []dispatchTarget
 	matchedFilter := repoFlag == ""
 	for _, channel := range giteaChannels(file) {
 		if !channel.IsEnabled() {
+			continue
+		}
+		if len(referenced) > 0 && !referenced[channel.Key()] {
 			continue
 		}
 		if len(channel.Repos) == 0 {
