@@ -18,8 +18,9 @@ import (
 	"time"
 )
 
-// CurrentVersion 是文件格式版本。
-const CurrentVersion = 1
+// CurrentVersion 是文件格式版本。v2 起会话实体可携带用户 /agent 切换的 agent 名
+// （可选字段：v1 文件读入不报错，旧二进制读 v2 文件忽略该字段）。
+const CurrentVersion = 2
 
 // Binding 是一个通道绑定：哪个通道的哪个用户属于这个会话。
 type Binding struct {
@@ -36,6 +37,8 @@ type Conversation struct {
 	Bindings  []Binding `json:"bindings,omitempty"`
 	// Sessions 是该会话下的 claude 会话 id（`/new` 后追加，最新在后）
 	Sessions []string `json:"sessions,omitempty"`
+	// Agent 是用户用 /agent 命令为本会话选定的 agent 名；空表示跟随通道/全局默认
+	Agent string `json:"agent,omitempty"`
 }
 
 // File 是 conversations.json 的根。
@@ -155,6 +158,30 @@ func (f *File) Bind(id, transport, user string) error {
 		return nil
 	}
 	return fmt.Errorf("会话 %s 不存在", id)
+}
+
+// SetAgent 记录用户为本会话选定的 agent（/agent 命令）；空名表示清除选择、
+// 回到通道/全局默认。
+func (f *File) SetAgent(id, name string) error {
+	name = strings.TrimSpace(name)
+	for index := range f.Conversations {
+		if f.Conversations[index].ID != id {
+			continue
+		}
+		f.Conversations[index].Agent = name
+		f.Conversations[index].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		return nil
+	}
+	return fmt.Errorf("会话 %s 不存在", id)
+}
+
+// AgentOf 返回会话上记录的 agent 名（不存在或未选择时为空串）。
+func (f *File) AgentOf(id string) string {
+	conversation, ok := f.ByID(id)
+	if !ok {
+		return ""
+	}
+	return conversation.Agent
 }
 
 // Attach 把 claude 会话 id 挂到该 conversation 下（去重，最新在后）。

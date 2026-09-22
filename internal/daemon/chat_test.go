@@ -24,10 +24,10 @@ func TestChatBareArgs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewChat: %v", err)
 	}
-	if !chat.Bare() {
-		t.Fatal("Bare() 应为 true")
+	if !chat.agentFor("user-1", "").Bare {
+		t.Fatal("内置缺省 agent 的 Bare 应为 true")
 	}
-	args, err := chat.sessionArgs("11111111-2222-4333-8444-555555555555", "chat-test", true, "你好", t.TempDir())
+	args, err := chat.sessionArgs("11111111-2222-4333-8444-555555555555", "chat-test", true, "你好", t.TempDir(), chat.agentFor("user-1", ""))
 	if err != nil {
 		t.Fatalf("sessionArgs: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestChatWithoutBareArgs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewChat: %v", err)
 	}
-	args, err := chat.sessionArgs("11111111-2222-4333-8444-555555555555", "", true, "你好", t.TempDir())
+	args, err := chat.sessionArgs("11111111-2222-4333-8444-555555555555", "", true, "你好", t.TempDir(), chat.agentFor("user-1", ""))
 	if err != nil {
 		t.Fatalf("sessionArgs: %v", err)
 	}
@@ -126,11 +126,11 @@ func TestChatWorkspaceStableAndIsolated(t *testing.T) {
 	}
 	ctx := context.Background()
 	for _, text := range []string{"第一条", "第二条"} {
-		if _, err := chat.Handle(ctx, "user-1", text); err != nil {
+		if _, err := chat.Handle(ctx, "user-1", Turn{Transport: "weixin", Text: text}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := chat.Handle(ctx, "user-2", "你好"); err != nil {
+	if _, err := chat.Handle(ctx, "user-2", Turn{Transport: "weixin", Text: "你好"}); err != nil {
 		t.Fatal(err)
 	}
 	if len(dirs) != 3 || dirs[0] != dirs[1] {
@@ -176,7 +176,7 @@ func TestChatResetStartsFreshSession(t *testing.T) {
 		t.Fatalf("NewChat: %v", err)
 	}
 	ctx := context.Background()
-	if _, err := chat.Handle(ctx, "user-1", "第一句"); err != nil {
+	if _, err := chat.Handle(ctx, "user-1", Turn{Transport: "weixin", Text: "第一句"}); err != nil {
 		t.Fatal(err)
 	}
 	first := argumentAfter(args[0], "--session-id")
@@ -186,7 +186,7 @@ func TestChatResetStartsFreshSession(t *testing.T) {
 	if err := chat.Reset("user-1"); err != nil {
 		t.Fatalf("Reset: %v", err)
 	}
-	if _, err := chat.Handle(ctx, "user-1", "重新开始后第一句"); err != nil {
+	if _, err := chat.Handle(ctx, "user-1", Turn{Transport: "weixin", Text: "重新开始后第一句"}); err != nil {
 		t.Fatal(err)
 	}
 	second := argumentAfter(args[1], "--session-id")
@@ -267,12 +267,12 @@ func TestChatLogsEffectiveConfigWithMaskedSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewChat: %v", err)
 	}
-	if _, err := chat.Handle(context.Background(), "user-1", "在吗"); err != nil {
+	if _, err := chat.Handle(context.Background(), "user-1", Turn{Transport: "weixin", Text: "在吗"}); err != nil {
 		t.Fatal(err)
 	}
 	joined := strings.Join(logs, "\n")
 	for _, want := range []string{
-		"会话配置：model = MiniMax-M3[1m]",
+		"会话配置：agent = 内置缺省，model = MiniMax-M3[1m]",
 		"  env 3 项：",
 		"    ANTHROPIC_AUTH_TOKEN = sk-cp-…klmn",
 		"    ANTHROPIC_BASE_URL = https://api.minimaxi.com/anthropic",
@@ -345,7 +345,7 @@ func TestChatConversationMappingAndSessionsMCP(t *testing.T) {
 	}
 
 	// 一轮对话：迁移后的会话被 --resume 接上，工作目录里的元数据带 conversation/transport
-	if _, err := chat.Handle(context.Background(), first, "在吗"); err != nil {
+	if _, err := chat.Handle(context.Background(), first, Turn{Transport: "weixin", Text: "在吗"}); err != nil {
 		t.Fatal(err)
 	}
 	if argumentAfter(lastArgs, "--resume") != "s-legacy" {

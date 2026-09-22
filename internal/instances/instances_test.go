@@ -431,3 +431,66 @@ func TestProviderPresetValidation(t *testing.T) {
 		t.Errorf("预设+简写未生效：%+v", overrides.Env)
 	}
 }
+
+// agent 池与 QQ 通道的加载、默认值与校验：引用不存在的 agent/provider 直接报错；
+// qq.enabled 需要 app_id+app_secret；Normalize 填 api_base_url 缺省。
+func TestLoadAgentsAndQQ(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	content := `{
+		"providers": {"zhipu": {"api_key": "k"}},
+		"agents": {
+			"ops": {"provider": "zhipu", "model": "glm-4.7", "system_prompt": "你是运维。", "session_timeout_ms": 60000},
+			"coder": {"model": "m-coder"}
+		},
+		"default_agent": "ops",
+		"qq": {"enabled": true, "app_id": "111", "app_secret": "sec", "admin_users": ["*"], "agent": "coder"},
+		"weixin": {"enabled": true, "bot_token": "tok", "agent": "ops"}
+	}`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	file, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := file.AgentNames(); len(got) != 2 || got[0] != "coder" || got[1] != "ops" {
+		t.Errorf("AgentNames = %v", got)
+	}
+	if file.Agents["ops"].Model != "glm-4.7" || file.Agents["ops"].SystemPrompt != "你是运维。" {
+		t.Errorf("agents[ops] = %+v", file.Agents["ops"])
+	}
+	if got := file.AgentProviderName("ops"); got != "zhipu" {
+		t.Errorf("AgentProviderName(ops) = %q", got)
+	}
+	if got := file.AgentProviderName("coder"); got != "" {
+		t.Errorf("AgentProviderName(coder) 应回退全局默认 = %q", got)
+	}
+	if file.QQ.APIBaseURL != DefaultQQAPIBaseURL {
+		t.Errorf("qq.api_base_url 缺省未填：%q", file.QQ.APIBaseURL)
+	}
+	if file.Weixin.Agent != "ops" || file.QQ.Agent != "coder" {
+		t.Errorf("通道 agent 未保留：weixin=%q qq=%q", file.Weixin.Agent, file.QQ.Agent)
+	}
+
+	rejects := map[string]string{
+		"unknown default_agent":  `{"agents": {"ops": {}}, "default_agent": "nope", "instances": []}`,
+		"unknown weixin.agent":   `{"agents": {"ops": {}}, "weixin": {"enabled": true, "bot_token": "t", "agent": "nope"}, "instances": []}`,
+		"unknown qq.agent":       `{"agents": {"ops": {}}, "qq": {"enabled": true, "app_id": "1", "app_secret": "s", "agent": "nope"}, "instances": []}`,
+		"unknown agent provider": `{"agents": {"ops": {"provider": "nope"}}, "instances": []}`,
+		"qq enabled no secret":   `{"qq": {"enabled": true, "app_id": "111"}, "instances": []}`,
+		"qq enabled no appid":    `{"qq": {"enabled": true, "app_secret": "s"}, "instances": []}`,
+		"qq bad base url":        `{"qq": {"api_base_url": "api.sgroup.qq.com"}, "instances": []}`,
+		"qq negative split":      `{"qq": {"enabled": true, "app_id": "1", "app_secret": "s", "split_limit": -5}, "instances": []}`,
+	}
+	for name, bad := range rejects {
+		t.Run(name, func(t *testing.T) {
+			badPath := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(badPath, []byte(bad), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(badPath); err == nil {
+				t.Errorf("Load 应拒绝：%s", bad)
+			}
+		})
+	}
+}

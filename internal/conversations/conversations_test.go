@@ -1,6 +1,7 @@
 package conversations
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -63,5 +64,62 @@ func TestConversationMapping(t *testing.T) {
 	}
 	if _, ok := reloaded.ByID(first.ID); !ok {
 		t.Error("重新加载后会话丢失")
+	}
+}
+
+// /agent 的会话级选择：设置、覆盖、清除、按 id 反查；v2 字段在 v1 旧文件上向后兼容。
+func TestSetAgentAndAgentOf(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	file, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _ := file.Ensure("weixin", "user-1", "")
+	if err := file.SetAgent(first.ID, "ops"); err != nil {
+		t.Fatalf("SetAgent: %v", err)
+	}
+	if got := file.AgentOf(first.ID); got != "ops" {
+		t.Errorf("AgentOf = %q, want ops", got)
+	}
+	if err := file.SetAgent(first.ID, ""); err != nil {
+		t.Fatalf("SetAgent 清除: %v", err)
+	}
+	if got := file.AgentOf(first.ID); got != "" {
+		t.Errorf("清除后 AgentOf = %q", got)
+	}
+	if err := file.SetAgent("c-nope", "ops"); err == nil {
+		t.Error("对不存在的会话 SetAgent 应报错")
+	}
+
+	// 落盘往返（v2）
+	if err := file.SetAgent(first.ID, "coder"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(path, file); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reloaded.AgentOf(first.ID); got != "coder" {
+		t.Errorf("重新加载后 AgentOf = %q, want coder", got)
+	}
+
+	// v1 旧文件（无 agent 字段）读入不报错
+	v1 := `{"version":1,"conversations":[{"id":"c-1a2b3c4d","created_at":"2026-01-01T00:00:00Z"}]}` + "\n"
+	oldPath := filepath.Join(t.TempDir(), "conversations.json")
+	if err := os.WriteFile(oldPath, []byte(v1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := Load(oldPath)
+	if err != nil {
+		t.Fatalf("v1 文件应可读：%v", err)
+	}
+	if got := legacy.AgentOf("c-1a2b3c4d"); got != "" {
+		t.Errorf("v1 会话的 AgentOf = %q", got)
+	}
+	if err := legacy.SetAgent("c-1a2b3c4d", "ops"); err != nil {
+		t.Fatalf("v1 会话 SetAgent: %v", err)
 	}
 }

@@ -94,7 +94,7 @@ func TestChatProviderSessionHeader(t *testing.T) {
 		t.Fatalf("NewChat: %v", err)
 	}
 	sessionID := "11111111-2222-4333-8444-555555555555"
-	args, err := chat.sessionArgs(sessionID, "chat-test", true, "你好", t.TempDir())
+	args, err := chat.sessionArgs(sessionID, "chat-test", true, "你好", t.TempDir(), chat.agentFor("user-1", ""))
 	if err != nil {
 		t.Fatalf("sessionArgs: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestChatSessionTitleAndProjectEnv(t *testing.T) {
 		t.Fatalf("NewChat: %v", err)
 	}
 	conversation := "o9cq80yYcUkby1i0GsUNJ1u00RSM@im.wechat"
-	reply, err := chat.Handle(context.Background(), conversation, "在吗")
+	reply, err := chat.Handle(context.Background(), conversation, Turn{Transport: "weixin", Text: "在吗"})
 	if err != nil || reply != "好的" {
 		t.Fatalf("Handle: reply=%q err=%v", reply, err)
 	}
@@ -177,7 +177,7 @@ func TestChatSessionTitleAndProjectEnv(t *testing.T) {
 		t.Errorf("会话工作目录缺少 session.json：%v", err)
 	}
 	// 第二轮复用同一会话 ID（--resume），标题稳定
-	if _, err := chat.Handle(context.Background(), conversation, "再问一句"); err != nil {
+	if _, err := chat.Handle(context.Background(), conversation, Turn{Transport: "weixin", Text: "再问一句"}); err != nil {
 		t.Fatal(err)
 	}
 	if got := argumentAfter(gotArgs, "--resume"); got != firstID {

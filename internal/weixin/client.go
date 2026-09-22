@@ -330,27 +330,3 @@ func randomClientID() (string, error) {
 	}
 	return "assistant-" + hex.EncodeToString(buffer), nil
 }
-
-// SplitText 把长回复按上限切块（按 rune，尽量在换行处切）。
-func SplitText(text string, limit int) []string {
-	runes := []rune(strings.TrimSpace(text))
-	if limit <= 0 || len(runes) <= limit {
-		return []string{string(runes)}
-	}
-	var chunks []string
-	for len(runes) > limit {
-		cut := limit
-		for index := limit; index > limit/2; index-- {
-			if runes[index] == '\n' {
-				cut = index
-				break
-			}
-		}
-		chunks = append(chunks, strings.TrimSpace(string(runes[:cut])))
-		runes = runes[cut:]
-	}
-	if len(runes) > 0 {
-		chunks = append(chunks, strings.TrimSpace(string(runes)))
-	}
-	return chunks
-}

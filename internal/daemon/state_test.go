@@ -150,7 +150,7 @@ func TestChatStableSession(t *testing.T) {
 		t.Fatalf("NewChat: %v", err)
 	}
 	ctx := context.Background()
-	reply, err := chat.Handle(ctx, "user-1", "现在有多少 PR 在 review？")
+	reply, err := chat.Handle(ctx, "user-1", Turn{Transport: "weixin", Text: "现在有多少 PR 在 review？"})
 	if err != nil || reply != "有 2 个 PR 在评审" {
 		t.Fatalf("Handle = %q, %v", reply, err)
 	}
@@ -158,7 +158,7 @@ func TestChatStableSession(t *testing.T) {
 	if !strings.Contains(first, "--session-id") || !strings.Contains(first, "assistant mcp daemon") == false {
 		t.Errorf("首轮参数 = %s", first)
 	}
-	if _, err := chat.Handle(ctx, "user-1", "第二个问题"); err != nil {
+	if _, err := chat.Handle(ctx, "user-1", Turn{Transport: "weixin", Text: "第二个问题"}); err != nil {
 		t.Fatal(err)
 	}
 	second := strings.Join(calls[1], " ")
@@ -171,7 +171,7 @@ func TestChatStableSession(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "sessions.json")); err != nil {
 		t.Errorf("会话映射应落盘：%v", err)
 	}
-	if _, err := chat.Handle(ctx, "user-2", "你好"); err != nil {
+	if _, err := chat.Handle(ctx, "user-2", Turn{Transport: "weixin", Text: "你好"}); err != nil {
 		t.Fatal(err)
 	}
 	if calls[2][0] == calls[0][0] && strings.Contains(strings.Join(calls[2], " "), "--resume") {

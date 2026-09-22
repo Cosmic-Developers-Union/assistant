@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://gitea.mms.vincentge.top/Ge/assistant/raw/branch/main/schema/config.schema.json",
   "title": "assistant config.json",
-  "description": "assistant 的用户配置：管理哪些 Gitea 平台与仓库、各会话用哪个 AI 供应商、微信对话桥。凭据不在这个文件里——助手派生与机器人令牌由 assistant 管理在 credentials.json。编辑器认得 $schema 键，因此本文件同时是补全与悬停文档的来源；语义校验以 `assistant validate` 为准。",
+  "description": "assistant 的用户配置：管理哪些 Gitea 平台与仓库、各会话用哪个 AI 供应商、对话服务端的通道（微信/QQ）与命名 agent 池。凭据不在这个文件里——助手派生与机器人令牌由 assistant 管理在 credentials.json。编辑器认得 $schema 键，因此本文件同时是补全与悬停文档的来源；语义校验以 `assistant validate` 为准。",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -12,7 +12,7 @@
     },
     "instances": {
       "type": "array",
-      "description": "要管理的 Gitea 平台。至少一个平台；只配微信桥（weixin）时可以留空。",
+      "description": "要管理的 Gitea 平台。至少一个平台；只配对话通道（weixin/qq）时可以留空。",
       "items": { "$ref": "#/$defs/instance" }
     },
     "providers": {
@@ -24,6 +24,15 @@
       "type": "string",
       "description": "未在 repo/instance/weixin 指定时的兜底供应商名；留空表示内置缺省（Anthropic 官方）。引用了未定义的名字会直接报错。"
     },
+    "agents": {
+      "type": "object",
+      "description": "命名 agent 池（multi-agent）：每个 agent 一份独立的 provider/model/系统提示词/执行参数。对话轮按「会话上 /agent 的选择 > 通道默认 > default_agent」解析；用户在聊天里 /agent <名> 切换并按会话记忆。",
+      "additionalProperties": { "$ref": "#/$defs/agent" }
+    },
+    "default_agent": {
+      "type": "string",
+      "description": "通道与会话都未指定 agent 时的兜底 agent 名；留空表示内置缺省（weixin 节的对话参数 + default_provider）。引用了未定义的名字会直接报错。"
+    },
     "optimizations": {
       "$ref": "#/$defs/provider",
       "description": "跨供应商通用的全局优化点（env/settings/mcp 同 provider 形态）：对所有会话打底，选中的 provider 同名取值覆盖其上。适合放时长、上下文窗口、遥测开关、子 agent 模型。"
@@ -31,6 +40,10 @@
     "weixin": {
       "$ref": "#/$defs/weixin",
       "description": "微信对话桥（openclaw ilink 协议）。通常由 `assistant weixin login` 写入，不需要手写。"
+    },
+    "qq": {
+      "$ref": "#/$defs/qq",
+      "description": "QQ 对话桥（QQ 开放平台官方 Bot API v2：WebSocket 网关收事件 + REST 发消息）。在 q.qq.com 创建机器人后把 AppID/AppSecret 写在这里。"
     }
   },
   "$defs": {
@@ -125,12 +138,44 @@
         "admin_users": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "允许对话的用户 ID 白名单；留空表示只允许扫码登录的用户。"
+          "description": "允许对话的用户 ID 白名单；留空表示只允许扫码登录的用户；含 \"*\" 表示放开所有用户。"
         },
+        "agent": { "type": "string", "description": "本通道对话的默认 agent 名（缺省回退 default_agent）。" },
         "provider": { "type": "string", "description": "对话会话使用的供应商名（缺省回退 default_provider）。" },
         "claude_bin": { "type": "string", "description": "对话会话的 claude 可执行文件（PATH 名或绝对路径）。" },
         "model": { "type": "string", "description": "对话会话的模型覆盖。" },
         "session_timeout_ms": { "type": "integer", "minimum": 0, "description": "单轮对话超时（毫秒，缺省 180000）。" }
+      }
+    },
+    "qq": {
+      "type": "object",
+      "description": "QQ 对话桥配置（q.qq.com 开放平台 → 机器人管理 → AppID/AppSecret）。收发均为被动回复：机器人只能回复收到的消息（msg_id 15 分钟窗口），群聊里只在被 @ 时收到事件。",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean", "description": "true 时 assistant run 启动 QQ 通道（--qq 亦可强制开启）。" },
+        "app_id": { "type": "string", "description": "开放平台机器人的 AppID。" },
+        "app_secret": { "type": "string", "description": "开放平台机器人的 AppSecret（config.json 为 0600，与 bot_token 同级敏感）。" },
+        "api_base_url": { "type": "string", "description": "Bot API 根地址（缺省 https://api.sgroup.qq.com）。" },
+        "sandbox": { "type": "boolean", "description": "沙箱环境标记（当前版本仅用于日志区分）。" },
+        "admin_users": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "允许对话的用户 openid 白名单；留空时拒绝所有用户；含 \"*\" 表示放开所有用户（群聊慎用，任何 @ 机器人的人都会消耗 AI 额度）。"
+        },
+        "agent": { "type": "string", "description": "本通道对话的默认 agent 名（缺省回退 default_agent）。" },
+        "split_limit": { "type": "integer", "minimum": 0, "description": "回复切块的字符上限（缺省 1000；平台对 content 长度有限制）。" }
+      }
+    },
+    "agent": {
+      "type": "object",
+      "description": "命名 agent 池中的一员：provider/model/系统提示词/执行参数独立。只配 provider/model 即可让不同用户群用不同模型；system_prompt 会整体替换对话会话的基础提示词。",
+      "additionalProperties": false,
+      "properties": {
+        "provider": { "type": "string", "description": "该 agent 使用的供应商名（缺省回退 default_provider）。" },
+        "model": { "type": "string", "description": "该 agent 的模型覆盖（claude --model）。" },
+        "system_prompt": { "type": "string", "description": "该 agent 的系统提示词（整体替换基础提示词；留空用内置）。" },
+        "claude_bin": { "type": "string", "description": "该 agent 的 claude 可执行文件（缺省 PATH 上的 claude）。" },
+        "session_timeout_ms": { "type": "integer", "minimum": 0, "description": "该 agent 的单轮对话超时（毫秒，缺省 180000）。" }
       }
     }
   }

@@ -22,6 +22,18 @@
       "api_key": "sk-ant-api-key"
     }
   },
+  "agents": {
+    "ops": {
+      "provider": "opencode",
+      "model": "claude-sonnet-5",
+      "session_timeout_ms": 180000
+    },
+    "qa": {
+      "provider": "zhipu",
+      "system_prompt": "你是测试助手，只回答与测试相关的问题。"
+    }
+  },
+  "default_agent": "ops",
   "instances": [
     {
       "host": "https://gitea.example.com",
@@ -48,9 +60,19 @@
     "base_url": "https://ilinkai.weixin.qq.com",
     "bot_token": "created-by-assistant-weixin-login",
     "login_user_id": "wx-user-id",
+    "agent": "ops",
     "provider": "opencode",
     "admin_users": [
       "wx-user-id"
+    ]
+  },
+  "qq": {
+    "enabled": true,
+    "app_id": "your-qq-bot-appid",
+    "app_secret": "your-qq-bot-appsecret",
+    "agent": "ops",
+    "admin_users": [
+      "qq-openid-1"
     ]
   }
 }

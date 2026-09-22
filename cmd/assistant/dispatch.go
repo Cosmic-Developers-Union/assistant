@@ -33,6 +33,7 @@ type dispatcherOptions struct {
 	Token         string
 	APIListen     string
 	Weixin        bool
+	QQ            bool
 	Verbose       bool
 	Reviewer      string
 	Model         string
@@ -132,6 +133,12 @@ func newDispatcherCommands(repoFlag, configFlag *string) []*cobra.Command {
 		"weixin",
 		false,
 		"启动微信对话桥（也可在 config.json 设 weixin.enabled=true；凭证用 assistant weixin login 扫码获取）",
+	)
+	runCommand.Flags().BoolVar(
+		&runOptions.QQ,
+		"qq",
+		false,
+		"启动 QQ 对话桥（也可在 config.json 设 qq.enabled=true；凭据在 q.qq.com 开放平台创建机器人后写入 qq 节）",
 	)
 
 	listOptions := &dispatcherOptions{}

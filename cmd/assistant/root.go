@@ -116,6 +116,7 @@ func newRootCommand(stdout, stderr io.Writer, checker, syncer, merger managerRun
 	command.AddCommand(newLoginCommand(&options.ConfigPath))
 	command.AddCommand(newReposCommand(&options.ConfigPath))
 	command.AddCommand(newWeixinCommand(&options.ConfigPath))
+	command.AddCommand(newQQCommand(&options.ConfigPath))
 	command.AddCommand(newInitCommand(&options.ConfigPath))
 	command.AddCommand(newSetupCommand(&options.ConfigPath))
 	command.AddCommand(newInstallCommand(), newUninstallCommand(), newMCPCommand(&options.ConfigPath), newDoctorCommand(&options.ConfigPath))

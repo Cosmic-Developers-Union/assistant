@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -14,181 +13,169 @@ import (
 // messageTypeUser 是 WeixinMessage.message_type 中「用户」的取值（2 是 Bot）。
 const messageTypeUser = 1
 
-// BridgeConfig 是微信对话桥配置。
-type BridgeConfig struct {
+// DefaultWeixinSplitLimit 是微信回复切块的缺省上限。
+const DefaultWeixinSplitLimit = 1800
+
+// WeixinChannelConfig 是微信通道的适配配置（通道私有部分；通用部分见 ChannelConfig）。
+type WeixinChannelConfig struct {
 	Weixin weixin.Config
-	// AdminUsers 是允许对话的用户白名单；空时只允许 LoginUserID
+	// AdminUsers 是允许对话的用户白名单；空时只允许 LoginUserID；含 "*" 放开所有人
 	AdminUsers []string
 	// LoginUserID 是扫码登录的微信用户
 	LoginUserID string
-	Chat        *Chat
-	Log         func(string, ...any)
-	// Debug 为真时额外记录 typing 票据、消息路由等细节
-	Debug bool
-	// Concurrency 是同时处理的对话数（缺省 4）
-	Concurrency int
+	// SplitLimit 是回复切块上限（缺省 DefaultWeixinSplitLimit）
+	SplitLimit int
 }
 
-// RunBridge 常驻消费微信消息：长轮询 → (允许用户) → 稳定 claude 会话 →
-// 分块回复。上下线通知、typing 状态尽力而为，失败不影响主流程。
-func RunBridge(ctx context.Context, config BridgeConfig) error {
-	if config.Chat == nil {
-		return fmt.Errorf("对话会话未初始化")
-	}
-	if config.Log == nil {
-		config.Log = func(string, ...any) {}
-	}
-	concurrency := config.Concurrency
-	if concurrency <= 0 {
-		concurrency = 4
-	}
-	client := weixin.NewClient(config.Weixin)
-	if err := client.Notify(ctx, true); err != nil {
-		config.Log("通知上线失败（忽略）：%v", err)
-	}
-	defer func() {
-		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := client.Notify(stopCtx, false); err != nil {
-			config.Log("通知下线失败（忽略）：%v", err)
-		}
-	}()
+// WeixinChannel 是微信（openclaw ilink）通道：长轮询收消息、SendText 回复、
+// typing 票据缓存与上下线通知。
+type WeixinChannel struct {
+	client      *weixin.Client
+	adminUsers  []string
+	loginUserID string
+	splitLimit  int
+	typing      *typingCache
+	log         func(string, ...any)
 
-	typing := &typingCache{tickets: map[string]string{}}
-	semaphore := make(chan struct{}, concurrency)
-	var waitGroup sync.WaitGroup
-	cursor := ""
-	backoff := time.Second
-	for !ctxDone(ctx) {
-		updates, err := client.GetUpdates(ctx, cursor)
-		if err != nil {
-			if ctxDone(ctx) {
-				break
-			}
-			config.Log("getUpdates 失败：%v（%s 后重试）", err, backoff)
-			sleepCtx(ctx, backoff)
-			if backoff < 30*time.Second {
-				backoff *= 2
-			}
-			continue
+	// cursor 与 pending 只在 Receive（通用桥的单消费协程）里访问
+	cursor  string
+	pending []weixin.Message
+}
+
+// NewWeixinChannel 创建微信通道。
+func NewWeixinChannel(config WeixinChannelConfig, log func(string, ...any)) *WeixinChannel {
+	if log == nil {
+		log = func(string, ...any) {}
+	}
+	limit := config.SplitLimit
+	if limit <= 0 {
+		limit = DefaultWeixinSplitLimit
+	}
+	return &WeixinChannel{
+		client:      weixin.NewClient(config.Weixin),
+		adminUsers:  config.AdminUsers,
+		loginUserID: config.LoginUserID,
+		splitLimit:  limit,
+		typing:      &typingCache{tickets: map[string]string{}},
+		log:         log,
+	}
+}
+
+// Name 实现 Channel：会话映射层的 transport 键。
+func (c *WeixinChannel) Name() string { return "weixin" }
+
+// SplitLimit 实现 Channel。
+func (c *WeixinChannel) SplitLimit() int { return c.splitLimit }
+
+// Allowed 实现 Channel："*" 通配 → 白名单 → 登录者兜底 → 全部拒绝。
+func (c *WeixinChannel) Allowed(user string) (bool, string) {
+	if strings.TrimSpace(user) == "" {
+		return false, "用户标识为空"
+	}
+	if slices.Contains(c.adminUsers, "*") {
+		return true, ""
+	}
+	if len(c.adminUsers) > 0 {
+		if !slices.Contains(c.adminUsers, user) {
+			return false, "白名单外用户"
 		}
-		backoff = time.Second
+		return true, ""
+	}
+	if c.loginUserID != "" {
+		if user != c.loginUserID {
+			return false, "非登录用户"
+		}
+		return true, ""
+	}
+	return false, "未配置 weixin.admin_users 且无 login_user_id"
+}
+
+// Start 实现 starter：上线通知（尽力而为，失败由通用桥记日志）。
+func (c *WeixinChannel) Start(ctx context.Context) error {
+	return c.client.Notify(ctx, true)
+}
+
+// Close 实现 closer：下线通知（尽力而为）。
+func (c *WeixinChannel) Close(ctx context.Context) {
+	if err := c.client.Notify(ctx, false); err != nil {
+		c.log("通知下线失败（忽略）：%v", err)
+	}
+}
+
+// Receive 实现 Channel：长轮询 ilink。会话被暂停（ret=-14）时挂起 1 小时后
+// 重试；空轮询立即再取；一次批量取到的消息逐条交付。
+func (c *WeixinChannel) Receive(ctx context.Context) (Inbound, error) {
+	if len(c.pending) > 0 {
+		next := c.pending[0]
+		c.pending = c.pending[1:]
+		return c.inbound(next), nil
+	}
+	for !ctxDone(ctx) {
+		updates, err := c.client.GetUpdates(ctx, c.cursor)
+		if err != nil {
+			return nil, err
+		}
 		if updates.Ret == -14 || updates.ErrCode == -14 {
-			config.Log("账号会话被暂停（ret=-14），1 小时后重试")
+			c.log("账号会话被暂停（ret=-14），1 小时后重试")
 			sleepCtx(ctx, time.Hour)
 			continue
 		}
 		if updates.Cursor != "" {
-			cursor = updates.Cursor
+			c.cursor = updates.Cursor
 		}
+		// Bot 自己的消息不是入站对话，直接丢弃（否则 "*" 放开时会自问自答打环）
 		for _, message := range updates.Messages {
-			if !bridgeAllowed(config, message) {
-				continue
+			if message.MessageType == messageTypeUser {
+				c.pending = append(c.pending, message)
 			}
-			text := message.Text()
-			if text == "" {
-				continue
-			}
-			config.Log("收到消息（%s）：%s", message.FromUserID, truncate(singleLine(text), 200))
-			waitGroup.Add(1)
-			semaphore <- struct{}{}
-			go func(message weixin.Message, text string) {
-				defer waitGroup.Done()
-				defer func() { <-semaphore }()
-				handleChatMessage(ctx, config, client, typing, message, text)
-			}(message, text)
 		}
+		if len(c.pending) == 0 {
+			continue
+		}
+		next := c.pending[0]
+		c.pending = c.pending[1:]
+		return c.inbound(next), nil
 	}
-	waitGroup.Wait()
-	return nil
+	return nil, ctx.Err()
 }
 
-// bridgeAllowed 判断消息是否需要处理：只处理用户私聊/群聊文本；白名单外的
-// 用户忽略并记录。
-func bridgeAllowed(config BridgeConfig, message weixin.Message) bool {
-	if message.MessageType != messageTypeUser {
-		return false
-	}
-	if strings.TrimSpace(message.FromUserID) == "" {
-		return false
-	}
-	if len(config.AdminUsers) > 0 {
-		if !slices.Contains(config.AdminUsers, message.FromUserID) {
-			config.Log("忽略白名单外用户 %s 的消息", message.FromUserID)
-			return false
-		}
-		return true
-	}
-	if config.LoginUserID != "" {
-		if message.FromUserID != config.LoginUserID {
-			config.Log("忽略非登录用户 %s 的消息", message.FromUserID)
-			return false
-		}
-		return true
-	}
-	config.Log("未配置 weixin.admin_users 且无 login_user_id，忽略所有对话消息")
-	return false
+// inbound 把微信消息包装成通用入站消息（回复绑定该消息的 context_token）。
+func (c *WeixinChannel) inbound(message weixin.Message) Inbound {
+	return &weixinInbound{channel: c, message: message}
 }
 
-func handleChatMessage(
-	ctx context.Context,
-	config BridgeConfig,
-	client *weixin.Client,
-	typing *typingCache,
-	message weixin.Message,
-	text string,
-) {
-	// 会话实体由映射层决定：通道（微信）+ 通道内用户标识 → conversation id。
-	// 换通道或把多个通道绑到同一会话时，只改映射表。
-	conversationID := message.FromUserID
-	if mapped, err := config.Chat.ConversationFor("weixin", message.FromUserID); err != nil {
-		config.Log("会话映射失败（%s），退回通道用户 id：%v", message.FromUserID, err)
-	} else if mapped != "" {
-		conversationID = mapped
-	}
-	if ticket, err := typing.ticket(ctx, client, message.FromUserID, message.ContextToken); err == nil && ticket != "" {
-		if err := client.SendTyping(ctx, message.FromUserID, ticket, weixin.TypingOn); err == nil {
-			defer func() { _ = client.SendTyping(ctx, message.FromUserID, ticket, weixin.TypingOff) }()
-		}
-	}
-	var reply string
-	if restartRequested(text) {
-		// 用户明确要求重新开始：只丢会话映射，工作目录保留（用户的文件与历史都还在）
-		if resetErr := config.Chat.Reset(conversationID); resetErr != nil {
-			config.Log("重置会话失败（%s）：%v", conversationID, resetErr)
-		}
-		workspace, _ := config.Chat.WorkspaceDir(conversationID)
-		config.Log("会话重置（%s）：用户要求重新开始，下一条消息新建 claude 会话", conversationID)
-		reply = "已开始新会话：下一条消息会新建 claude 会话（工作目录保留：" + workspace + "）"
-	} else {
-		var err error
-		reply, err = config.Chat.Handle(ctx, conversationID, text)
-		if err != nil {
-			config.Log("对话失败（%s）：%v", conversationID, err)
-			reply = "处理失败：" + err.Error()
-		}
-	}
-	if strings.TrimSpace(reply) == "" {
-		reply = "（无回复）"
-	}
-	config.Log("回复（%s，%d 字）：%s", conversationID, len([]rune(reply)), truncate(singleLine(reply), 200))
-	for _, chunk := range weixin.SplitText(reply, 1800) {
-		if err := client.SendText(ctx, message.FromUserID, message.ContextToken, chunk); err != nil {
-			config.Log("发送回复失败：%v", err)
-			return
-		}
-	}
+// weixinInbound 是 Inbound 的微信实现。
+type weixinInbound struct {
+	channel *WeixinChannel
+	message weixin.Message
 }
 
-// restartRequested 判断用户是否明确要求「重新开始」：命中则下一条消息新建会
-// 话（保留工作目录）。接受斜杠命令与直白说法，避免用户以为换了话题其实还在
-// 老会话里。
-func restartRequested(text string) bool {
-	switch strings.ToLower(strings.TrimSpace(text)) {
-	case "/new", "/reset", "/clear", "/restart", "重新开始", "新会话", "/新会话", "重置会话":
-		return true
+func (m *weixinInbound) Transport() string { return m.channel.Name() }
+
+func (m *weixinInbound) User() string { return m.message.FromUserID }
+
+func (m *weixinInbound) Text() string { return m.message.Text() }
+
+// Reply 发送一块回复。
+func (m *weixinInbound) Reply(ctx context.Context, text string) error {
+	return m.channel.client.SendText(ctx, m.message.FromUserID, m.message.ContextToken, text)
+}
+
+// Typing 显示/停止「正在输入」：票据走缓存（getConfig 不便宜），任何失败静默
+// （typing 状态尽力而为，不影响回复）。
+func (m *weixinInbound) Typing(ctx context.Context, on bool) {
+	if m.message.MessageType != messageTypeUser {
+		return
 	}
-	return false
+	ticket, err := m.channel.typing.ticket(ctx, m.channel.client, m.message.FromUserID, m.message.ContextToken)
+	if err != nil || ticket == "" {
+		return
+	}
+	status := weixin.TypingOff
+	if on {
+		status = weixin.TypingOn
+	}
+	_ = m.channel.client.SendTyping(ctx, m.message.FromUserID, ticket, status)
 }
 
 // typingCache 缓存每用户的 typing ticket（getConfig 不便宜）。
@@ -214,22 +201,4 @@ func (t *typingCache) ticket(ctx context.Context, client *weixin.Client, userID,
 		t.mu.Unlock()
 	}
 	return ticket, nil
-}
-
-func ctxDone(ctx context.Context) bool {
-	select {
-	case <-ctx.Done():
-		return true
-	default:
-		return false
-	}
-}
-
-func sleepCtx(ctx context.Context, duration time.Duration) {
-	timer := time.NewTimer(duration)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-	case <-timer.C:
-	}
 }

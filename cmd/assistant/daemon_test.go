@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"assistant/internal/daemon"
@@ -50,4 +51,71 @@ func TestStartDaemonServicesServesAPI(t *testing.T) {
 	if output := command.OutOrStdout().(*bytes.Buffer).String(); !strings.Contains(output, "状态 API 监听") {
 		t.Errorf("日志缺少 API 监听提示：%s", output)
 	}
+}
+
+// 多通道接线：agent 池解析、qq 通道启动、weixin 未配置的说明性跳过——一次
+// startDaemonServices 全部说清。
+func TestStartDaemonServicesStartsChannels(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	file := &instances.File{
+		Agents: map[string]instances.Agent{
+			"ops": {Model: "test-model"},
+		},
+		DefaultAgent: "ops",
+		QQ: &instances.QQ{
+			Enabled:    true,
+			AppID:      "app-1",
+			AppSecret:  "sec-1",
+			APIBaseURL: "http://127.0.0.1:1", // 不可达：通道保持重试，不影响启动
+			AdminUsers: []string{"*"},
+			Agent:      "ops",
+		},
+	}
+	if err := instances.Save(configPath, file); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	command := &cobra.Command{}
+	// 通道协程在 cancel 后仍可能补写日志：用并发安全的缓冲读
+	output := &safeBuffer{}
+	command.SetContext(ctx)
+	command.SetOut(output)
+	command.SetErr(&safeBuffer{})
+	store := daemon.NewStore("test-version")
+	if err := startDaemonServices(command, configPath, &dispatcherOptions{APIListen: "none"}, store, nil); err != nil {
+		t.Fatalf("startDaemonServices: %v", err)
+	}
+	cancel()
+
+	logs := output.String()
+	for _, want := range []string{
+		"agent 池 = ops（默认 ops",
+		"通道 qq 已启动",
+		"通道 weixin 未启用",
+	} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("日志缺少 %q：\n%s", want, logs)
+		}
+	}
+}
+
+// safeBuffer 是并发安全的字节缓冲（cancel 后的通道协程日志与测试读取并发）。
+type safeBuffer struct {
+	mu  sync.Mutex
+	raw bytes.Buffer
+}
+
+func (b *safeBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.raw.Write(p)
+}
+
+func (b *safeBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.raw.String()
 }

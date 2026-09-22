@@ -119,6 +119,11 @@ func validateConfigFile(path string, file *instances.File) []validateFinding {
 	if file.Weixin != nil {
 		addReference(file.Weixin.Provider, "weixin.provider")
 	}
+	for _, name := range file.AgentNames() {
+		if agent, ok := file.Agents[name]; ok {
+			addReference(agent.Provider, "agents."+name)
+		}
+	}
 	for _, name := range sortedKeys(referenced) {
 		source := referenced[name]
 		overrides, err := file.EffectiveOverrides(name)
@@ -206,6 +211,9 @@ func validateConfigFile(path string, file *instances.File) []validateFinding {
 		if weixin.Provider != "" {
 			detail += "；provider=" + weixin.Provider
 		}
+		if weixin.Agent != "" {
+			detail += "；agent=" + weixin.Agent
+		}
 		if strings.TrimSpace(weixin.BotToken) == "" {
 			findings = append(findings, validateFinding{"ERROR", "weixin",
 				detail + "；缺少 bot_token——先 assistant weixin login"})
@@ -214,6 +222,28 @@ func validateConfigFile(path string, file *instances.File) []validateFinding {
 				detail + "；enabled=false：assistant run 不会启动对话桥（--weixin 可强制开启）"})
 		} else {
 			findings = append(findings, validateFinding{"OK", "weixin", detail + "；凭据已写入"})
+		}
+	}
+
+	// QQ 通道
+	if file.QQ == nil {
+		findings = append(findings, validateFinding{"SKIP", "qq",
+			"未配置：QQ 对话桥不会启动（在 q.qq.com 开放平台创建机器人后把 app_id/app_secret 写入 qq 节）"})
+	} else {
+		qqConfig := file.QQ
+		detail := "enabled=" + fmt.Sprintf("%t", qqConfig.Enabled)
+		if qqConfig.Agent != "" {
+			detail += "；agent=" + qqConfig.Agent
+		}
+		switch {
+		case qqConfig.AppID == "" || strings.TrimSpace(qqConfig.AppSecret) == "":
+			findings = append(findings, validateFinding{"ERROR", "qq",
+				detail + "；缺少 app_id/app_secret——在 q.qq.com 开放平台创建机器人后填入"})
+		case !qqConfig.Enabled:
+			findings = append(findings, validateFinding{"WARN", "qq",
+				detail + "；enabled=false：assistant run 不会启动 QQ 通道（--qq 可强制开启）"})
+		default:
+			findings = append(findings, validateFinding{"OK", "qq", detail + "；凭据已写入"})
 		}
 	}
 

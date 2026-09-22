@@ -174,8 +174,9 @@ func runWeixinLogin(command *cobra.Command, configPath string, options *weixinLo
 }
 
 // startDaemonServices 启动 daemon 模式的服务面：只读状态 API（默认
-// 127.0.0.1:8770）与可选的微信对话桥。API 先就绪——对话会话的 daemon MCP
-// 依赖端点文件自举发现。
+// 127.0.0.1:8770）与启用的对话通道（weixin/qq）。API 先就绪——对话会话的
+// daemon MCP 依赖端点文件自举发现。通道共享一个 Chat 实例：multi-user 由
+// 「通道 + 用户 → 会话」映射隔离，multi-agent 由命名 agent 池提供。
 func startDaemonServices(
 	command *cobra.Command,
 	configPath string,
@@ -198,49 +199,41 @@ func startDaemonServices(
 	if err != nil {
 		return err
 	}
-	if file == nil || file.Weixin == nil {
-		if options.Weixin {
-			return fmt.Errorf("--weixin 需要 config.json 的 weixin 配置：先 assistant weixin login")
+	if file == nil {
+		if options.Weixin || options.QQ {
+			return fmt.Errorf("--weixin/--qq 需要 config.json 配置：先 assistant config init（或 weixin login）")
 		}
-		// 静默跳过是最难排查的一种：明确说清桥没起以及为什么
-		logf("微信桥未启用：config.json 里没有 weixin 配置（需要时先 `assistant weixin login` 扫码）")
+		// 静默跳过是最难排查的一种：明确说清通道没起以及为什么
+		logf("对话通道未启用：config.json 里没有 weixin/qq 配置")
 		return nil
 	}
+
+	// agent 池：每个 agent 独立 provider 链与执行参数；启动期解析（配置问题
+	// 立刻报错），凭据自检逐 provider 实测（失败只告警，不拦启动）
+	agents, err := buildAgentRuntimes(file, options)
+	if err != nil {
+		return err
+	}
+
+	// 内置缺省 agent 的取值沿用 weixin 节的对话参数（weixin.provider > 全局默认），
+	// 未配置 agent 池时行为与旧版本一致
 	weixinConfig := file.Weixin
-	if !options.Weixin && !weixinConfig.Enabled {
-		logf("微信桥未启用：weixin.enabled=false（`assistant weixin login` 会置为 true；--weixin 可强制开启）")
-		return nil
-	}
-	if strings.TrimSpace(weixinConfig.BotToken) == "" {
-		return fmt.Errorf("weixin.bot_token 未配置：先 assistant weixin login")
-	}
-	// 对话会话与评审会话共用同一 provider 体系：weixin.provider > 全局默认；
-	// 全局 optimizations 打底，provider 覆盖其上
 	providerName := file.WeixinProviderName()
 	providerOverrides, err := file.EffectiveOverrides(providerName)
 	if err != nil {
-		return fmt.Errorf("微信桥 provider %s: %w", providerName, err)
+		return fmt.Errorf("对话会话 provider %s: %w", providerName, err)
 	}
-	if env, settings, mcp := providerOverrides.Counts(); env+settings+mcp > 0 {
-		name := providerName
-		if name == "" {
-			name = "内置缺省"
-		} else if provider.HasPreset(name) {
-			name += " 内置预设"
-		}
-		globalEnv, globalSettings, globalMCP := file.Optimizations.Overrides().Counts()
-		global := ""
-		if globalEnv+globalSettings+globalMCP > 0 {
-			global = fmt.Sprintf("（含全局优化 env %d 项，settings %d 项，mcp %d 个）",
-				globalEnv, globalSettings, globalMCP)
-		}
-		logf("微信桥使用 provider %s（env %d 项，settings %d 项，mcp %d 个）%s", name, env, settings, mcp, global)
+	claudeBin := firstNonEmpty(options.ClaudeBin, "claude")
+	var model string
+	var timeout time.Duration
+	if weixinConfig != nil {
+		claudeBin = firstNonEmpty(weixinConfig.ClaudeBin, options.ClaudeBin, "claude")
+		model = weixinConfig.Model
+		timeout = time.Duration(weixinConfig.SessionTimeoutMS) * time.Millisecond
 	}
-	timeout := time.Duration(weixinConfig.SessionTimeoutMS) * time.Millisecond
-	claudeBin := firstNonEmpty(weixinConfig.ClaudeBin, options.ClaudeBin, "claude")
-	// 对话会话走 claude 的最小模式（--bare）：上下文本来就全由显式参数给出，
-	// 最小模式顺带甩掉 hooks、插件同步、CLAUDE.md 自动发现与记忆。仅在 claude
-	// 真的支持该参数时打开，不支持就退回普通模式，不让整条桥起不来。
+	// 对话会话走 claude 的最小模式（--bare）：上下文本就全由显式参数给出，最小
+	// 模式顺带甩掉 hooks、插件同步、CLAUDE.md 自动发现与记忆。仅在 claude 真的
+	// 支持该参数时打开，不支持就退回普通模式，不让对话起不来。
 	bare := claudecfg.SupportsBare(claudeBin)
 	remote := sessionstore.ResolveRemote(filepath.Dir(configPath))
 	chat, err := daemon.NewChat(daemon.ChatConfig{
@@ -248,49 +241,166 @@ func startDaemonServices(
 		Bare:         bare,
 		Debug:        options.Debug,
 		Remote:       remote,
-		Model:        firstNonEmpty(weixinConfig.Model, options.Model),
+		Model:        firstNonEmpty(model, options.Model),
 		Provider:     providerOverrides,
 		ProviderName: providerName,
 		Timeout:      timeout,
+		Agents:       agents,
+		DefaultAgent: file.DefaultAgent,
 		Log:          logf,
 	})
 	if err != nil {
 		return err
 	}
-	// 对话会话的前提同样一次说清：claude 与最小模式是否生效、凭据从哪来
+	logChatSummary(logf, file, chat, claudeBin, bare, remote)
+	checkChatCredentials(command, file, providerName, providerOverrides, agents, logf)
+
+	// 通道：weixin / qq 各按「--旗标 强制 或 config enabled」启用
+	if err := startWeixinChannel(command, file, weixinConfig, options, chat, logf); err != nil {
+		return err
+	}
+	if err := startQQChannel(command, file, options, chat, logf); err != nil {
+		return err
+	}
+	return nil
+}
+
+// buildAgentRuntimes 把 config.json 的 agents 定义解析成生效运行时：provider
+// 链解析与 bare 探测逐 agent 进行。
+func buildAgentRuntimes(file *instances.File, options *dispatcherOptions) (map[string]daemon.AgentRuntime, error) {
+	agents := make(map[string]daemon.AgentRuntime, len(file.Agents))
+	for _, name := range file.AgentNames() {
+		definition := file.Agents[name]
+		providerName := file.AgentProviderName(name)
+		overrides, err := file.EffectiveOverrides(providerName)
+		if err != nil {
+			return nil, fmt.Errorf("agents[%s] provider %s: %w", name, providerName, err)
+		}
+		claudeBin := firstNonEmpty(definition.ClaudeBin, options.ClaudeBin, "claude")
+		agents[name] = daemon.AgentRuntime{
+			Name:         name,
+			Provider:     overrides,
+			ProviderName: providerName,
+			Model:        definition.Model,
+			SystemPrompt: definition.SystemPrompt,
+			ClaudeBin:    claudeBin,
+			Bare:         claudecfg.SupportsBare(claudeBin),
+			Timeout:      time.Duration(definition.SessionTimeoutMS) * time.Millisecond,
+		}
+	}
+	return agents, nil
+}
+
+// logChatSummary 打印对话会话的前提：claude 与最小模式、目录布局、agent 池、
+// 记录库。一次说清，别让「为什么没生效」靠猜。
+func logChatSummary(
+	logf func(string, ...any),
+	file *instances.File,
+	chat *daemon.Chat,
+	claudeBin string,
+	bare bool,
+	remote sessionstore.RemoteConfig,
+) {
 	bareLabel := "关（claude 不支持 --bare 或未探测到）"
-	if chat.Bare() {
+	if bare {
 		bareLabel = "开（不读 hooks/插件/CLAUDE.md，只用显式 settings 与自举 MCP）"
 	}
-	logf("微信桥对话会话：")
+	logf("对话会话：")
 	logf("  claude   = %s", claudeBin)
 	logf("  bare     = %s", bareLabel)
 	logf("  配置根   = %s", chat.SessionDir())
-	logf("  会话目录 = %s（每个微信会话一个稳定工作目录 <chat-xxxxxxxx>，含 session.json）", chat.StateDir())
+	logf("  会话目录 = %s（每个会话一个稳定工作目录 <chat-xxxxxxxx>，含 session.json）", chat.StateDir())
 	logf("  续聊     = cd <会话目录> && claude --continue")
+	agentNames := file.AgentNames()
+	if len(agentNames) == 0 {
+		logf("  agent 池 = 未配置（config.json 的 agents 节；未配置时所有会话用内置缺省）")
+	} else {
+		defaultAgent := file.DefaultAgent
+		if defaultAgent == "" {
+			defaultAgent = "内置缺省"
+		}
+		logf("  agent 池 = %s（默认 %s；用户聊天里 /agent 可切换）", strings.Join(agentNames, "、"), defaultAgent)
+	}
 	if remote.URL != "" {
 		logf("  记录库   = %s（每轮结束归档该会话，可用 sessions MCP 回查）", remote.URL)
 	} else {
 		logf("  记录库   = 未配置（assistant serve + session push 可远端留存记录）")
 	}
+}
+
+// checkChatCredentials 对内置缺省与每个 agent 的 provider 做最小请求实测：
+// 密钥/端点不配套会让每条消息静默重试几分钟，启动时就说清楚。失败只告警。
+func checkChatCredentials(
+	command *cobra.Command,
+	file *instances.File,
+	providerName string,
+	providerOverrides claudecfg.Overrides,
+	agents map[string]daemon.AgentRuntime,
+	logf func(string, ...any),
+) {
 	warnf := func(format string, arguments ...any) {
 		fmt.Fprintf(command.ErrOrStderr(), "警告："+format+"\n", arguments...)
 	}
-	if source := claudecfg.CredentialSource(providerOverrides); source == "" {
-		warnf("微信桥 provider 没有可用的 AI 凭据：对话会认证失败；%s", claudecfg.MissingCredentialHint)
-	} else {
-		// 最小请求实测：密钥/端点不配套（如国内 MiniMax 账号配了国际端点）会
-		// 让每条微信消息静默重试几分钟，这里启动就说清楚
-		check := provider.CheckCredential(command.Context(), providerOverrides)
-		if check.OK() {
-			logf("微信桥 AI 凭据：来源 = %s", source)
-			logf("  自检 = %s", check.Describe())
-		} else {
-			warnf("微信桥凭据自检失败：%s", check.Describe())
-			warnf("%s", provider.CredentialHint)
+	checked := map[string]bool{}
+	verify := func(label, name string, overrides claudecfg.Overrides) {
+		if name == "" || checked[name] {
+			return
 		}
+		checked[name] = true
+		source := claudecfg.CredentialSource(overrides)
+		if source == "" {
+			warnf("%s 没有可用的 AI 凭据：对话会认证失败；%s", label, claudecfg.MissingCredentialHint)
+			return
+		}
+		check := provider.CheckCredential(command.Context(), overrides)
+		if check.OK() {
+			logf("%s AI 凭据：provider = %s，来源 = %s，自检 = %s", label, displayName(name, file), source, check.Describe())
+			return
+		}
+		warnf("%s 凭据自检失败：%s", label, check.Describe())
+		warnf("%s", provider.CredentialHint)
 	}
-	bridgeConfig := daemon.BridgeConfig{
+	verify("内置缺省", providerName, providerOverrides)
+	for _, agent := range agents {
+		verify("agent "+agent.Name, agent.ProviderName, agent.Provider)
+	}
+}
+
+// displayName 是 provider 名的日志展示（内置预设加标注，缺省名可读化）。
+func displayName(name string, file *instances.File) string {
+	if name == "" {
+		return "内置缺省"
+	}
+	if provider.HasPreset(name) {
+		return name + " 内置预设"
+	}
+	return name
+}
+
+// startWeixinChannel 按配置与 --weixin 旗标启动微信通道。
+func startWeixinChannel(
+	command *cobra.Command,
+	file *instances.File,
+	weixinConfig *instances.Weixin,
+	options *dispatcherOptions,
+	chat *daemon.Chat,
+	logf func(string, ...any),
+) error {
+	if weixinConfig == nil {
+		if options.Weixin {
+			return fmt.Errorf("--weixin 需要 config.json 的 weixin 配置：先 assistant weixin login")
+		}
+		logf("通道 weixin 未启用：config.json 里没有 weixin 配置（需要时先 `assistant weixin login` 扫码）")
+		return nil
+	}
+	if !options.Weixin && !weixinConfig.Enabled {
+		logf("通道 weixin 未启用：weixin.enabled=false（`assistant weixin login` 会置为 true；--weixin 可强制开启）")
+		return nil
+	}
+	if strings.TrimSpace(weixinConfig.BotToken) == "" {
+		return fmt.Errorf("weixin.bot_token 未配置：先 assistant weixin login")
+	}
+	channel := daemon.NewWeixinChannel(daemon.WeixinChannelConfig{
 		Weixin: weixin.Config{
 			BaseURL:        weixinConfig.BaseURL,
 			BotToken:       weixinConfig.BotToken,
@@ -300,14 +410,57 @@ func startDaemonServices(
 		},
 		AdminUsers:  weixinConfig.AdminUsers,
 		LoginUserID: weixinConfig.LoginUserID,
-		Chat:        chat,
-		Log:         logf,
-		Debug:       options.Debug,
+	}, logf)
+	channelConfig := daemon.ChannelConfig{
+		Chat:         chat,
+		DefaultAgent: weixinConfig.Agent,
+		Log:          logf,
+		Debug:        options.Debug,
 	}
 	go func() {
-		if err := daemon.RunBridge(command.Context(), bridgeConfig); err != nil {
-			logf("微信桥退出：%v", err)
+		if err := daemon.RunChannel(command.Context(), channel, channelConfig); err != nil {
+			logf("通道 weixin 退出：%v", err)
 		}
 	}()
+	logf("通道 weixin 已启动（白名单 %d 人）", len(weixinConfig.AdminUsers))
+	return nil
+}
+
+// startQQChannel 按配置与 --qq 旗标启动 QQ 通道。
+func startQQChannel(
+	command *cobra.Command,
+	file *instances.File,
+	options *dispatcherOptions,
+	chat *daemon.Chat,
+	logf func(string, ...any),
+) error {
+	qqConfig := file.QQ
+	if qqConfig == nil {
+		if options.QQ {
+			return fmt.Errorf("--qq 需要 config.json 的 qq 配置：把 q.qq.com 开放平台的 app_id/app_secret 写入 qq 节")
+		}
+		logf("通道 qq 未启用：config.json 里没有 qq 配置（需要时在 q.qq.com 创建机器人后填入）")
+		return nil
+	}
+	if !options.QQ && !qqConfig.Enabled {
+		logf("通道 qq 未启用：qq.enabled=false（--qq 可强制开启）")
+		return nil
+	}
+	if qqConfig.AppID == "" || qqConfig.AppSecret == "" {
+		return fmt.Errorf("qq.app_id/qq.app_secret 未配置：在 q.qq.com 开放平台创建机器人后填入")
+	}
+	channel := daemon.NewQQChannel(*qqConfig, options.Debug, logf)
+	channelConfig := daemon.ChannelConfig{
+		Chat:         chat,
+		DefaultAgent: qqConfig.Agent,
+		Log:          logf,
+		Debug:        options.Debug,
+	}
+	go func() {
+		if err := daemon.RunChannel(command.Context(), channel, channelConfig); err != nil {
+			logf("通道 qq 退出：%v", err)
+		}
+	}()
+	logf("通道 qq 已启动（白名单 %d 人，api=%s）", len(qqConfig.AdminUsers), qqConfig.APIBaseURL)
 	return nil
 }

@@ -3,7 +3,7 @@
 Gitea 上的例行事务与评审自动化，两块能力：
 
 - **仓库机器人**：`assistant sync` / `automerge` / `check` 在 Gitea Actions 里按事件与定时运行（标签收敛、评审状态同步、机械合并、待办查询）；
-- **评审调度引擎**：`assistant run` 常驻宿主机，检测待办 → 为每个待办拉起 headless `claude` 会话 → 验证结论 → 清理，另带只读状态 API 与可选的微信对话桥。
+- **评审调度引擎**：`assistant run` 常驻宿主机，检测待办 → 为每个待办拉起 headless `claude` 会话 → 验证结论 → 清理，另带只读状态 API 与可选的对话服务端（multi-user / multi-session / multi-agent，通道可插拔：微信、QQ）。
 
 `claude` CLI 是外部运行时依赖（会话在容器或宿主机里跑），其余能力都在本二进制里。
 
@@ -31,9 +31,9 @@ Gitea 上的例行事务与评审自动化，两块能力：
 | `<配置目录>/config.schema.json` | 配置的 JSON Schema | `config new` / `config init` | 编辑器补全用 |
 | `<配置目录>/claude/` | **会话文本记录 + claude 全局配置** | claude 会话 | `CLAUDE_CONFIG_DIR` 指向这里 |
 | `<配置目录>/claude/projects/<项目>/<session-id>.jsonl` | 一次会话的完整事件流（一行一事件） | claude | 保留期 `cleanupPeriodDays=3650` |
-| `<配置目录>/chat/sessions.json` | 微信会话 → claude 会话 id 映射 | 对话桥 | 跨重启复用同一会话 |
-| `<配置目录>/chat/<chat-8位哈希>/` | 该微信会话的工作目录：`session.json`（元数据）、`settings.json`、`mcp.json`、会话产物 | 对话桥 | 同一微信会话恒用同一目录 |
-| `<配置目录>/chat/conversations.json` | **会话实体映射表**：通道绑定（weixin:用户…）→ conversation id、该会话下的 claude 会话 | 对话桥 | 换通道/并会话只改这张表 |
+| `<配置目录>/chat/sessions.json` | 对话会话 → claude 会话 id 映射 | 对话通道 | 跨重启复用同一会话 |
+| `<配置目录>/chat/<chat-8位哈希>/` | 该对话会话的工作目录：`session.json`（元数据）、`settings.json`、`mcp.json`、会话产物 | 对话通道 | 同一会话恒用同一目录 |
+| `<配置目录>/chat/conversations.json` | **会话实体映射表**：通道绑定（weixin:用户…、qq:openid…）→ conversation id、该会话下的 claude 会话与 /agent 选择 | 对话通道 | 换通道/并会话只改这张表 |
 | `<配置目录>/serve.json` | 记录库服务端端点与令牌 | `serve` 启动时写、退出删 | 0600，同机客户端自举 |
 | `<配置目录>/sessions-remote.json` | 远端记录库地址与令牌（服务端在别的机器时手写） | 你 | 0600 |
 | `<配置目录>/session-push.json` | 增量推送状态（大小/修改时间） | `session push` | 可删（会重推一次） |
@@ -44,13 +44,13 @@ Gitea 上的例行事务与评审自动化，两块能力：
 | `<数据目录>/state/.../dispatcher.lock` | 单飞锁 | 调度器 | 运行期 |
 | `/tmp/agent-dispatcher/<host>-<owner>-<repo>/worktrees/` | PR/Issue 的 worktree | 调度器 | 会话结束即删 |
 
-要点：**文本记录与微信工作目录都在配置目录里**（随容器挂载、随备份一起走）；受管克隆与待办日志在数据目录里（克隆可重建，日志值得留）。
+要点：**文本记录与对话工作目录都在配置目录里**（随容器挂载、随备份一起走）；受管克隆与待办日志在数据目录里（克隆可重建，日志值得留）。
 
 ## 会话模型
 
-| | 评审 / 分诊会话 | 微信对话会话 |
+| | 评审 / 分诊会话 | 对话会话（微信 / QQ） |
 | --- | --- | --- |
-| 会话标识 | 由「站点+仓库+待办+锚点」派生 | 通道绑定（如 `weixin:用户`）经映射表落到**会话实体** `conversation`（`c-xxxxxxxx`）：工作目录与记录都跟着会话实体走，换通道或把两个通道并到同一会话只改映射表 |
+| 会话标识 | 由「站点+仓库+待办+锚点」派生 | 通道绑定（如 `weixin:用户`、`qq:openid`）经映射表落到**会话实体** `conversation`（`c-xxxxxxxx`）：工作目录与记录都跟着会话实体走，换通道或把两个通道并到同一会话只改映射表 |
 | 工作目录 | `/tmp` 下的 worktree（会话结束删除）；基线 `.claude/` 覆盖进 worktree，PR 自带的那份先删掉 | `<配置目录>/chat/<chat-8位哈希>/`（长期保留） |
 | 会话 id | 由「站点+仓库+待办+锚点」确定性派生，同一待办重试 `--resume` 续接 | 首次生成 UUID 存 `sessions.json`；`/new`（或 `/reset`、`重新开始`）显式重开 |
 | 记录位置 | `<配置目录>/claude/projects/assistant-<host>-<repo>/<session-id>.jsonl` | `<配置目录>/claude/projects/<由工作目录派生>/<session-id>.jsonl` |
@@ -61,15 +61,33 @@ Gitea 上的例行事务与评审自动化，两块能力：
 
 ## 配置
 
-- `config.json`：`instances[]`（host / reviewer / merger / repos）、`providers`（AI 供应商：`api_key` 简写 + `env`/`settings`/`mcp` 覆盖）、`default_provider`、`optimizations`、`weixin`。示例见 `config.example.json`，供应商预设与各家的坑见 `providers.md`。
+- `config.json`：`instances[]`（host / reviewer / merger / repos）、`providers`（AI 供应商：`api_key` 简写 + `env`/`settings`/`mcp` 覆盖）、`default_provider`、`optimizations`、对话服务端（`weixin` / `qq` 通道 + `agents` 命名 agent 池 + `default_agent`）。示例见 `config.example.json`，供应商预设与各家的坑见 `providers.md`。
 - `credentials.json`：`login` 派生该账号的 `mcp`（管理员另有 `admin`），`setup` 为 `ai`/`merge` 建机器人账号并派生 `review`/`merge`。令牌名 `assistant-<purpose>-<host>-<账号>`，重复登录复用，`--rotate` 轮换。
 - 校验：`assistant validate`（只读、不联网；会指出"定义了却没被引用的 provider"这类失误）与 `assistant doctor`（本地脚手架 + 服务端分支保护/标签/协作者/secret）。
-- 微信桥要显式开启：`assistant weixin login` 会把 `weixin.enabled=true` 与凭据写进 `config.json`。
+- 微信桥要显式开启：`assistant weixin login` 会把 `weixin.enabled=true` 与凭据写进 `config.json`（`assistant qq status` 可显示 QQ 通道状态并实测凭据）。
+
+## 对话服务端（multi-user / multi-session / multi-agent）
+
+`assistant run` 就是聊天服务端：并行承载多个消息通道，每个（通道, 用户）映射到独立会话，会话之间并发、同会话串行，互不串扰。
+
+- **通道可插拔**：内置 `weixin`（openclaw ilink 长轮询）与 `qq`（QQ 开放平台官方 Bot API v2：WebSocket 网关收事件 + REST 被动回复，出站连接无需公网 IP）。`weixin.enabled` / `qq.enabled` 或 `run --weixin` / `--qq` 开启。
+- **命名 agent 池（multi-agent）**：`agents` 节定义多个 agent（各自 `provider`/`model`/`system_prompt`/`claude_bin`/`session_timeout_ms`），`default_agent` 兜底；每个通道可用 `weixin.agent` / `qq.agent` 指定默认。用户在聊天里：
+  - `/agent` 列出可用 agent 与当前生效；`/agent <名>` 切换（按会话记忆，下一条消息生效，可随时切回）；
+  - `/new`（或 `/reset`、`重新开始`）重开 claude 会话（工作目录保留）；`/help` 看命令。
+- **准入（multi-user）**：每通道 `admin_users` 白名单；含 `"*"` 放开所有人（公网平台慎用）；weixin 空白名单时只允许扫码登录者，qq 空白名单时全拒。群聊事件平台只在 @ 机器人时派发。
+
+QQ 通道接入步骤：
+
+1. 在 [q.qq.com](https://q.qq.com) QQ 开放平台创建机器人（群/私聊场景），拿到 AppID/AppSecret，按平台要求配置 IP 白名单；
+2. 写入 `config.json`：`"qq": {"enabled": true, "app_id": "...", "app_secret": "...", "admin_users": ["<用户openid>"]}`（openid 在机器人收到第一条消息的日志里可见）；
+3. `assistant qq status` 自检凭据，`assistant run` 启动后 QQ 里 @ 机器人即可对话（回复是被动消息：机器人只能回复收到的消息，15 分钟窗口内）。
+
+> 限制：QQ 平台不允许主动发消息，对话必须由用户先开口；机器人回复为纯文本（富媒体留待后续）。
 
 ## 运行与观测
 
 ```bash
-make compose-up                                            # 构建宿主二进制 + 重建容器（daemon + 状态 API + 微信桥）
+make compose-up                                            # 构建宿主二进制 + 重建容器（daemon + 状态 API + 对话通道）
 docker compose exec -it assistant assistant weixin login    # 首次扫码（-it 必需）
 docker compose logs -f                                      # compose 默认带 --debug
 ```

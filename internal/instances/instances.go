@@ -36,6 +36,15 @@ type File struct {
 	// Weixin 是微信（openclaw ilink）对话桥配置：可选；未配置时 daemon 不启动
 	// 对话能力。
 	Weixin *Weixin `json:"weixin,omitempty"`
+	// QQ 是 QQ 开放平台机器人（官方 Bot API v2，WebSocket 网关）对话桥配置：
+	// 可选；未配置时 daemon 不启动 QQ 通道。
+	QQ *QQ `json:"qq,omitempty"`
+	// Agents 是命名 agent 池：每个 agent 一份独立的 provider/model/系统提示词/
+	// 执行参数，对话服务端按「会话 /agent 选择 > 通道默认 > default_agent」解析。
+	Agents map[string]Agent `json:"agents,omitempty"`
+	// DefaultAgent 是通道与会话都未指定时的兜底 agent 名；留空表示内置缺省
+	// （weixin 节的对话参数 + default_provider）。
+	DefaultAgent string `json:"default_agent,omitempty"`
 	// Providers 是多供应商配置（名字 → 定义）：不同供应商的 env/settings/mcp
 	// 格式各异，框架原样透传合并进运行时会话配置。主要手写维护；未配置时行为
 	// 与内置缺省（Anthropic 官方）一致。
@@ -47,6 +56,22 @@ type File struct {
 	// 会话生效，选中 provider 的同名覆盖其上；适合放跨供应商通用的调优
 	// （时长、上下文窗口、遥测开关等）。
 	Optimizations Provider `json:"optimizations,omitempty"`
+}
+
+// Agent 是命名 agent 池中的一员：对话服务端（multi-agent）的一个可选人格。
+// 只配 provider/model 时等价于给不同用户群不同的模型；配 system_prompt 时
+// 整体替换对话会话的基础系统提示词。
+type Agent struct {
+	// Provider 是该 agent 使用的 provider 名（缺省回退 default_provider）
+	Provider string `json:"provider,omitempty"`
+	// Model 可选模型覆盖（claude --model）
+	Model string `json:"model,omitempty"`
+	// SystemPrompt 非空时整体替换对话会话的基础系统提示词
+	SystemPrompt string `json:"system_prompt,omitempty"`
+	// ClaudeBin 是该 agent 使用的 claude 可执行文件（缺省 PATH 上的 claude）
+	ClaudeBin string `json:"claude_bin,omitempty"`
+	// SessionTimeoutMS 是该 agent 的单轮对话超时（缺省 180000 = 3 分钟）
+	SessionTimeoutMS int64 `json:"session_timeout_ms,omitzero"`
 }
 
 // Weixin 是微信对话桥（Tencent/openclaw-weixin 兼容 ilink 协议）的配置。
@@ -66,15 +91,46 @@ type Weixin struct {
 	ChannelVersion string `json:"channel_version,omitempty"`
 	// RouteTag 是可选的部署路由标签（SKRouteTag）
 	RouteTag string `json:"route_tag,omitempty"`
-	// AdminUsers 是允许对话的用户 ID 白名单；空表示只允许扫码登录的用户
+	// AdminUsers 是允许对话的用户 ID 白名单；空表示只允许扫码登录的用户；
+	// 含 "*" 表示放开所有用户（公网平台慎用）
 	AdminUsers []string `json:"admin_users,omitempty"`
+	// Agent 是该通道对话的默认 agent 名（缺省回退 default_agent）
+	Agent string `json:"agent,omitempty"`
 	// Provider 覆盖对话会话使用的 provider 名（缺省回退全局 default_provider）
 	Provider string `json:"provider,omitempty"`
-	// ClaudeBin / Model / SessionTimeout 是对话会话的执行参数（可选覆盖）
+	// ClaudeBin / Model / SessionTimeout 是对话会话的执行参数（可选覆盖）。
+	// 配置了 agent 池时这些字段仍是「内置缺省 agent」的取值。
 	ClaudeBin string `json:"claude_bin,omitempty"`
 	Model     string `json:"model,omitempty"`
 	// SessionTimeoutMS 是单轮对话的 claude 超时（缺省 180000 = 3 分钟）
-	SessionTimeoutMS int64 `json:"session_timeout_ms,omitempty"`
+	SessionTimeoutMS int64 `json:"session_timeout_ms,omitzero"`
+}
+
+// DefaultQQAPIBaseURL 是 QQ 开放平台机器人 API（v2）的默认地址。
+const DefaultQQAPIBaseURL = "https://api.sgroup.qq.com"
+
+// QQ 是 QQ 开放平台机器人（q.qq.com，官方 Bot API v2）的配置：WebSocket 网关
+// 收事件、REST 发消息，凭据是开放平台控制台的 AppID/AppSecret。收发均为被动
+// 回复（带 msg_id，15 分钟窗口）。
+type QQ struct {
+	// Enabled 为 true 时 assistant run 启动 QQ 通道（--qq 亦可强制开启）
+	Enabled bool `json:"enabled,omitzero"`
+	// AppID 是开放平台机器人的 AppID
+	AppID string `json:"app_id,omitempty"`
+	// AppSecret 是开放平台机器人的 AppSecret（与 bot_token 同级敏感，config.json
+	// 为 0600）
+	AppSecret string `json:"app_secret,omitempty"`
+	// APIBaseURL 是 Bot API 根地址（缺省官方地址）
+	APIBaseURL string `json:"api_base_url,omitempty"`
+	// Sandbox 预留：沙箱环境开关（当前版本仅透传日志标记）
+	Sandbox bool `json:"sandbox,omitzero"`
+	// AdminUsers 是允许对话的用户 openid 白名单；空时拒绝所有用户；含 "*"
+	// 表示放开所有用户（群聊场景慎用，任何 @ 机器人的人都会消耗 AI 额度）
+	AdminUsers []string `json:"admin_users,omitempty"`
+	// Agent 是该通道对话的默认 agent 名（缺省回退 default_agent）
+	Agent string `json:"agent,omitempty"`
+	// SplitLimit 是回复切块的 rune 上限（缺省 1000；平台对 content 长度有限制）
+	SplitLimit int `json:"split_limit,omitzero"`
 }
 
 // Instance 是一台 Gitea 站点及其仓库。
@@ -371,6 +427,7 @@ func SaveBytes(path string, data []byte) error {
 func (f *File) Normalize() {
 	f.Schema = strings.TrimSpace(f.Schema)
 	f.DefaultProvider = strings.TrimSpace(f.DefaultProvider)
+	f.DefaultAgent = strings.TrimSpace(f.DefaultAgent)
 	f.Optimizations = f.Optimizations.normalized()
 	if len(f.Providers) > 0 {
 		normalized := make(map[string]Provider, len(f.Providers))
@@ -379,10 +436,18 @@ func (f *File) Normalize() {
 		}
 		f.Providers = normalized
 	}
+	if len(f.Agents) > 0 {
+		normalized := make(map[string]Agent, len(f.Agents))
+		for name, agent := range f.Agents {
+			normalized[strings.TrimSpace(name)] = agent.normalized()
+		}
+		f.Agents = normalized
+	}
 	for index := range f.Instances {
 		f.Instances[index].Normalize()
 	}
 	f.Weixin.Normalize()
+	f.QQ.Normalize()
 }
 
 // normalized 清理 provider 内的空白并去掉空 env 键，幂等。
@@ -436,9 +501,35 @@ func (w *Weixin) Normalize() {
 	w.Provider = strings.TrimSpace(w.Provider)
 	w.ClaudeBin = strings.TrimSpace(w.ClaudeBin)
 	w.Model = strings.TrimSpace(w.Model)
+	w.Agent = strings.TrimSpace(w.Agent)
 	for index, user := range w.AdminUsers {
 		w.AdminUsers[index] = strings.TrimSpace(user)
 	}
+}
+
+// Normalize 填充 QQ 通道默认值并清理空白，幂等。
+func (q *QQ) Normalize() {
+	if q == nil {
+		return
+	}
+	q.APIBaseURL = strings.TrimRight(strings.TrimSpace(q.APIBaseURL), "/")
+	if q.APIBaseURL == "" {
+		q.APIBaseURL = DefaultQQAPIBaseURL
+	}
+	q.AppID = strings.TrimSpace(q.AppID)
+	q.AppSecret = strings.TrimSpace(q.AppSecret)
+	q.Agent = strings.TrimSpace(q.Agent)
+	for index, user := range q.AdminUsers {
+		q.AdminUsers[index] = strings.TrimSpace(user)
+	}
+}
+
+// normalized 清理 agent 定义内的空白，幂等。
+func (a Agent) normalized() Agent {
+	a.Provider = strings.TrimSpace(a.Provider)
+	a.Model = strings.TrimSpace(a.Model)
+	a.ClaudeBin = strings.TrimSpace(a.ClaudeBin)
+	return a
 }
 
 // Normalize 填充 instance 内的默认值并清理空白，幂等。
@@ -460,15 +551,21 @@ func (i *Instance) Normalize() {
 
 // Validate 校验 host、账号与仓库。必须在 Normalize 之后调用。
 func (f *File) Validate() error {
-	if len(f.Instances) == 0 && f.Weixin == nil {
+	if len(f.Instances) == 0 && f.Weixin == nil && f.QQ == nil {
 		return fmt.Errorf("instances 不能为空")
 	}
 	seen := make(map[string]int, len(f.Instances))
 	if err := f.validateProviders(); err != nil {
 		return err
 	}
+	if err := f.validateAgents(); err != nil {
+		return err
+	}
 	if err := f.Weixin.Validate(); err != nil {
 		return fmt.Errorf("weixin: %w", err)
+	}
+	if err := f.QQ.Validate(); err != nil {
+		return fmt.Errorf("qq: %w", err)
 	}
 	for index := range f.Instances {
 		if err := f.Instances[index].Validate(); err != nil {
@@ -480,6 +577,63 @@ func (f *File) Validate() error {
 		seen[f.Instances[index].Host] = index
 	}
 	return nil
+}
+
+// validateAgents 校验 agent 池与所有 agent 引用（default_agent、weixin.agent、
+// qq.agent）：引用不存在的名字视为配置错误，避免对话轮才静默回退。
+func (f *File) validateAgents() error {
+	for name, agent := range f.Agents {
+		if name == "" {
+			return fmt.Errorf("agents 含空名字")
+		}
+		if agent.Provider == "" {
+			continue
+		}
+		user, ok := f.LookupProvider(agent.Provider)
+		if !ok {
+			return fmt.Errorf("agents[%s] 引用的 provider %q 未在 providers 中定义（可用：%s）",
+				name, agent.Provider, strings.Join(f.providerNames(), "、"))
+		}
+		// 预设展开（令牌简写、必须的 base_url 等）在配置校验期就报错，
+		// 而不是等会话启动
+		if _, err := provider.Resolve(agent.Provider, f.Optimizations.Overrides(), user.Overrides(), user.Token()); err != nil {
+			return fmt.Errorf("agents[%s]: %w", name, err)
+		}
+	}
+	reference := func(label, name string) error {
+		if name == "" {
+			return nil
+		}
+		if _, ok := f.Agents[name]; !ok {
+			return fmt.Errorf("%s 引用的 agent %q 未在 agents 中定义（可用：%s）",
+				label, name, strings.Join(f.agentNames(), "、"))
+		}
+		return nil
+	}
+	if err := reference("default_agent", f.DefaultAgent); err != nil {
+		return err
+	}
+	if f.Weixin != nil {
+		if err := reference("weixin.agent", f.Weixin.Agent); err != nil {
+			return err
+		}
+	}
+	if f.QQ != nil {
+		if err := reference("qq.agent", f.QQ.Agent); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// agentNames 返回已定义的 agent 名（排序，报错信息用）。
+func (f *File) agentNames() []string {
+	names := make([]string, 0, len(f.Agents))
+	for name := range f.Agents {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // validateProviders 校验 providers 定义与所有 provider 引用（含 default_provider、
@@ -566,6 +720,18 @@ func (f *File) WeixinProviderName() string {
 	return f.DefaultProvider
 }
 
+// AgentProviderName 返回命名 agent 生效的 provider 名：agents[name].provider >
+// 全局默认；名字不存在时回退全局默认（Validate 已保证引用存在）。
+func (f *File) AgentProviderName(name string) string {
+	if agent, ok := f.Agents[name]; ok && agent.Provider != "" {
+		return agent.Provider
+	}
+	return f.DefaultProvider
+}
+
+// AgentNames 返回已定义的 agent 名（排序，诊断/展示用）。
+func (f *File) AgentNames() []string { return f.agentNames() }
+
 // LookupProvider 按名取 config.json 里定义的 provider；返回是否找到。
 func (f *File) LookupProvider(name string) (Provider, bool) {
 	if name == "" {
@@ -629,6 +795,24 @@ func (w *Weixin) Validate() error {
 	}
 	if w.Enabled && w.BotToken == "" {
 		return fmt.Errorf("weixin.enabled 需要 bot_token：先 assistant weixin login")
+	}
+	return nil
+}
+
+// Validate 校验 QQ 通道配置（必须在 Normalize 之后调用）。
+func (q *QQ) Validate() error {
+	if q == nil {
+		return nil
+	}
+	parsed, err := url.Parse(q.APIBaseURL)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return fmt.Errorf("qq.api_base_url 必须是绝对 HTTP(S) URL：%q", q.APIBaseURL)
+	}
+	if q.Enabled && (q.AppID == "" || q.AppSecret == "") {
+		return fmt.Errorf("qq.enabled 需要 app_id 与 app_secret：在 q.qq.com 开放平台创建机器人后填入")
+	}
+	if q.SplitLimit < 0 {
+		return fmt.Errorf("qq.split_limit 不能为负：%d", q.SplitLimit)
 	}
 	return nil
 }

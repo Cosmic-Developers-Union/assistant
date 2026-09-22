@@ -86,19 +86,12 @@ func TestSendTextChecksRet(t *testing.T) {
 	}
 }
 
-func TestEncodeClientVersionAndSplitText(t *testing.T) {
+func TestEncodeClientVersion(t *testing.T) {
 	if got := EncodeClientVersion("1.2.3"); got != "66051" {
 		t.Errorf("EncodeClientVersion = %q, want 66051", got)
 	}
 	if got := EncodeClientVersion("0.0.1"); got != "1" {
 		t.Errorf("EncodeClientVersion = %q, want 1", got)
-	}
-	chunks := SplitText("第一行\n第二行内容很长", 5)
-	if len(chunks) < 2 || chunks[0] != "第一行" {
-		t.Errorf("SplitText = %q", chunks)
-	}
-	if chunks := SplitText("短", 10); len(chunks) != 1 || chunks[0] != "短" {
-		t.Errorf("Short SplitText = %q", chunks)
 	}
 }
 

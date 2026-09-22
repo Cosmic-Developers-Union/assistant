@@ -3,7 +3,7 @@
 `assistant run`（daemon 部署形态）的运行配置。run.yaml 存在时，run **完全按它
 运行**：站点（monitor）、数据落点（root/repos-dir）、评审工作区（review-root
 与命名模板）都来自它；config.json 退为账号身份层（providers/optimizations/
-weixin），其 `instances` 不再参与 run 的目标解析。
+weixin/qq/agents 对话服务端配置），其 `instances` 不再参与 run 的目标解析。
 
 ## 落点
 
