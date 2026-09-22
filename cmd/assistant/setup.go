@@ -1,13 +1,13 @@
 package main
 
 import (
-	"fmt"
-	"os"
-	"strings"
-
+	"assistant/internal/config"
 	"assistant/internal/credentials"
 	"assistant/internal/instances"
 	"assistant/internal/setup"
+	"fmt"
+	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -197,6 +197,9 @@ func loadInstanceFileForSetup(configPath string) (string, *instances.File, error
 		path = standard
 	}
 	if _, err := os.Stat(path); err == nil {
+		if _, err := config.LoadBeside(path); err != nil {
+			return "", nil, err
+		}
 		file, err := instances.Load(path)
 		return path, file, err
 	} else if !os.IsNotExist(err) {

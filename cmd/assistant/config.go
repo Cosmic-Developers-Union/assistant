@@ -1,6 +1,10 @@
 package main
 
 import (
+	"assistant/internal/config"
+	"assistant/internal/credentials"
+	"assistant/internal/instances"
+	"assistant/schema"
 	"bufio"
 	"encoding/json"
 	"fmt"
@@ -8,10 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"assistant/internal/credentials"
-	"assistant/internal/instances"
-	"assistant/schema"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -226,6 +226,9 @@ func loadOptionalConfig(path string) (*instances.File, error) {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
+		return nil, err
+	}
+	if _, err := config.LoadBeside(path); err != nil {
 		return nil, err
 	}
 	file, err := instances.Load(path)

@@ -39,3 +39,24 @@ func LoadDotEnv(startDirectory string) (string, error) {
 		directory = parent
 	}
 }
+
+// LoadBeside 只加载 configPath 同目录的 .env（不做向上搜索——与配置定位的
+// 显式模式一致，密钥引用的变量来源可预期）。不覆盖已有的进程环境变量；
+// 文件不存在返回空串（密钥引用回落进程环境），畸形文件报清晰错误。
+func LoadBeside(configPath string) (string, error) {
+	path := filepath.Join(filepath.Dir(configPath), ".env")
+	info, err := os.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("inspect %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("load %s: not a regular file", path)
+	}
+	if err := godotenv.Load(path); err != nil {
+		return "", fmt.Errorf("load %s: %w", path, err)
+	}
+	return path, nil
+}

@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 
+	"assistant/internal/config"
 	"assistant/internal/credentials"
 	"assistant/internal/instances"
 	"assistant/internal/status"
@@ -19,7 +20,8 @@ import (
 //  2. ASSISTANT_CONFIG
 //  3. 当前目录的 ./config.json（缺省落点， assistant 就在配置旁边工作）
 //
-// 都没有时返回 nil，调用方退回环境变量单实例模式。
+// 找到配置后加载同目录的 .env（不覆盖已有环境变量；密钥的 $VAR 引用由此
+// 解析）。都没有时返回 nil，调用方退回环境变量单实例模式。
 func resolveInstanceFile(options commandOptions) (string, *instances.File, error) {
 	path := strings.TrimSpace(options.ConfigPath)
 	if path == "" {
@@ -38,6 +40,9 @@ func resolveInstanceFile(options commandOptions) (string, *instances.File, error
 	}
 	if path == "" {
 		return "", nil, nil
+	}
+	if _, err := config.LoadBeside(path); err != nil {
+		return "", nil, err
 	}
 	file, err := instances.Load(path)
 	if err != nil {
