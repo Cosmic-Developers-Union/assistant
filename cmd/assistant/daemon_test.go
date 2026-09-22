@@ -106,6 +106,13 @@ func TestStartDaemonServicesStartsChannels(t *testing.T) {
 		"runtime 装配：main agent = main", // 缺省主 agent（用户 agents.ops 覆盖内置同名预设）
 		"子代理     = coder、ops、review、writer",
 		"通道 qq 已启动",
+		// 读写清单：让运行期文件系统副作用可感知（.env 未找到也明说）
+		"读写清单",
+		"读 config.json = " + configPath,
+		"读 .env = 未找到",
+		"写 状态库 = ",
+		"写 会话配置根 = ",
+		"写 对话状态 = ",
 	} {
 		if !strings.Contains(logs, want) {
 			t.Errorf("日志缺少 %q：\n%s", want, logs)

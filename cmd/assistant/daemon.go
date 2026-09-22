@@ -12,6 +12,7 @@ import (
 
 	builtinagents "assistant/internal/agents"
 	"assistant/internal/claudecfg"
+	"assistant/internal/credentials"
 	"assistant/internal/daemon"
 	"assistant/internal/envref"
 	"assistant/internal/instances"
@@ -288,7 +289,7 @@ func startDaemonServices(
 	if err != nil {
 		return err
 	}
-	logRuntimeSummary(logf, file, runtime)
+	logRuntimeSummary(logf, resolvedPath, file, runtime, options)
 
 	// 状态 API 监听：旗标 > runtime.api_listen（off/none 关闭）；端点文件锚定
 	// 解析后的配置目录（--config 指向哪里，daemon.json 就落哪里）
@@ -357,8 +358,16 @@ func startDaemonServices(
 	return nil
 }
 
-// logRuntimeSummary 打印运行时装配结果：主 agent、子代理、通道、运行树。
-func logRuntimeSummary(logf func(string, ...any), file *instances.File, runtime instances.Runtime) {
+// logRuntimeSummary 打印运行时装配结果与读写清单：一段集中说清 daemon 会读
+// 哪些文件、写哪些目录（路径/用途/开关），让运行期的文件系统副作用可感知。
+// 按 runtime 实际引用的通道裁剪：纯聊天 runtime 不列 repos/review/credentials。
+func logRuntimeSummary(
+	logf func(string, ...any),
+	resolvedPath string,
+	file *instances.File,
+	runtime instances.Runtime,
+	options *dispatcherOptions,
+) {
 	mainAgent := runtime.MainAgent
 	if mainAgent == "" {
 		mainAgent = instances.DefaultMainAgent
@@ -369,8 +378,72 @@ func logRuntimeSummary(logf func(string, ...any), file *instances.File, runtime 
 	}
 	logf("runtime 装配：main agent = %s；子代理 = %s；通道 = %s",
 		mainAgent, strings.Join(subagents, "、"), strings.Join(runtime.Channels, "、"))
-	logf("运行树：root = %s（repos=%s state=%s review=%s）",
-		runtime.DataRoot(), runtime.ReposRoot(), filepath.Dir(runtime.StatePath()), runtime.ReviewRootDir())
+
+	configDir := filepath.Dir(resolvedPath)
+	gitea := runtimeGiteaChannels(file, runtime)
+	logf("读写清单（写入落点可用 runtimes.<名> 的路径字段调整；off 项本运行关闭）：")
+	logf("  读 config.json = %s", resolvedPath)
+	dotEnv := filepath.Join(configDir, ".env")
+	if _, err := os.Stat(dotEnv); err == nil {
+		logf("  读 .env = %s（已载入，不覆盖已有环境变量；密钥引用 $VAR 由此解析）", dotEnv)
+	} else {
+		logf("  读 .env = 未找到（密钥引用 $VAR 用进程环境解析）")
+	}
+	if len(gitea) > 0 {
+		credentialsPath, err := credentials.PathFor(resolvedPath)
+		if err != nil {
+			credentialsPath = "credentials.json"
+		}
+		logf("  读 credentials.json = %s（gitea 通道令牌兜底，只读）", credentialsPath)
+	}
+	if statePath := runtime.StatePath(); statePath != "" {
+		logf("  写 状态库 = %s（SQLite WAL：内省 + 跨进程互斥）", statePath)
+	} else {
+		logf("  写 状态库 = off（state_file=\"off\"）")
+	}
+	listen := firstNonEmpty(strings.TrimSpace(options.APIListen), runtime.ListenAddr())
+	apiOff := listen == "" || strings.EqualFold(listen, "none") || strings.EqualFold(listen, "off")
+	if apiOff {
+		logf("  写 状态 API = off（api_listen 或 --api-listen 关闭）")
+	} else {
+		endpoint, err := instances.DaemonEndpointPathFor(resolvedPath)
+		if err != nil {
+			endpoint = "daemon.json"
+		}
+		logf("  写 状态 API 端点 = %s（0600，退出时删除；崩溃残留由下次启动覆盖）@%s", endpoint, listen)
+	}
+	logf("  写 会话配置根 = %s（claude 转录 projects/ 与全局配置）", runtime.ClaudeConfigDir())
+	logf("  写 对话状态 = %s（conversations/sessions.json + 每会话工作目录 chat-xxxxxxxx，首条消息懒建）", runtime.ChatStateDir())
+	if len(gitea) > 0 {
+		repoCount := 0
+		for _, channel := range gitea {
+			repoCount += len(channel.Repos)
+		}
+		logf("  写 受管克隆 = %s（gitea 通道按需 clone，%d 个仓库）", runtime.ReposRoot(), repoCount)
+		logf("  写 评审工作区 = %s（PR/Issue worktree，按需）", runtime.ReviewRootDir())
+		logf("  写 每仓库状态 = %s/<站点>/<owner>/<name>/{logs,dispatcher.lock}（%d 个 gitea 通道）",
+			filepath.Dir(runtime.StatePath()), len(gitea))
+	}
+}
+
+// runtimeGiteaChannels 返回 runtime 引用的 gitea 通道（按 runtime.Channels 过滤；
+// 未引用任何时回退空——纯聊天 runtime 不产生调度写入）。
+func runtimeGiteaChannels(file *instances.File, runtime instances.Runtime) []instances.Channel {
+	referenced := map[string]bool{}
+	for _, key := range runtime.Channels {
+		referenced[key] = true
+	}
+	var channels []instances.Channel
+	for _, channel := range file.Channels {
+		if channel.Type != instances.ChannelGitea {
+			continue
+		}
+		if len(runtime.Channels) > 0 && !referenced[channel.Key()] {
+			continue
+		}
+		channels = append(channels, channel)
+	}
+	return channels
 }
 
 // migrateRuntimeDir 把旧运行目录整体搬到 runtime 树下：同盘 rename 一次性迁移，
@@ -643,9 +716,8 @@ func logChatSummary(
 		strings.Join(subagentNames(subagents), "、"))
 	logf("  claude     = %s", mainAgent.ClaudeBin)
 	logf("  bare       = %s", bareLabel)
-	logf("  配置根     = %s", chat.SessionDir())
-	logf("  会话目录   = %s（每个会话一个稳定工作目录 <chat-xxxxxxxx>，含 session.json）", chat.StateDir())
-	logf("  续聊       = cd <会话目录> && claude --continue")
+	// 配置根/会话目录已在启动读写清单里列出，这里只留操作者要用的续聊提示
+	logf("  续聊       = cd <会话目录> && claude --continue（目录见读写清单的对话状态行）")
 	if remote.URL != "" {
 		logf("  记录库     = %s（每轮结束归档该会话，可用 sessions MCP 回查）", remote.URL)
 	} else {
@@ -708,4 +780,3 @@ func displayName(name string, file *instances.File) string {
 	}
 	return name
 }
-
