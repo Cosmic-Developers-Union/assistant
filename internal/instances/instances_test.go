@@ -299,8 +299,13 @@ func TestProviderValidation(t *testing.T) {
 // 仓库自带的示例配置必须始终可加载（providers 等字段的回归护栏），并且示范
 // $schema（编辑器补全的来源）。
 func TestConfigExampleLoads(t *testing.T) {
-	// 示例配置的 token 用 ${GITEA_REVIEW_TOKEN} 引用；严格校验要求变量已定义
-	t.Setenv("GITEA_REVIEW_TOKEN", "example-token")
+	// 示例配置的密钥用 $VAR 引用示范「密钥不落配置文件」；严格校验要求变量已定义
+	for _, name := range []string{
+		"GITEA_REVIEW_TOKEN", "ZHIPU_API_KEY", "OPENCODE_API_KEY",
+		"ANTHROPIC_API_KEY", "QQ_TOKEN", "TELEGRAM_BOT_TOKEN", "SESSIONS_TOKEN",
+	} {
+		t.Setenv(name, "example-"+strings.ToLower(strings.ReplaceAll(name, "_", "-")))
+	}
 	file, err := Load(filepath.Join("..", "..", "config.example.json"))
 	if err != nil {
 		t.Fatalf("config.example.json 无法加载：%v", err)

@@ -134,7 +134,16 @@ channels，**大量配置**）加 N 个 runtime（**少量运行**——每个 r
   隐私模式。
 - runtime 按键引用通道：`"channels": ["gitea", "weixin/work"]`——未被引用的
   通道不启动。
-- 旧版单实例 `weixin` / `qq` 节继续按 enabled / `--weixin` / `--qq` 语义工作。
+- 旧版顶层 `qq:` / `weixin:` 单实例节点已删除：`channels` 是唯一的对话通道
+  架构，出现旧节点会报迁移错误（含对照写法）。
+- **密钥不落盘**：凭据字段（`bot_token`/`app_secret`/`token`/`api_key`、
+  `providers.*.env`、`agents.*.mcp.*.env`、`sessions.remote.token`）都支持
+  `$VAR` / `${VAR}` / `${VAR:-default}` 环境变量引用——`assistant` 启动时
+  自动载入 config.json 同目录的 `.env`（不覆盖已有环境变量），未定义的变量
+  启动即报错；文件里的原始引用永不被写回的明文覆盖。
+- **记录库**：`"sessions": {"remote": {"url": "...", "token": "$SESSIONS_TOKEN"}}`
+  配置远端会话记录（`assistant serve` 的存储服务端）；启动日志与
+  `session push` 标明记录去向（config/env/sidecar/未配置）。
 
 ### agents（命名定义：一个 main + 多个 subagents）
 
