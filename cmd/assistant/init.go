@@ -401,50 +401,25 @@ func resolveRepoSetupTargetWithProbe(
 		return repoSetupTarget{}, err
 	}
 
-	var instance instances.Instance
-	found := false
-	if hostHint != "" {
-		instance, found = findInstanceByHost(file, hostHint)
-	}
-	if !found {
-		for _, candidate := range file.Instances {
-			if _, ok := candidate.FindRepo(fullName); ok {
-				instance, found = candidate, true
-				break
-			}
-		}
-	}
-	if !found && len(file.Instances) == 1 {
-		instance, found = file.Instances[0], true
-	}
-	if !found {
-		return repoSetupTarget{}, fmt.Errorf("平台不在配置中：先 assistant login <host>（或用 --config 指定其他配置）")
+	channel, err := selectRepoGitea(file, hostHint, fullName)
+	if err != nil {
+		return repoSetupTarget{}, err
 	}
 	return repoSetupTarget{
 		Path:     path,
 		FullName: fullName,
-		Host:     instance.Host,
-		Instance: instance,
+		Host:     channel.Host,
+		Instance: channelInstance(channel),
 		File:     file,
 	}, nil
 }
 
-// saveInstance 用 updated 替换文件中 host 对应的实例并落盘（repos add 等共享）。
+// saveInstance 用 updated 替换文件中 host 对应的 gitea 通道并落盘（引擎回写共享）。
 func saveInstance(file *instances.File, path, host string, updated instances.Instance) error {
-	replaced := false
-	for index := range file.Instances {
-		if sameHost(file.Instances[index].Host, host) {
-			file.Instances[index] = updated
-			replaced = true
-			break
-		}
-	}
-	if !replaced {
-		file.Instances = append(file.Instances, updated)
-	}
-	file.Normalize()
-	if err := file.Validate(); err != nil {
-		return err
-	}
-	return instances.Save(path, file)
+	channel := upsertGiteaChannel(file, host)
+	channel.Provider = updated.Provider
+	channel.Reviewer = updated.Reviewer.Name
+	channel.Merger = updated.Merger.Name
+	channel.Repos = updated.Repos
+	return saveConfig(file, path)
 }

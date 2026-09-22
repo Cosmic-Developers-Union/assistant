@@ -79,27 +79,30 @@ func runSetup(command *cobra.Command, configPath string, options *setupOptions) 
 	if err != nil {
 		return err
 	}
-	// 定位目标 instance：--host 指定，否则要求配置文件恰好一个 instance
+	// 定位目标 gitea 通道：--host 指定，否则要求配置文件恰好一个站点
 	host := strings.TrimRight(strings.TrimSpace(options.Host), "/")
-	var existing *instances.Instance
+	var existing *instances.Channel
+	var existingView *instances.Instance
 	if file != nil {
 		switch {
-		case host == "" && len(file.Instances) == 1:
-			existing = &file.Instances[0]
+		case host == "" && giteaHostCount(file) == 1:
+			existing = giteaChannels(file)[0]
 			host = existing.Host
 		case host != "":
-			for index := range file.Instances {
-				if file.Instances[index].Host == host {
-					existing = &file.Instances[index]
-					break
-				}
+			channel, ok := findGiteaChannel(file, host)
+			if ok {
+				existing = channel
 			}
-		case len(file.Instances) != 1:
-			return fmt.Errorf("配置文件有多个 instance，请用 --host 指定要初始化的站点")
+		case giteaHostCount(file) != 1 && len(file.Channels) > 0 && host == "":
+			return fmt.Errorf("配置文件有多个站点，请用 --host 指定要初始化的 gitea 通道")
 		}
 	}
 	if host == "" {
-		return fmt.Errorf("缺少站点：--host 或配置文件中的 instance.host")
+		return fmt.Errorf("缺少站点：--host 或配置文件中的 gitea 通道 host")
+	}
+	if existing != nil {
+		view := channelInstance(existing)
+		existingView = &view
 	}
 	// 能力门禁：本地身份记录显示不是管理员时立即拒绝（权威判定仍在服务端）
 	if err := requireAdminIdentity(configPath, host); err != nil {
@@ -120,8 +123,8 @@ func runSetup(command *cobra.Command, configPath string, options *setupOptions) 
 	}
 
 	repos := cleanStrings(options.Repos)
-	if len(repos) == 0 && existing != nil {
-		repos = existing.RepoNames()
+	if len(repos) == 0 && existingView != nil {
+		repos = existingView.RepoNames()
 	}
 	// 允许空仓库清单：只初始化实例（账号与令牌），仓库配置留给之后的 setup。
 
@@ -137,7 +140,7 @@ func runSetup(command *cobra.Command, configPath string, options *setupOptions) 
 		AllowAdminOverride:  options.AllowAdminOverride,
 		CreateRepos:         options.CreateRepos,
 		DryRun:              options.DryRun,
-		Existing:            existing,
+		Existing:            existingView,
 		ExistingCredentials: store.Credentials,
 		Log:                 logf,
 	}
@@ -154,26 +157,15 @@ func runSetup(command *cobra.Command, configPath string, options *setupOptions) 
 	if file == nil {
 		file = &instances.File{}
 	}
-	replaced := false
-	for index := range file.Instances {
-		if file.Instances[index].Host == instance.Host {
-			file.Instances[index] = instance
-			replaced = true
-			break
-		}
-	}
-	if !replaced {
-		file.Instances = append(file.Instances, instance)
-	}
-	file.Normalize()
-	if err := file.Validate(); err != nil {
-		return err
-	}
+	channel := upsertGiteaChannel(file, instance.Host)
+	channel.Reviewer = instance.Reviewer.Name
+	channel.Merger = instance.Merger.Name
+	channel.Repos = instance.Repos
 
 	if options.DryRun {
 		logf("dry-run：未写入 %s 与 %s", writePath, credentialPath)
 	} else {
-		if err := instances.Save(writePath, file); err != nil {
+		if err := saveConfig(file, writePath); err != nil {
 			return err
 		}
 		for _, credential := range result.Credentials {

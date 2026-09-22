@@ -2,7 +2,10 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -142,59 +145,26 @@ func startChat(t *testing.T, config ChatConfig) (*Chat, *fakeChannel, *[][]strin
 	return chat, newFakeChannel("fake"), &calls
 }
 
-// 通用桥端到端：普通对话进 Chat、控制命令不进 Chat、/agent 切换对会话生效并
-// 持久化、白名单外用户被忽略。
+// 通用桥端到端：普通对话进 Chat（由主 agent 接待）、控制命令不进 Chat、
+// 白名单外用户被忽略。
 func TestRunChannelEndToEnd(t *testing.T) {
 	chat, channel, calls := startChat(t, ChatConfig{
-		Agents: map[string]AgentRuntime{
-			"ops":   {Name: "ops", Model: "m-ops"},
-			"coder": {Name: "coder", Model: "m-coder"},
-		},
+		MainAgent: AgentRuntime{Name: "main", Model: "m-main"},
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		channel.runDone <- RunChannel(ctx, channel, ChannelConfig{Chat: chat, DefaultAgent: "", Log: t.Logf})
+		channel.runDone <- RunChannel(ctx, channel, ChannelConfig{Chat: chat, Log: t.Logf})
 	}()
 
-	// 普通对话：内置缺省（无 --model）
+	// 普通对话：主 agent 生效（模型进 claude 参数）
 	channel.push("user-1", "你好")
 	channel.waitReplies(t, 1)
 	channel.stop(t, cancel)
 	if len(*calls) != 1 {
 		t.Fatalf("普通对话应进 Chat：calls=%d", len(*calls))
 	}
-
-	// /agent 无参：列出池
-	ctx, cancel = context.WithCancel(context.Background())
-	go func() {
-		channel.runDone <- RunChannel(ctx, channel, ChannelConfig{Chat: chat, Log: t.Logf})
-	}()
-	channel.push("user-1", "/agent")
-	replies := channel.waitReplies(t, 2)
-	if !strings.Contains(replies[1], "ops") || !strings.Contains(replies[1], "coder") {
-		t.Errorf("/agent 应列出池内 agent：%q", replies[1])
-	}
-
-	// /agent <名>：切换并确认
-	channel.push("user-1", "/agent ops")
-	replies = channel.waitReplies(t, 3)
-	if !strings.Contains(replies[2], "ops") {
-		t.Errorf("切换确认应带上 agent 名：%q", replies[2])
-	}
-
-	// 切换后普通对话：生效 agent 的模型出现在 claude 参数里
-	channel.push("user-1", "再问一句")
-	channel.waitReplies(t, 4)
-	channel.stop(t, cancel)
-	if len(*calls) != 2 {
-		t.Fatalf("切换后应再进一轮 Chat：calls=%d", len(*calls))
-	}
-	if !contains((*calls)[1], "--model") || argumentAfter((*calls)[1], "--model") != "m-ops" {
-		t.Errorf("切换后应使用 agent 模型：%v", (*calls)[1])
-	}
-	// 切换按会话持久化
-	if chosen := chat.ChosenAgent(chatConversationIDForTest(t, chat, channel, "user-1")); chosen != "ops" {
-		t.Errorf("会话应记住 /agent 的选择：%q", chosen)
+	if !contains((*calls)[0], "--model") || argumentAfter((*calls)[0], "--model") != "m-main" {
+		t.Errorf("主 agent 模型应生效：%v", (*calls)[0])
 	}
 }
 
@@ -224,71 +194,89 @@ func TestRunChannelDeniesUser(t *testing.T) {
 	}
 }
 
-// /help 回复命令一览；未知 agent 名给出可用列表；普通聊天不误触命令。
+// /help 回复命令一览；命令不进 Chat；普通聊天不误触命令。
 func TestRunChannelCommands(t *testing.T) {
-	chat, channel, calls := startChat(t, ChatConfig{
-		Agents: map[string]AgentRuntime{"ops": {Name: "ops"}},
-	})
+	chat, channel, calls := startChat(t, ChatConfig{})
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		channel.runDone <- RunChannel(ctx, channel, ChannelConfig{Chat: chat, Log: t.Logf})
 	}()
 	channel.push("user-1", "/help")
 	replies := channel.waitReplies(t, 1)
-	if !strings.Contains(replies[0], "/new") || !strings.Contains(replies[0], "/agent") {
+	if !strings.Contains(replies[0], "/new") || !strings.Contains(replies[0], "/help") {
 		t.Errorf("/help 应列出命令：%q", replies[0])
 	}
-	channel.push("user-1", "/agent nope")
-	replies = channel.waitReplies(t, 2)
-	if !strings.Contains(replies[1], "没有 agent nope") {
-		t.Errorf("未知 agent 应提示可用列表：%q", replies[1])
-	}
 	channel.push("user-1", "/new")
-	channel.waitReplies(t, 3)
+	channel.waitReplies(t, 2)
 	// 「重新开始吧，但先回答我」是普通聊天，不是命令
 	channel.push("user-1", "重新开始吧，但先回答我")
-	channel.waitReplies(t, 4)
+	channel.waitReplies(t, 3)
 	channel.stop(t, cancel)
 	if len(*calls) != 1 {
 		t.Errorf("命令不应进 Chat，普通聊天应进：%v", calls)
 	}
 }
 
-// 通道级默认 agent：会话未选 /agent 时生效；会话选择优先于通道默认。
-func TestRunChannelDefaultAgent(t *testing.T) {
+// 子代理注入：配置 Subagents 后 claude 参数带 --agents JSON（含 description/
+// prompt/model），子代理 MCP 并入会话 mcp.json。
+func TestRunChannelInjectsSubagents(t *testing.T) {
 	chat, channel, calls := startChat(t, ChatConfig{
-		Agents: map[string]AgentRuntime{
-			"ops":   {Name: "ops", Model: "m-ops"},
-			"coder": {Name: "coder", Model: "m-coder"},
+		MainAgent: AgentRuntime{Name: "main"},
+		Subagents: []SubagentDefinition{
+			{Name: "ops", Description: "查状态", Prompt: "你是运维。", Model: "m-ops",
+				MCP: map[string]any{"ops-tools": map[string]any{"command": "ops-mcp"}}},
 		},
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		channel.runDone <- RunChannel(ctx, channel, ChannelConfig{
-			Chat: chat, DefaultAgent: "coder", Log: t.Logf,
-		})
+		channel.runDone <- RunChannel(ctx, channel, ChannelConfig{Chat: chat, Log: t.Logf})
 	}()
 	channel.push("user-1", "你好")
 	channel.waitReplies(t, 1)
 	channel.stop(t, cancel)
-	if model := argumentAfter((*calls)[0], "--model"); model != "m-coder" {
-		t.Errorf("通道默认 agent 未生效：%v", (*calls)[0])
+	if len(*calls) != 1 {
+		t.Fatalf("calls = %d", len(*calls))
 	}
-
-	// 会话显式切换后，通道默认让位
-	ctx, cancel = context.WithCancel(context.Background())
-	go func() {
-		channel.runDone <- RunChannel(ctx, channel, ChannelConfig{
-			Chat: chat, DefaultAgent: "coder", Log: t.Logf,
-		})
-	}()
-	channel.push("user-1", "/agent ops")
-	channel.waitReplies(t, 2)
-	channel.push("user-1", "再问")
-	channel.waitReplies(t, 3)
-	channel.stop(t, cancel)
-	if model := argumentAfter((*calls)[1], "--model"); model != "m-ops" {
-		t.Errorf("会话级 /agent 选择应优先于通道默认：%v", (*calls)[1])
+	if !contains((*calls)[0], "--agents") {
+		t.Fatalf("应注入 --agents：%v", (*calls)[0])
+	}
+	var agents map[string]struct {
+		Description string `json:"description"`
+		Prompt      string `json:"prompt"`
+		Model       string `json:"model"`
+	}
+	if err := json.Unmarshal([]byte(argumentAfter((*calls)[0], "--agents")), &agents); err != nil {
+		t.Fatalf("--agents JSON 解析失败：%v", err)
+	}
+	ops, ok := agents["ops"]
+	if !ok || ops.Description != "查状态" || ops.Prompt != "你是运维。" || ops.Model != "m-ops" {
+		t.Errorf("ops 子代理定义 = %+v", ops)
+	}
+	// 子代理 MCP 并入会话 mcp.json（会话工作目录按 conversation id 哈希命名：
+	// 直接扫目录找 mcp.json）
+	entries, _ := os.ReadDir(chat.StateDir())
+	found := false
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		raw, readErr := os.ReadFile(filepath.Join(chat.StateDir(), entry.Name(), "mcp.json"))
+		if readErr != nil {
+			continue
+		}
+		found = true
+		var document struct {
+			Servers map[string]any `json:"mcpServers"`
+		}
+		if err := json.Unmarshal(raw, &document); err != nil {
+			t.Fatalf("mcp.json 解析失败：%v", err)
+		}
+		if _, ok := document.Servers["ops-tools"]; !ok {
+			t.Errorf("子代理 MCP 应并入会话 mcp.json：%v", document.Servers)
+		}
+	}
+	if !found {
+		t.Fatalf("会话工作目录没有 mcp.json：%v", entries)
 	}
 }
 
@@ -316,24 +304,19 @@ func (splitLimitChannel) SplitLimit() int { return 5 }
 // 控制命令解析：斜杠与直白说法都认，普通聊天不受影响。
 func TestParseCommand(t *testing.T) {
 	for text, want := range map[string]command{
-		"/new":       {name: "reset"},
-		" /reset ":   {name: "reset"},
-		"重新开始":       {name: "reset"},
-		"新会话":         {name: "reset"},
-		"/clear":      {name: "reset"},
-		"/help":       {name: "help"},
-		"帮助":           {name: "help"},
-		"/agent":      {name: "agent"},
-		"/agents":     {name: "agent"},
-		"/agent ops":  {name: "agent", arg: "ops"},
-		"/AGENT ops":  {name: "agent", arg: "ops"},
-		"/agents  x ": {name: "agent", arg: "x"},
+		"/new":     {name: "reset"},
+		" /reset ": {name: "reset"},
+		"重新开始":     {name: "reset"},
+		"新会话":      {name: "reset"},
+		"/clear":   {name: "reset"},
+		"/help":    {name: "help"},
+		"帮助":       {name: "help"},
 	} {
 		if got := parseCommand(text); got != want {
 			t.Errorf("parseCommand(%q) = %+v, want %+v", text, got, want)
 		}
 	}
-	for _, text := range []string{"继续", "new", "重新开始吧，但先回答我", "/news", "/agentx ops", ""} {
+	for _, text := range []string{"继续", "new", "重新开始吧，但先回答我", "/news", "/agents", "/agentx ops", ""} {
 		if got := parseCommand(text); got.name != "" {
 			t.Errorf("parseCommand(%q) 不该识别为命令：+%v", text, got)
 		}

@@ -7,6 +7,9 @@ description: 按本仓库的 assistant 流程评审 Pull Request（Gitea 原生 
 
 本仓库的评审与分诊协议。执行 `review pr #N` / `triage issue #N` 时严格遵循。
 
+> 本文件是运行时 review agent（internal/agents 内置预设 + 调度引擎会话）的
+> 提示词**唯一事实源**；修改后重编译即可同时更新交互技能与调度会话。
+
 ## PR 审查协议
 
 1. 只处理被点名的 PR；用 gitea MCP 读取 PR、diff、评论与检查状态。

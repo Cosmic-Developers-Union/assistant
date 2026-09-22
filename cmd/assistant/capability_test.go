@@ -72,9 +72,10 @@ func TestSetupRefusesRecordedNonAdmin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(after.Instances) != len(before.Instances) ||
-		after.Instances[0].Host != before.Instances[0].Host ||
-		len(after.Instances[0].Repos) != 0 {
-		t.Fatalf("门禁失败时不应改动配置：%+v", after.Instances[0])
+	// 载入即规范化：instances 已迁移为 gitea 通道，门禁失败时不应改动配置
+	if len(after.Channels) != len(before.Channels) ||
+		after.Channels[0].Host != before.Channels[0].Host ||
+		len(after.Channels[0].Repos) != 0 {
+		t.Fatalf("门禁失败时不应改动配置：%+v", after.Channels)
 	}
 }

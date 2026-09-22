@@ -3,7 +3,7 @@
 Gitea 上的例行事务与评审自动化，两块能力：
 
 - **仓库机器人**：`assistant sync` / `automerge` / `check` 在 Gitea Actions 里按事件与定时运行（标签收敛、评审状态同步、机械合并、待办查询）；
-- **评审调度引擎**：`assistant run` 常驻宿主机，检测待办 → 为每个待办拉起 headless `claude` 会话 → 验证结论 → 清理，另带只读状态 API 与可选的对话服务端（multi-user / multi-session / multi-agent，通道可插拔：微信、QQ）。
+- **评审调度引擎**：`assistant run` 常驻宿主机，检测待办 → 为每个待办拉起 headless `claude` 会话 → 验证结论 → 清理，另带只读状态 API 与可选的对话服务端（multi-user / multi-session，main agent + subagents，通道可插拔：微信、QQ、Telegram、Gitea）。
 
 `claude` CLI 是外部运行时依赖（会话在容器或宿主机里跑），其余能力都在本二进制里。
 
@@ -59,66 +59,119 @@ Gitea 上的例行事务与评审自动化，两块能力：
 
 会话的 `--settings` / `--mcp-config` 由 assistant 生成（env + 权限放行 + provider 覆盖 + MCP），**不写进仓库**；`--setting-sources project` 表示只读项目级设置，不碰操作者的用户级配置。
 
-## 配置
+## 配置（一个 config.json：三个池 + N 个运行时）
 
-- `config.json`：`instances[]`（host / reviewer / merger / repos）、`providers`（AI 供应商：`api_key` 简写 + `env`/`settings`/`mcp` 覆盖）、`default_provider`、`optimizations`、对话服务端（`weixin` / `qq` 通道 + `agents` 命名 agent 池 + `default_agent`）。示例见 `config.example.json`，供应商预设与各家的坑见 `providers.md`。
-- `credentials.json`：`login` 派生该账号的 `mcp`（管理员另有 `admin`），`setup` 为 `ai`/`merge` 建机器人账号并派生 `review`/`merge`。令牌名 `assistant-<purpose>-<host>-<账号>`，重复登录复用，`--rotate` 轮换。
-- 校验：`assistant validate`（只读、不联网；会指出"定义了却没被引用的 provider"这类失误）与 `assistant doctor`（本地脚手架 + 服务端分支保护/标签/协作者/secret）。
-- 微信桥要显式开启：`assistant weixin login` 会把 `weixin.enabled=true` 与凭据写进 `config.json`（`assistant qq status` 可显示 QQ 通道状态并实测凭据）。
+`assistant` 的全部配置只有一份 config.json：三个池（providers / agents /
+channels，**大量配置**）加 N 个 runtime（**少量运行**——每个 runtime 集合一
+个 main agent、若干 subagents、若干通道与一棵独立运行树）。示例见
+`config.example.json`，完整说明见 `docs/config.md`，供应商预设与各家的坑见
+`providers.md`。
 
-## 对话服务端（multi-user / multi-session / multi-agent）
-
-`assistant run` 就是聊天服务端：并行承载多个消息通道实例，每个（通道实例, 用户）映射到独立会话，会话之间并发、同会话串行，互不串扰。
-
-### 通道怎么配（单实例、多实例、Telegram）
-
-- **旧版单实例块**（继续可用）：`weixin` 节（`assistant weixin login` 写入）+ `qq` 节，`enabled=true` 或 `run --weixin` / `--qq` 开启。
-- **`channels` 列表（推荐，支持多实例）**：`type` 决定平台（`weixin` / `qq` / `telegram`），列表里有条目即启用；`name` 是可选实例标签。会话键 = `type`（未命名，与旧版一致，老会话无感迁移）或 `type/name`（命名，多开互不串会话）：
-
-```json
-"channels": [
-  { "type": "weixin", "name": "work",  "bot_token": "…", "agent": "ops",   "admin_users": ["wx-user-id"] },
-  { "type": "weixin", "name": "life",  "bot_token": "…", "agent": "writer", "admin_users": ["*"] },
-  { "type": "qq",     "name": "support", "app_id": "…", "app_secret": "…", "admin_users": ["openid"] },
-  { "type": "telegram", "bot_token": "…", "agent": "ops", "admin_users": ["123456789"] }
-]
-```
-
-- 多微信账号：`assistant weixin login --name work`（`--name` 缺省时仍写旧版 `weixin` 节），重复执行换不同实例名即可多开。
-- 多 QQ 机器人：在 q.qq.com 为每个机器人创建条目，各配各的 `agent` / `admin_users`。
-- **Telegram bot**：@BotFather `/newbot` 拿 token 写入 `channels`（`assistant telegram status` 自检）；长轮询出站连接，无需公网 IP 与 webhook；群聊收全量消息需在 BotFather 关闭隐私模式（`/setprivacy` → Disable）；白名单用数字用户 id（首条消息的「忽略用户」日志里可见）；被墙环境把 `api_base_url` 指向自建反代。
-- 同一平台匿名条目（无 `name`）与旧版单实例块互斥（validate 会拦），多开必须命名。
-
-### 自定义 agent 怎么配
-
-`agents` 节定义命名 agent，每个 agent 一份独立运行时：
-
-```json
-"agents": {
-  "ops":   { "provider": "opencode", "model": "claude-sonnet-5", "session_timeout_ms": 180000 },
-  "qa":    { "provider": "zhipu", "system_prompt": "你是测试助手，只回答与测试相关的问题。",
-             "mcp": { "fetch": { "command": "uvx", "args": ["mcp-server-fetch"] } } },
-  "boss":  { "claude_bin": "/usr/local/bin/claude-privileged" }
+```jsonc
+{
+  "providers":  { "zhipu": { "api_key": "…" } },
+  "agents":     { "qa": { "description": "测试问答", "system_prompt": "…", "provider": "zhipu" } },
+  "channels": [
+    { "type": "gitea", "host": "https://gitea.example.com", "repos": ["acme/repo"] },
+    { "type": "weixin", "name": "work", "bot_token": "…" },
+    { "type": "telegram", "bot_token": "…" }
+  ],
+  "runtimes": {
+    "main": {
+      "main_agent": "main",                       // 一个 main agent：接待所有对话
+      "subagents": ["ops", "coder", "writer", "review"],   // 多个 subagents：主模型按需委派
+      "channels": ["gitea", "weixin/work"],
+      "provider": "zhipu",
+      "root": "", "api_listen": "127.0.0.1:8770"  // 运行树与运行参数（皆可自定义）
+    }
+  }
 }
 ```
 
-字段：`provider`（缺省回退 `default_provider`）、`model`（`--model` 覆盖）、`system_prompt`（整体替换基础提示词）、`mcp`（该 agent 专属 MCP server，同名覆盖自举与供应商的）、`claude_bin`、`session_timeout_ms`。引用：`default_agent` 全局兜底，`weixin.agent` / `qq.agent` / `channels[].agent` 每通道默认；用户在聊天里 `/agent`（列出）、`/agent <名>`（切换，按会话记忆）、`/new`（重开会话）、`/help`。
+- **运行边界**：`assistant run [--runtime <名>]` 零旗标起一个运行时；状态与
+  产物全部落在该 runtime 的 `$root` 树下（repos / state / review / chat /
+  claude），备份只看一个目录。路径字段支持 `${VAR:-default}` 与 `$root`
+  自引用。
+- **credentials.json**：`login` 派生该账号的 `mcp`（管理员另有 `admin`），
+  `setup` 为 `ai`/`merge` 建机器人账号并派生 `review`/`merge`。令牌名
+  `assistant-<purpose>-<host>-<账号>`，重复登录复用，`--rotate` 轮换。
+- **校验**：`assistant validate`（只读、不联网；会指出"定义了却没被引用的
+  provider"这类失误）与 `assistant doctor`（本地脚手架 + 服务端分支保护/
+  标签/协作者/secret）。
+- **旧配置零改动可跑**：旧 `instances` 载入时自动迁移为 gitea 通道；旧
+  run.yaml 用 `assistant config migrate` 导入（`run --run` 已退役）。
+
+## 对话服务端（main agent + subagents）
+
+`assistant run` 就是聊天服务端：并行承载 runtime 引用的多个消息通道，每个
+（通道实例, 用户）映射到独立会话，会话之间并发、同会话串行，互不串扰。
+
+**对话统一由 runtime 的 main agent 接待**；子代理以 claude 自定义 agent 注入
+会话（`--agents`），主模型按 description 经原生 Task 工具把专项任务委派出去，
+结论再转述给用户。聊天命令：`/new` 重开会话、`/help` 帮助。
+
+### 通道怎么配
+
+- **`channels` 池**：`type` 决定平台（`weixin` / `qq` / `telegram` /
+  `gitea`），`name` 是可选实例标签；`enabled: false` 保留定义但停用。会话键 =
+  `type`（未命名）或 `type/name`（命名，多开互不串会话）：
+
+```json
+"channels": [
+  { "type": "weixin",   "name": "work",    "bot_token": "…", "admin_users": ["wx-user-id"] },
+  { "type": "qq",       "name": "support", "app_id": "…", "app_secret": "…", "admin_users": ["openid"] },
+  { "type": "telegram", "bot_token": "…",  "admin_users": ["123456789"] },
+  { "type": "gitea",    "host": "https://gitea.example.com", "repos": ["acme/repo"] }
+]
+```
+
+- **gitea 通道**：评审调度通道。host + repos 就是监控面（`reviewer` 缺省 ai、
+  `merger` 缺省 merge，令牌在凭据库，或通道 `token` 显式给——支持
+  `${VAR}` 引用不落盘）。它不经过对话桥，由调度引擎接管。
+- 多微信账号：`assistant weixin login --name work`；多 QQ 机器人在 q.qq.com
+  各建条目；**Telegram**：@BotFather `/newbot` 拿 token（`assistant telegram
+  status` 自检），长轮询出站连接无需公网 IP，群聊收全量消息需关闭 BotFather
+  隐私模式。
+- runtime 按键引用通道：`"channels": ["gitea", "weixin/work"]`——未被引用的
+  通道不启动。
+- 旧版单实例 `weixin` / `qq` 节继续按 enabled / `--weixin` / `--qq` 语义工作。
+
+### agents（命名定义：一个 main + 多个 subagents）
+
+`agents` 池定义可命名的 agent（内置预设同名覆盖）：
+
+```json
+"agents": {
+  "qa": { "description": "测试问答", "provider": "zhipu",
+          "system_prompt": "你是测试助手，只回答与测试相关的问题。",
+          "mcp": { "fetch": { "command": "uvx", "args": ["mcp-server-fetch"] } } }
+}
+```
+
+字段：`description`（委派时主模型看它决定何时派给谁）、`provider`（仅独立
+执行时生效）、`model`、`system_prompt`、`mcp`（并入所在会话的 MCP 面）、
+`claude_bin`、`session_timeout_ms`。
+
+runtime 从池里按名选人：`main_agent` 一个（缺省内置 `main`），`subagents`
+若干（缺省全部内置子代理）。
 
 ### 内置 agent（随二进制内嵌）
 
-assistant 内嵌了三个开箱即用的 agent 预设（system prompt 打包在二进制里，不需要配置文件）：
+| 名字 | 角色 | 用途 |
+| --- | --- | --- |
+| `main` | 主 agent（缺省） | 接待所有对话通道，按需委派子代理 |
+| `ops` | 子代理 | daemon/sessions MCP 只读查询评审调度状态 |
+| `coder` | 子代理 | 编程与工程：讨论代码、排查问题、最小可行方案 |
+| `writer` | 子代理 | 中文写作：润色、改写、起草消息与短文 |
+| `review` | 子代理（调度引擎独立执行） | PR 评审与 Issue 分诊协议（Gitea 原生 review 落库；提示词事实源 `skills/review/SKILL.md`） |
 
-| 名字 | 用途 |
-| --- | --- |
-| `ops` | 运维对话助手：daemon/sessions MCP 只读查询评审调度状态 |
-| `coder` | 编程与工程助手：讨论代码、排查问题、最小可行方案 |
-| `writer` | 中文写作助手：润色、改写、起草消息与短文 |
-
-直接引用即可：`"default_agent": "ops"`、`"agent": "writer"`、聊天里 `/agent coder`。用户 `agents` 里写同名条目即整体覆盖该内置预设（改提示词、换模型都行）；内置预设的 `mcp` 字段同样支持挂专属工具面（预设自身保持零依赖，不要求装任何外部 MCP）。
+用户 `agents` 里写同名条目即整体覆盖该内置预设（改提示词、换模型都行）。
 
 ### 准入（multi-user）
 
-每通道实例 `admin_users` 白名单；含 `"*"` 放开所有人（公网平台慎用）；weixin 空白名单时只允许扫码登录者，qq/telegram 空白名单时全拒。群聊事件：QQ 平台只在被 @ 时派发；Telegram 取决于隐私模式设置。
+每通道实例 `admin_users` 白名单；含 `"*"` 放开所有人（公网平台慎用）；weixin
+空白名单时只允许扫码登录者，qq/telegram 空白名单时全拒。群聊事件：QQ 平台只
+在被 @ 时派发；Telegram 取决于隐私模式设置。
 
 ## 运行与观测
 
@@ -148,7 +201,7 @@ curl -fsSL https://raw.githubusercontent.com/Cosmic-Developers-Union/assistant/m
 
   ```bash
   export GITEA_HOST=https://<gitea地址> GITEA_ACCESS_TOKEN=<token>
-  assistant run          # config.json 的 instances 为空时自动按环境变量单实例运行
+  assistant run          # 没有 config.json 时自动按环境变量单实例运行
   ```
 
 - **Linux（服务形态）**：创建独立系统服务用户 + XDG 目录 + systemd 单元 + 空配置，`assistant run` 由 systemd 常驻运行（详见下）。

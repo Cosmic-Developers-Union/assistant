@@ -54,8 +54,6 @@ type closer interface {
 type ChannelConfig struct {
 	// Chat 是共享的对话会话管理器
 	Chat *Chat
-	// DefaultAgent 是该通道的默认 agent 名（空 = ChatConfig.DefaultAgent）
-	DefaultAgent string
 	// Log 输出
 	Log func(string, ...any)
 	// Debug 为真时输出路由等诊断细节
@@ -150,7 +148,6 @@ func handleInbound(ctx context.Context, channel Channel, config ChannelConfig, m
 		reply, err = config.Chat.Handle(ctx, conversationID, Turn{
 			Transport: channel.Name(),
 			Text:      text,
-			Agent:     config.DefaultAgent,
 		})
 		if err != nil {
 			config.Log("对话失败（%s）：%v", conversationID, err)
@@ -171,8 +168,7 @@ func handleInbound(ctx context.Context, channel Channel, config ChannelConfig, m
 
 // command 是用户在聊天里输入的控制命令。
 type command struct {
-	name string // "reset" / "agent" / "help"；空串表示普通聊天
-	arg  string
+	name string // "reset" / "help"；空串表示普通聊天
 }
 
 // parseCommand 识别聊天控制命令：斜杠命令与直白说法都认，普通聊天不受影响
@@ -184,14 +180,6 @@ func parseCommand(text string) command {
 		return command{name: "reset"}
 	case "/help", "帮助", "/帮助":
 		return command{name: "help"}
-	case "/agent", "/agents":
-		return command{name: "agent"}
-	}
-	if name, argument, found := strings.Cut(trimmed, " "); found {
-		switch strings.ToLower(name) {
-		case "/agent", "/agents":
-			return command{name: "agent", arg: strings.TrimSpace(argument)}
-		}
 	}
 	return command{}
 }
@@ -212,55 +200,18 @@ func handleChatCommand(config ChannelConfig, conversationID string, parsed comma
 		workspace, _ := config.Chat.WorkspaceDir(conversationID)
 		config.Log("会话重置（%s）：用户要求重新开始，下一条消息新建 claude 会话", conversationID)
 		return "已开始新会话：下一条消息会新建 claude 会话（工作目录保留：" + workspace + "）"
-	case "agent":
-		return handleAgentCommand(config, conversationID, parsed.arg)
 	case "help":
 		return chatHelpText()
 	}
 	return ""
 }
 
-// handleAgentCommand 处理 /agent：无参列出可用 agent 与当前生效；/agent <名>
-// 切换并按会话记忆。
-func handleAgentCommand(config ChannelConfig, conversationID, name string) string {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		names := config.Chat.AgentNames()
-		if len(names) == 0 {
-			return "未配置 agent 池（config.json 的 agents 节），当前使用内置缺省。"
-		}
-		current := config.Chat.EffectiveAgentName(conversationID, config.DefaultAgent)
-		listed := make([]string, 0, len(names))
-		for _, candidate := range names {
-			if candidate == current {
-				listed = append(listed, candidate+"（当前）")
-				continue
-			}
-			listed = append(listed, candidate)
-		}
-		suffix := "；用 /agent <名> 切换。"
-		if current == "" {
-			suffix = "；当前使用内置缺省，用 /agent <名> 切换。"
-		}
-		return "可用 agent：" + strings.Join(listed, "、") + suffix
-	}
-	if !config.Chat.HasAgent(name) {
-		return "没有 agent " + name + "。可用：" + strings.Join(config.Chat.AgentNames(), "、")
-	}
-	if err := config.Chat.SetAgent(conversationID, name); err != nil {
-		config.Log("切换 agent 失败（%s）：%v", conversationID, err)
-		return "切换失败：" + err.Error()
-	}
-	config.Log("会话 %s 切换 agent：%s", conversationID, name)
-	return "已切换到 agent " + name + "：下一条消息生效。"
-}
-
 // chatHelpText 是 /help 的回复：可用命令一览。
 func chatHelpText() string {
 	return "可用命令：\n" +
 		"/new 重新开始（丢弃当前 claude 会话，工作目录保留）\n" +
-		"/agent 查看可用 agent；/agent <名> 切换\n" +
-		"/help 显示本帮助"
+		"/help 显示本帮助\n" +
+		"专项任务（评审/编程/写作/运维）直接说需求，主 agent 会委派子代理处理。"
 }
 
 // splitText 把长回复按上限切块（按 rune，尽量在换行处切）。

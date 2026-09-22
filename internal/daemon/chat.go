@@ -11,28 +11,29 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	builtinagents "assistant/internal/agents"
 	"assistant/internal/claudecfg"
 	"assistant/internal/conversations"
 	"assistant/internal/instances"
 	"assistant/internal/provider"
 	"assistant/internal/sessionstore"
-)
 
-// chatSystemPrompt 是对话会话的缺省附加 system 提示词：角色 + 工具边界。
-// agent 定义了 system_prompt 时整体替换本段。
-const chatSystemPrompt = `你是 assistant daemon 的运维对话助手。用户通过聊天通道（微信、QQ 等）提问，你用简洁中文回答。
-能力边界：通过 daemon MCP 只读查询调度状态——目标仓库、待办队列、进行中的评审/分诊会话、最近会话结果。
-必须用工具查询后再回答，不要编造状态；查询不可用（daemon 未运行）时如实说明。
-回答保持简短（移动端聊天场景），要点用短列表；除非用户要求，不复述原始 JSON。`
+	jsonv2 "encoding/json/v2"
+)
 
 // chatSessionsHint 只在配置了记录库时追加：sessions MCP 能回查被压缩掉的完整历史。
 const chatSessionsHint = `
 上下文被压缩或需要回忆更早的对话时，用 sessions MCP 的 session_search/session_read 回查本会话的完整记录。`
+
+// defaultSystemPrompt 返回缺省主 agent 提示词（builtin.json 的 main 预设）：
+// main_agent 未配 system_prompt 或未配置 runtime.agent 时使用。
+func defaultSystemPrompt() string {
+	return builtinagents.Main().SystemPrompt
+}
 
 // AgentRuntime 是一个命名 agent 的生效运行时：启动时由 cmd 层从 config.json
 // 的 agents 定义解析（provider 链、bare 探测等）后注入。零值字段回退 ChatConfig
@@ -78,35 +79,30 @@ type Turn struct {
 	Transport string
 	// Text 是用户消息文本
 	Text string
-	// Agent 是通道级默认 agent 名（空 = ChatConfig.DefaultAgent；会话上用户
-	// /agent 的选择优先于两者）
-	Agent string
+}
+
+// SubagentDefinition 是注入会话的子代理：以 claude 自定义 agent（--agents JSON）
+// 下发，主模型经原生 Task 工具按 description 委派。MCP 并入所在会话的 MCP
+// 配置（子代理共享会话工具面）。
+type SubagentDefinition struct {
+	// Name 是子代理名（agents 池或内置预设）
+	Name string
+	// Description 是一句话能力描述：主模型看它决定何时把任务派给谁
+	Description string
+	// Prompt 是子代理的系统提示词
+	Prompt string
+	// Model 可选模型覆盖（委派执行沿用主 agent 的 provider）
+	Model string
+	// MCP 是该子代理需要的 MCP server 定义（并入会话 MCP 配置）
+	MCP map[string]any
 }
 
 // ChatConfig 是对话会话的配置。
 type ChatConfig struct {
-	// ClaudeBin 是 claude 可执行文件（缺省 PATH 上的 claude）；未定义 agent
-	// 池时也是所有会话的实际取值
-	ClaudeBin string
-	// Model 可选模型覆盖（内置缺省 agent 使用）
-	Model string
-	// Provider 是内置缺省 agent 的供应商运行时覆盖（env/settings/mcp 原样透传；
-	// 零值表示内置缺省）。只作用于对话会话临时配置，不写入仓库文件。
-	Provider claudecfg.Overrides
-	// ProviderName 是内置缺省 agent 的 provider 名（空串表示内置缺省；仅日志展示）
-	ProviderName string
-	// Timeout 是内置缺省 agent 的单轮对话超时（缺省 3 分钟）
-	Timeout time.Duration
-	// Bare 为真时内置缺省 agent 用 claude 的 --bare 最小模式：不加载 hooks、
-	// 插件同步、CLAUDE.md 自动发现与记忆，只认显式传入的 --settings/--mcp-config。
-	// 对话上下文本就全靠显式参数（系统提示词 + 自举 daemon MCP），开关由 cmd 层
-	// 按 claude 是否支持该参数探测决定。agent 池里每个 agent 自带 Bare。
-	Bare bool
-	// Agents 是命名 agent 池（名字 → 生效运行时）：对话轮按「会话上 /agent 的
-	// 选择 > 通道默认 > DefaultAgent」解析；空池表示只有内置缺省。
-	Agents map[string]AgentRuntime
-	// DefaultAgent 是通道与会话都未指定时的兜底 agent 名（空 = 内置缺省）
-	DefaultAgent string
+	// MainAgent 是本运行时的主 agent（唯一接待所有对话通道的 agent）
+	MainAgent AgentRuntime
+	// Subagents 是注入会话的子代理（--agents JSON）：主模型按 description 委派
+	Subagents []SubagentDefinition
 	// StateDir 是会话状态目录（缺省 <配置目录>/chat）
 	StateDir string
 	// SessionDir 是 Claude Code 配置根（缺省 $CLAUDE_CONFIG_DIR 或 ~/.claude）
@@ -138,11 +134,8 @@ type Chat struct {
 
 // NewChat 创建对话会话管理器（加载已持久化的会话映射）。
 func NewChat(config ChatConfig) (*Chat, error) {
-	if strings.TrimSpace(config.ClaudeBin) == "" {
-		config.ClaudeBin = "claude"
-	}
-	if config.Timeout <= 0 {
-		config.Timeout = 3 * time.Minute
+	if strings.TrimSpace(config.MainAgent.ClaudeBin) == "" {
+		config.MainAgent.ClaudeBin = "claude"
 	}
 	if config.Log == nil {
 		config.Log = func(string, ...any) {}
@@ -239,77 +232,13 @@ func (c *Chat) StateDir() string { return c.config.StateDir }
 // SessionDir 返回会话配置根（assistant 托管，不是用户的 ~/.claude）。
 func (c *Chat) SessionDir() string { return c.config.SessionDir }
 
-// AgentNames 返回 agent 池里的名字（字典序；内置缺省不在池里，不算）。
-func (c *Chat) AgentNames() []string {
-	return slices.Sorted(maps.Keys(c.config.Agents))
-}
-
-// HasAgent 判断名字是否在 agent 池里（内置缺省永远是合法取值，不查池）。
-func (c *Chat) HasAgent(name string) bool {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return true
-	}
-	_, ok := c.config.Agents[name]
-	return ok
-}
-
-// SetAgent 记录用户为本会话选定的 agent（/agent 命令）；空名清除选择、回到
-// 通道/全局默认。
-func (c *Chat) SetAgent(conversationID, name string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if err := c.conversations.SetAgent(conversationID, name); err != nil {
-		return err
-	}
-	return conversations.Save(c.conversationsPath(), c.conversations)
-}
-
-// ChosenAgent 返回会话上用户 /agent 选定的 agent 名（未选择为空串）。
-func (c *Chat) ChosenAgent(conversationID string) string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.conversations.AgentOf(conversationID)
-}
-
-// EffectiveAgentName 返回该会话下一轮将生效的 agent 名（空串 = 内置缺省）：
-// 会话上 /agent 的选择 > 通道默认 > DefaultAgent。
-func (c *Chat) EffectiveAgentName(conversationID, channelAgent string) string {
-	if name := c.ChosenAgent(conversationID); name != "" {
-		return name
-	}
-	if name := strings.TrimSpace(channelAgent); name != "" {
-		return name
-	}
-	return strings.TrimSpace(c.config.DefaultAgent)
-}
-
-// agentFor 解析一轮对话实际生效的 agent 运行时：解析不出名字或名字不在池里时
-// 回退内置缺省（不因配置漂移打断对话）。
-func (c *Chat) agentFor(conversationID, channelAgent string) AgentRuntime {
-	if name := c.EffectiveAgentName(conversationID, channelAgent); name != "" {
-		if agent, ok := c.config.Agents[name]; ok {
-			return agent
-		}
-		c.config.Log("agent %s 不在 agent 池里，回退内置缺省", name)
-	}
-	return AgentRuntime{
-		Provider:     c.config.Provider,
-		ProviderName: c.config.ProviderName,
-		Model:        c.config.Model,
-		ClaudeBin:    c.config.ClaudeBin,
-		Bare:         c.config.Bare,
-		Timeout:      c.config.Timeout,
-	}
-}
-
-// Handle 处理一轮对话消息，返回回复文本；同一会话的消息串行执行。生效 agent
-// 按「会话上 /agent 的选择 > turn.Agent（通道默认）> DefaultAgent」解析。
+// Handle 处理一轮对话消息，返回回复文本；同一会话的消息串行执行。对话统一
+// 由本运行时的主 agent 接待，专项任务由主模型经 Task 工具委派子代理。
 func (c *Chat) Handle(ctx context.Context, conversationID string, turn Turn) (string, error) {
 	if c == nil {
 		return "", fmt.Errorf("对话未初始化")
 	}
-	agent := c.agentFor(conversationID, turn.Agent)
+	agent := c.config.MainAgent
 	lock := c.conversationLock(conversationID)
 	lock.Lock()
 	defer lock.Unlock()
@@ -337,13 +266,13 @@ func (c *Chat) Handle(ctx context.Context, conversationID string, turn Turn) (st
 	if err != nil {
 		return "", err
 	}
-	runCtx, cancel := context.WithTimeout(ctx, agent.timeoutOrDefault(c.config.Timeout))
+	runCtx, cancel := context.WithTimeout(ctx, agent.timeoutOrDefault(0))
 	defer cancel()
 	progress := c.progressLogger(sessionID)
 	if c.config.Debug {
 		c.config.Log("对话[%s] 启动：%s", shortSession(sessionID), truncate(strings.Join(args, " "), 600))
 	}
-	result, err := c.run(runCtx, agent.claudeBinOrDefault(c.config.ClaudeBin), args, workspace, progress)
+	result, err := c.run(runCtx, agent.claudeBinOrDefault(c.config.MainAgent.ClaudeBin), args, workspace, progress)
 	if err != nil {
 		return "", fmt.Errorf("对话会话失败: %w", err)
 	}
@@ -408,6 +337,10 @@ func (c *Chat) sessionArgs(sessionID, title string, fresh bool, text, workspace 
 		"--append-system-prompt", c.systemPrompt(agent),
 		"--max-turns", "50",
 	}
+	// 子代理以 claude 自定义 agent 注入：主模型按 description 经原生 Task 工具委派
+	if agentsJSON := c.agentsJSON(); agentsJSON != "" {
+		args = append(args, "--agents", agentsJSON)
+	}
 	// 最小模式：不加载 hooks/插件同步/CLAUDE.md 自动发现与记忆，上下文只有上面
 	// 显式给的系统提示词、settings（含 provider env）与 daemon MCP
 	if agent.Bare {
@@ -430,12 +363,12 @@ func (c *Chat) sessionArgs(sessionID, title string, fresh bool, text, workspace 
 	return args, nil
 }
 
-// systemPrompt 组装对话会话的 system 提示词：agent 自带提示词优先，否则基础
-// 角色 +（配置了记录库时）历史回查提示。
+// systemPrompt 组装对话会话的 system 提示词：主 agent 自带提示词优先，否则
+// 内置 main 预设 +（配置了记录库时）历史回查提示。
 func (c *Chat) systemPrompt(agent AgentRuntime) string {
 	prompt := strings.TrimSpace(agent.SystemPrompt)
 	if prompt == "" {
-		prompt = chatSystemPrompt
+		prompt = defaultSystemPrompt()
 	}
 	if strings.TrimSpace(c.config.Remote.URL) == "" {
 		return prompt
@@ -470,7 +403,8 @@ func (c *Chat) logSessionConfig(sessionID string, agent AgentRuntime, overrides 
 }
 
 // mcpDocument 组装对话会话的 MCP 文档：自举 daemon MCP + provider 定义的原生
-// server（同名由 provider 覆盖）。写文件与日志摘要共用，避免两处漂移。
+// server + 子代理声明的 server（同名依次覆盖：子代理 > provider > 自举）。
+// 写文件与日志摘要共用，避免两处漂移。
 func (c *Chat) mcpDocument(overrides claudecfg.Overrides) map[string]any {
 	servers := map[string]any{
 		claudecfg.MCPServerDaemon: claudecfg.DaemonMCPServer(claudecfg.AssistantCommand()),
@@ -479,8 +413,35 @@ func (c *Chat) mcpDocument(overrides claudecfg.Overrides) map[string]any {
 		// 记录库可用时才注入：否则这几个工具只会返回「未配置」
 		servers[claudecfg.MCPServerSessions] = claudecfg.SessionsMCPServer(claudecfg.AssistantCommand())
 	}
+	for _, subagent := range c.config.Subagents {
+		maps.Copy(servers, subagent.MCP)
+	}
 	document := map[string]any{"mcpServers": servers}
 	return claudecfg.MergeMCPServers(document, overrides)
+}
+
+// agentsJSON 渲染子代理定义（claude --agents JSON）：主模型按 description 委派；
+// 没有子代理时返回空串（不加旗标）。
+func (c *Chat) agentsJSON() string {
+	if len(c.config.Subagents) == 0 {
+		return ""
+	}
+	agents := make(map[string]any, len(c.config.Subagents))
+	for _, subagent := range c.config.Subagents {
+		definition := map[string]any{
+			"description": subagent.Description,
+			"prompt":      subagent.Prompt,
+		}
+		if subagent.Model != "" {
+			definition["model"] = subagent.Model
+		}
+		agents[subagent.Name] = definition
+	}
+	data, err := jsonv2.Marshal(agents)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 // writeSettings 写入对话会话的独立设置（env + 权限放行 + provider 覆盖，含

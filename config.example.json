@@ -23,12 +23,8 @@
     }
   },
   "agents": {
-    "ops": {
-      "provider": "opencode",
-      "model": "claude-sonnet-5",
-      "session_timeout_ms": 180000
-    },
     "qa": {
+      "description": "测试问答子代理",
       "provider": "zhipu",
       "system_prompt": "你是测试助手，只回答与测试相关的问题。",
       "mcp": {
@@ -39,54 +35,26 @@
       }
     }
   },
-  "default_agent": "ops",
-  "instances": [
+  "channels": [
     {
+      "type": "gitea",
       "host": "https://gitea.example.com",
-      "reviewer": {
-        "name": "ai"
-      },
-      "merger": {
-        "name": "merge"
-      },
+      "token": "${GITEA_REVIEW_TOKEN}",
+      "reviewer": "ai",
+      "merger": "merge",
       "repos": [
-        {
-          "name": "owner/repo"
-        },
+        "owner/repo",
         {
           "name": "owner/another",
           "dir": "/srv/another",
           "provider": "anthropic"
         }
       ]
-    }
-  ],
-  "weixin": {
-    "enabled": true,
-    "base_url": "https://ilinkai.weixin.qq.com",
-    "bot_token": "created-by-assistant-weixin-login",
-    "login_user_id": "wx-user-id",
-    "agent": "ops",
-    "provider": "opencode",
-    "admin_users": [
-      "wx-user-id"
-    ]
-  },
-  "qq": {
-    "enabled": true,
-    "app_id": "your-qq-bot-appid",
-    "app_secret": "your-qq-bot-appsecret",
-    "agent": "ops",
-    "admin_users": [
-      "qq-openid-1"
-    ]
-  },
-  "channels": [
+    },
     {
       "type": "weixin",
       "name": "work",
       "bot_token": "created-by-assistant-weixin-login--name-work",
-      "agent": "ops",
       "admin_users": [
         "wx-user-id"
       ]
@@ -94,10 +62,20 @@
     {
       "type": "telegram",
       "bot_token": "123456:ABC-your-botfather-token",
-      "agent": "writer",
       "admin_users": [
         "123456789"
       ]
     }
-  ]
+  ],
+  "runtimes": {
+    "main": {
+      "main_agent": "main",
+      "subagents": ["ops", "coder", "writer", "review", "qa"],
+      "channels": ["gitea", "weixin/work", "telegram"],
+      "provider": "zhipu",
+      "review_name_template": "{instance-name}-{username-or-org}--{name}-{pr|issue}-{index}",
+      "api_listen": "127.0.0.1:8770"
+    }
+  },
+  "default_runtime": "main"
 }

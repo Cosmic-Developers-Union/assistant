@@ -133,8 +133,8 @@ func resolveLoginHost(ctx context.Context, configPath, argHost, flagHost string)
 		return strings.TrimRight(host, "/"), nil
 	}
 	if _, file, err := resolveInstanceFile(commandOptions{ConfigPath: configPath}); err == nil &&
-		file != nil && len(file.Instances) == 1 {
-		return strings.TrimRight(file.Instances[0].Host, "/"), nil
+		file != nil && giteaHostCount(file) == 1 {
+		return strings.TrimRight(giteaChannels(file)[0].Host, "/"), nil
 	}
 	remote, ok := dispatcher.SelectGiteaRemote(".", func(candidate string) bool {
 		return status.ProbeGitea(ctx, candidate)
@@ -145,26 +145,13 @@ func resolveLoginHost(ctx context.Context, configPath, argHost, flagHost string)
 	return "", fmt.Errorf("请指定平台地址")
 }
 
-// upsertLoginInstance 按 host 更新/新增实例条目；保留未触碰的字段。
-func upsertLoginInstance(file *instances.File, host string, mutate func(*instances.Instance)) {
-	for index := range file.Instances {
-		if sameHost(file.Instances[index].Host, host) {
-			file.Instances[index].Host = host
-			mutate(&file.Instances[index])
-			return
-		}
-	}
-	instance := instances.Instance{Host: host}
-	mutate(&instance)
-	file.Instances = append(file.Instances, instance)
+// upsertLoginInstance 按 host 更新/新增 gitea 通道条目；保留未触碰的字段。
+func upsertLoginInstance(file *instances.File, host string) {
+	upsertGiteaChannel(file, host)
 }
 
 func saveLoginFile(file *instances.File, path string) error {
-	file.Normalize()
-	if err := file.Validate(); err != nil {
-		return err
-	}
-	return instances.Save(path, file)
+	return saveConfig(file, path)
 }
 
 func newLoginListCommand(configFlag *string) *cobra.Command {
@@ -179,7 +166,7 @@ func newLoginListCommand(configFlag *string) *cobra.Command {
 			}
 			stdout := command.OutOrStdout()
 			store, credentialPath := loadCredentialStore(command, path)
-			if file == nil || len(file.Instances) == 0 {
+			if file == nil || giteaHostCount(file) == 0 {
 				if store.Empty() {
 					fmt.Fprintln(stdout, "未登记任何平台（assistant login 添加）")
 					return nil
@@ -191,10 +178,10 @@ func newLoginListCommand(configFlag *string) *cobra.Command {
 				fmt.Fprintf(stdout, "凭据库：%s\n", credentialPath)
 				return nil
 			}
-			for _, instance := range file.Instances {
+			for _, channel := range giteaChannels(file) {
 				fmt.Fprintf(stdout, "%s\trepos=%d\treviewer=%s\tmerger=%s\tidentity=%s\ttokens=%s\n",
-					instance.Host, len(instance.Repos), instance.Reviewer.Name, instance.Merger.Name,
-					describeIdentity(store, instance.Host), describePurposes(store, instance.Host))
+					channel.Host, len(channel.Repos), channel.Reviewer, channel.Merger,
+					describeIdentity(store, channel.Host), describePurposes(store, channel.Host))
 			}
 			if credentialPath != "" {
 				fmt.Fprintf(stdout, "凭据库：%s\n", credentialPath)
@@ -280,15 +267,15 @@ func newLoginRemoveCommand(configFlag *string) *cobra.Command {
 
 			removedPlatform := false
 			if file != nil {
-				kept := file.Instances[:0]
-				for _, instance := range file.Instances {
-					if sameHost(instance.Host, host) {
+				kept := file.Channels[:0]
+				for _, channel := range file.Channels {
+					if channel.Type == instances.ChannelGitea && sameHost(channel.Host, host) {
 						removedPlatform = true
 						continue
 					}
-					kept = append(kept, instance)
+					kept = append(kept, channel)
 				}
-				file.Instances = kept
+				file.Channels = kept
 			}
 
 			credentialPath, err := credentials.PathFor(path)
@@ -319,8 +306,8 @@ func newLoginRemoveCommand(configFlag *string) *cobra.Command {
 				return err
 			}
 
-			emptyFile := file == nil || len(file.Instances) == 0
-			if emptyFile && (file == nil || file.Weixin == nil) {
+			emptyFile := file == nil || configHasNoPlatform(file)
+			if emptyFile {
 				if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 					return err
 				}

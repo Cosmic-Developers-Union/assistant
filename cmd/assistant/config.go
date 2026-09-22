@@ -60,14 +60,14 @@ func newConfigCommand(configFlag *string) *cobra.Command {
 	newOptions := &configNewOptions{}
 	newCommand := &cobra.Command{
 		Use:   "new",
-		Short: "生成空配置骨架 config.json（$schema + 空 instances），首次部署起步用",
+		Short: "生成空配置骨架 config.json（$schema + 空 channels），首次部署起步用",
 		Long: "在目标位置写一份最小可编辑的 config.json 骨架：\n" +
-			"  {\"$schema\": \"./config.schema.json\", \"instances\": []}\n" +
+			"  {\"$schema\": \"./config.schema.json\", \"channels\": []}\n" +
 			"  并把 schema 写到旁边（编辑器补全与悬停文档，离线可用）。\n\n" +
-			"骨架还不能直接运行（instances 为空）；随后手工编辑 providers/instances，\n" +
-			"或 assistant login <host> / setup 之后用 config init 补全。已有文件不覆盖\n" +
-			"（--force 才覆盖）。落点与 config init 一致：--config / ASSISTANT_CONFIG /\n" +
-			"平台标准配置目录（XDG / Known Folders / Library）。",
+			"骨架还不能直接运行（channels 为空）；随后手工编辑 providers/channels/\n" +
+			"runtimes，或 assistant login <host> / setup 之后用 config init 补全。\n" +
+			"已有文件不覆盖（--force 才覆盖）。落点与 config init 一致：--config /\n" +
+			"ASSISTANT_CONFIG / 平台标准配置目录（XDG / Known Folders / Library）。",
 		Args: cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			return runConfigNew(command, *configFlag, newOptions)
@@ -75,6 +75,7 @@ func newConfigCommand(configFlag *string) *cobra.Command {
 	}
 	newCommand.Flags().BoolVar(&newOptions.Force, "force", false, "覆盖已存在的 config.json")
 	command.AddCommand(newCommand)
+	command.AddCommand(newConfigMigrateCommand(configFlag))
 	return command
 }
 
@@ -97,8 +98,8 @@ func runConfigNew(command *cobra.Command, configPath string, options *configNewO
 	}
 	// 骨架手工构造：struct 序列化会带出空的 optimizations 段，"空"名不副实
 	skeleton, err := json.MarshalIndent(map[string]any{
-		"$schema":   schema.Reference,
-		"instances": []any{},
+		"$schema":  schema.Reference,
+		"channels": []any{},
 	}, "", "  ")
 	if err != nil {
 		return err
@@ -248,9 +249,9 @@ func prefillInstances(configPath string, file *instances.File) ([]string, error)
 	if len(store.Identity) == 0 {
 		return nil, nil
 	}
-	known := make(map[string]bool, len(file.Instances))
-	for _, instance := range file.Instances {
-		known[credentials.NormalizeHost(instance.Host)] = true
+	known := make(map[string]bool, len(file.Channels))
+	for _, channel := range giteaChannels(file) {
+		known[credentials.NormalizeHost(channel.Host)] = true
 	}
 	changes := make([]string, 0, len(store.Identity))
 	for _, identity := range store.Identity {
@@ -259,17 +260,13 @@ func prefillInstances(configPath string, file *instances.File) ([]string, error)
 			continue
 		}
 		known[host] = true
-		file.Instances = append(file.Instances, instances.Instance{
-			Host:     host,
-			Reviewer: instances.Account{Name: instances.DefaultReviewerName},
-			Merger:   instances.Account{Name: instances.DefaultMergerName},
-			Repos:    []instances.Repo{},
-		})
+		channel := upsertGiteaChannel(file, host)
+		channel.Repos = []instances.Repo{}
 		who := identity.User
 		if identity.IsAdmin {
 			who += "（管理员）"
 		}
-		changes = append(changes, fmt.Sprintf("+ instances[] %s（credentials.json 里 %s 的登录身份）", host, who))
+		changes = append(changes, fmt.Sprintf("+ gitea 通道 %s（credentials.json 里 %s 的登录身份）", host, who))
 	}
 	return changes, nil
 }

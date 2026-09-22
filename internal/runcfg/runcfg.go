@@ -26,7 +26,7 @@ import (
 // FileName 是 run 配置文件的标准名字。
 const FileName = "run.yaml"
 
-// File 是 run.yaml 的根结构。字段与 run.example.yaml 一一对应。
+// File 是旧 run.yaml 的根结构（已并入 config.json；本包仅供 `assistant config migrate` 读取）。
 type File struct {
 	// Monitor 是站点 → 监控配置；键是 Gitea 根地址（http(s)://...）。
 	Monitor map[string]Monitor `yaml:"monitor"`
@@ -293,8 +293,8 @@ func (f *File) reviewName(instanceHost, fullName, kind string, index int64, temp
 	return strings.NewReplacer(pairs...).Replace(template), nil
 }
 
-// DefaultReviewNameTemplate 是 review-name-template 的缺省值（与
-// run.example.yaml 示例一致）。
+// DefaultReviewNameTemplate 是 review-name-template 的缺省值（与 config.json
+// runtime 节的缺省一致）。
 const DefaultReviewNameTemplate = "{instance-name}-{username-or-org}--{name}-{pr|issue}-{index}"
 
 // DefaultSessionsNameTemplate 是 sessions-name-template 的缺省值。

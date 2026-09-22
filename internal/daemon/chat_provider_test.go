@@ -15,19 +15,21 @@ import (
 // MCP server 合并进自举 MCP 配置（env 缺省注入）。
 func TestChatProviderOverrides(t *testing.T) {
 	chat, err := NewChat(ChatConfig{
-		ClaudeBin:  "claude",
 		StateDir:   t.TempDir(),
 		SessionDir: t.TempDir(),
-		Provider: claudecfg.Overrides{
-			Env:      map[string]string{"ANTHROPIC_BASE_URL": "https://gw.example.com"},
-			Settings: map[string]any{"model": "glm-4.6"},
-			MCP:      map[string]any{"search": map[string]any{"command": "search-mcp"}},
+		MainAgent: AgentRuntime{
+			ClaudeBin: "claude",
+			Provider: claudecfg.Overrides{
+				Env:      map[string]string{"ANTHROPIC_BASE_URL": "https://gw.example.com"},
+				Settings: map[string]any{"model": "glm-4.6"},
+				MCP:      map[string]any{"search": map[string]any{"command": "search-mcp"}},
+			},
 		},
 	})
 	if err != nil {
 		t.Fatalf("NewChat: %v", err)
 	}
-	settingsPath, err := chat.writeSettings(chat.config.Provider, t.TempDir())
+	settingsPath, err := chat.writeSettings(chat.config.MainAgent.Provider, t.TempDir())
 	if err != nil {
 		t.Fatalf("writeSettings: %v", err)
 	}
@@ -58,7 +60,7 @@ func TestChatProviderOverrides(t *testing.T) {
 		t.Errorf("daemon MCP 放行丢失：%v", allow)
 	}
 
-	mcpPath, err := chat.writeMCPConfig(chat.config.Provider, t.TempDir())
+	mcpPath, err := chat.writeMCPConfig(chat.config.MainAgent.Provider, t.TempDir())
 	if err != nil {
 		t.Fatalf("writeMCPConfig: %v", err)
 	}
@@ -85,16 +87,15 @@ func TestChatProviderOverrides(t *testing.T) {
 // 且复用该会话的稳定 UUID（多轮命中网关缓存）。
 func TestChatProviderSessionHeader(t *testing.T) {
 	chat, err := NewChat(ChatConfig{
-		ClaudeBin:    "claude",
-		StateDir:     t.TempDir(),
-		SessionDir:   t.TempDir(),
-		ProviderName: "opencode",
+		StateDir:   t.TempDir(),
+		SessionDir: t.TempDir(),
+		MainAgent:  AgentRuntime{ClaudeBin: "claude", ProviderName: "opencode"},
 	})
 	if err != nil {
 		t.Fatalf("NewChat: %v", err)
 	}
 	sessionID := "11111111-2222-4333-8444-555555555555"
-	args, err := chat.sessionArgs(sessionID, "chat-test", true, "你好", t.TempDir(), chat.agentFor("user-1", ""))
+	args, err := chat.sessionArgs(sessionID, "chat-test", true, "你好", t.TempDir(), chat.config.MainAgent)
 	if err != nil {
 		t.Fatalf("sessionArgs: %v", err)
 	}
@@ -132,9 +133,9 @@ func TestChatSessionTitleAndProjectEnv(t *testing.T) {
 	var gotArgs, gotEnv []string
 	turns := 0
 	chat, err := NewChat(ChatConfig{
-		ClaudeBin:  "claude",
 		StateDir:   stateDir,
 		SessionDir: filepath.Join(stateDir, "claude"),
+		MainAgent:  AgentRuntime{ClaudeBin: "claude"},
 		RunClaude: func(_ context.Context, _ string, args []string, _ string, env []string) ([]byte, error) {
 			gotArgs, gotEnv = args, env
 			turns++

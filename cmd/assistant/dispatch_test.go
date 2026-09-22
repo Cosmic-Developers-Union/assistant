@@ -16,38 +16,30 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// run.yaml 存在时 run 完全按它运行：站点/仓库来自 monitor，令牌回退凭据库，
-// 落点与评审工作区按 root/repos-dir/review-*；config.json 退为账号身份层
-// （这里的 config.json 没有 instances，不应阻断运行）。
-func TestResolveDispatchTargetsFromRunYaml(t *testing.T) {
+// gitea 通道 × runtime 的目标装配：受管克隆/状态/评审工作区都落在 runtime
+// 的 $root 树下，令牌回退凭据库，--repo 过滤与空通道跳过照旧。
+func TestResolveDispatchTargetsFromGiteaChannel(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	data := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", data)
 	configDir := t.TempDir()
 	configPath := filepath.Join(configDir, "config.json")
-	// run.yaml 模式下 config.json 只承担账号身份；instances 可为空（weixin 兜底
-	// 通过校验），不应阻断运行
-	if err := instances.Save(configPath, &instances.File{Weixin: &instances.Weixin{}}); err != nil {
+	if err := instances.Save(configPath, &instances.File{
+		Channels: []instances.Channel{{
+			Type: instances.ChannelGitea,
+			Host: "https://gitea.example.com",
+			Repos: []instances.Repo{
+				{Name: "acme/rocket"},
+				{Name: "acme/lab"},
+			},
+		}},
+		Runtimes: map[string]instances.Runtime{
+			"main": {Root: data, ReviewRoot: "/tmp"},
+		},
+	}); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("ASSISTANT_CONFIG", configPath)
 	withReviewCredentialFor(t, configPath, "https://gitea.example.com")
-
-	runYaml := `
-monitor:
-  https://gitea.example.com:
-    repos:
-      - acme/rocket
-      - acme/lab
-root: ${XDG_DATA_HOME:-$HOME/.local/share}/Cosmic-Developers-Union/assistant
-repos-dir: $root/repos
-review-root: /tmp
-review-name-template: "${instance-name}-{username-or-org}--{name}-{pr|issue}-{index}"
-`
-	runPath := filepath.Join(configDir, "run.yaml")
-	if err := os.WriteFile(runPath, []byte(runYaml), 0o644); err != nil {
-		t.Fatal(err)
-	}
 
 	stderr := &bytes.Buffer{}
 	command := &cobra.Command{}
@@ -68,32 +60,29 @@ review-name-template: "${instance-name}-{username-or-org}--{name}-{pr|issue}-{in
 		t.Errorf("instance.Host = %q（受管克隆与 daemon 状态按它键控）", first.instance.Host)
 	}
 	if !first.managed {
-		t.Error("run.yaml 目标应是受管克隆")
+		t.Error("gitea 通道目标应是受管克隆")
 	}
-	// 落点：root 决定的 repos 根
-	wantRepo := filepath.Join(data, "Cosmic-Developers-Union", "assistant", "repos", "gitea.example.com", "acme", "rocket")
+	// 落点：runtime.root 决定的 repos 根
+	wantRepo := filepath.Join(data, "repos", "gitea.example.com", "acme", "rocket")
 	if first.repoDir != wantRepo {
 		t.Errorf("repoDir = %q, want %q", first.repoDir, wantRepo)
 	}
 	// 日志/锁在检出之外的状态目录
-	wantState := filepath.Join(data, "Cosmic-Developers-Union", "assistant", "state", "gitea.example.com", "acme", "rocket")
+	wantState := filepath.Join(data, "state", "gitea.example.com", "acme", "rocket")
 	if first.config.LogDir != filepath.Join(wantState, "logs") || first.config.LockFile != filepath.Join(wantState, "dispatcher.lock") {
 		t.Errorf("LogDir = %q LockFile = %q", first.config.LogDir, first.config.LockFile)
 	}
 	if !first.config.SyncMirror {
 		t.Error("受管克隆应恒开镜像同步")
 	}
-	// 评审工作区：review-root + 命名模板展开（模板已含站点与仓库）
+	// 评审工作区：review_root + 命名模板展开（模板已含站点与仓库）
 	wantWorktree := filepath.Join("/tmp", "gitea.example.com-acme--rocket", "worktrees")
 	if first.config.WorktreeRoot != wantWorktree {
 		t.Errorf("WorktreeRoot = %q, want %q", first.config.WorktreeRoot, wantWorktree)
 	}
-	// monitor 未写 token 时回退凭据库
+	// 通道未写 token 时回退凭据库
 	if first.config.AccessToken == "" {
 		t.Error("AccessToken 不应为空（回退凭据库）")
-	}
-	if !strings.Contains(stderr.String(), "monitor[https://gitea.example.com]") {
-		t.Errorf("stderr 缺少 monitor 日志：%s", stderr.String())
 	}
 
 	// --repo 过滤仍可用
@@ -105,22 +94,27 @@ review-name-template: "${instance-name}-{username-or-org}--{name}-{pr|issue}-{in
 		t.Fatalf("--repo 过滤结果 = %+v", filtered)
 	}
 
-	// 不在 run.yaml 里的仓库报错
+	// 不在通道 repos 里的仓库报错
 	if _, err := resolveDispatchTargets(command, "acme/other", configPath, &dispatcherOptions{}); err == nil {
-		t.Error("不在 monitor repos 中的仓库应报错")
+		t.Error("不在 repos 中的仓库应报错")
+	}
+
+	// --run 已退役
+	if _, err := resolveDispatchTargets(command, "", configPath, &dispatcherOptions{Run: "run.yaml"}); err == nil ||
+		!strings.Contains(err.Error(), "已退役") {
+		t.Errorf("--run 应报退役错误：%v", err)
 	}
 }
 
-// 未 setup 的实例（无 repos）应跳过并提示，不阻断其他实例。
-func TestResolveDispatchTargetsSkipsInstancesWithoutRepos(t *testing.T) {
+// 未 setup 的通道（无 repos）应跳过并提示，不阻断其他通道；纯聊天配置返回
+// 空目标不报错。
+func TestResolveDispatchTargetsSkipsChannelsWithoutRepos(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	dir := t.TempDir()
-	file := &instances.File{Instances: []instances.Instance{
-		{Host: "https://gitea.aicler.com"},
-		{
-			Host:  "https://gitea.mms.vincentge.top",
-			Repos: []instances.Repo{{Name: "Ge/assistant", Dir: dir}},
-		},
+	file := &instances.File{Channels: []instances.Channel{
+		{Type: instances.ChannelGitea, Host: "https://gitea.aicler.com"},
+		{Type: instances.ChannelGitea, Name: "mms", Host: "https://gitea.mms.vincentge.top",
+			Repos: []instances.Repo{{Name: "Ge/assistant", Dir: dir}}},
 	}}
 	file.Normalize()
 	path := filepath.Join(dir, "config.json")
@@ -141,28 +135,39 @@ func TestResolveDispatchTargetsSkipsInstancesWithoutRepos(t *testing.T) {
 	if len(targets) != 1 || targets[0].config.Repository.FullName() != "Ge/assistant" {
 		t.Fatalf("targets = %+v, want 仅 Ge/assistant", targets)
 	}
-	if !strings.Contains(stderr.String(), "跳过 https://gitea.aicler.com") {
+	if !strings.Contains(stderr.String(), "跳过 gitea 通道 gitea") {
 		t.Errorf("stderr = %q, 缺少跳过提示", stderr.String())
+	}
+
+	// 纯聊天配置（只有 weixin 通道）：零 gitea 目标不报错（纯聊天 daemon）
+	chatOnly := filepath.Join(dir, "chat-only.json")
+	if err := instances.Save(chatOnly, &instances.File{
+		Channels: []instances.Channel{{Type: instances.ChannelWeixin, BotToken: "t"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	targets, err = resolveDispatchTargets(command, "", chatOnly, &dispatcherOptions{})
+	if err != nil || len(targets) != 0 {
+		t.Fatalf("纯聊天配置 targets = %+v err = %v, want 空", targets, err)
 	}
 }
 
-// 未配置 repo.dir 的仓库使用受管克隆落点：检出、日志/锁都在数据目录（不随
-// 当前目录漂移），worktree 固定在 /tmp。
-func TestResolveInstanceTargetUsesManagedDefaults(t *testing.T) {
+// 未配置 repo.dir 的仓库使用 runtime 树下的受管克隆落点：检出、日志/锁都在
+// $root（不随当前目录漂移），评审工作区在 $root/review。
+func TestGiteaTargetUsesManagedDefaults(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	withReviewCredential(t, "https://gitea.example.com")
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	instance := instances.Instance{
-		Host:     "https://gitea.example.com",
-		Reviewer: instances.Account{Name: "ai"},
-		Merger:   instances.Account{Name: "merge"},
+	data := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", data)
+	channel := instances.Channel{
+		Type: instances.ChannelGitea, Host: "https://gitea.example.com",
+		Reviewer: "ai", Merger: "merge",
 	}
 	command := &cobra.Command{}
-	target, err := resolveInstanceTarget(command, &instances.File{}, "", instance, instances.Repo{Name: "acme/repo"}, &dispatcherOptions{})
+	target, err := giteaTarget(command, &instances.File{}, "", instances.Runtime{}, &channel, instances.Repo{Name: "acme/repo"}, &dispatcherOptions{})
 	if err != nil {
-		t.Fatalf("resolveInstanceTarget: %v", err)
+		t.Fatalf("giteaTarget: %v", err)
 	}
-	data := os.Getenv("XDG_DATA_HOME")
 	repoDir := filepath.Join(data, "Cosmic-Developers-Union", "assistant", "repos", "gitea.example.com", "acme", "repo")
 	stateDir := filepath.Join(data, "Cosmic-Developers-Union", "assistant", "state", "gitea.example.com", "acme", "repo")
 	if !target.managed || target.repoDir != repoDir {
@@ -174,29 +179,34 @@ func TestResolveInstanceTargetUsesManagedDefaults(t *testing.T) {
 	if target.config.LockFile != filepath.Join(stateDir, "dispatcher.lock") {
 		t.Errorf("LockFile = %q", target.config.LockFile)
 	}
-	wantWorktree := filepath.Join(os.TempDir(), "agent-dispatcher", "gitea.example.com-acme-repo", "worktrees")
+	wantWorktree := filepath.Join(data, "Cosmic-Developers-Union", "assistant", "review",
+		"gitea.example.com-acme--repo", "worktrees")
 	if target.config.WorktreeRoot != wantWorktree {
 		t.Errorf("WorktreeRoot = %q, want %q", target.config.WorktreeRoot, wantWorktree)
 	}
 	if !target.config.SyncMirror {
 		t.Error("受管克隆应恒开镜像同步")
 	}
+	// 轮询/超时/并发缺省取 runtime
+	if target.config.Interval <= 0 || target.config.SessionTimeout <= 0 || target.config.Concurrency <= 0 {
+		t.Errorf("runtime 缺省参数未生效：%+v", target.config)
+	}
 }
 
 // 显式配置 dir 的共享检出保持原语义：日志/锁在检出内，不受管、不自动镜像。
-func TestResolveInstanceTargetExplicitDir(t *testing.T) {
+func TestGiteaTargetExplicitDir(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	withReviewCredential(t, "https://gitea.example.com")
 	dir := t.TempDir()
-	instance := instances.Instance{
-		Host:     "https://gitea.example.com",
-		Reviewer: instances.Account{Name: "ai"},
-		Merger:   instances.Account{Name: "merge"},
+	channel := instances.Channel{
+		Type: instances.ChannelGitea, Host: "https://gitea.example.com",
+		Reviewer: "ai", Merger: "merge",
 	}
 	command := &cobra.Command{}
-	target, err := resolveInstanceTarget(command, &instances.File{}, "", instance, instances.Repo{Name: "acme/repo", Dir: dir}, &dispatcherOptions{})
+	target, err := giteaTarget(command, &instances.File{}, "", instances.Runtime{}, &channel,
+		instances.Repo{Name: "acme/repo", Dir: dir}, &dispatcherOptions{})
 	if err != nil {
-		t.Fatalf("resolveInstanceTarget: %v", err)
+		t.Fatalf("giteaTarget: %v", err)
 	}
 	if target.managed || target.repoDir != dir {
 		t.Errorf("managed=%v repoDir=%q, want 非受管 %q", target.managed, target.repoDir, dir)
@@ -214,16 +224,16 @@ func TestRepoDirOverride(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	withReviewCredential(t, "https://gitea.example.com")
 	dir := t.TempDir()
-	instance := instances.Instance{
-		Host:     "https://gitea.example.com",
-		Reviewer: instances.Account{Name: "ai"},
-		Merger:   instances.Account{Name: "merge"},
-	}
 	command := &cobra.Command{}
-	target, err := resolveInstanceTarget(
-		command, &instances.File{}, "", instance, instances.Repo{Name: "acme/repo"}, &dispatcherOptions{RepoDir: dir})
+	channel := instances.Channel{
+		Type: instances.ChannelGitea, Host: "https://gitea.example.com",
+		Reviewer: "ai", Merger: "merge",
+	}
+	target, err := giteaTarget(
+		command, &instances.File{}, "", instances.Runtime{}, &channel,
+		instances.Repo{Name: "acme/repo"}, &dispatcherOptions{RepoDir: dir})
 	if err != nil {
-		t.Fatalf("resolveInstanceTarget: %v", err)
+		t.Fatalf("giteaTarget: %v", err)
 	}
 	if target.managed || target.repoDir != dir {
 		t.Errorf("--repo-dir 覆盖应是非受管检出：managed=%v dir=%q", target.managed, target.repoDir)
@@ -231,11 +241,10 @@ func TestRepoDirOverride(t *testing.T) {
 
 	// 配置里两个仓库 + --repo-dir 且未用 --repo 收敛 → 报错
 	configPath := filepath.Join(t.TempDir(), "config.json")
-	file := &instances.File{Instances: []instances.Instance{{
-		Host:     instance.Host,
-		Reviewer: instance.Reviewer,
-		Merger:   instance.Merger,
-		Repos:    []instances.Repo{{Name: "acme/one"}, {Name: "acme/two"}},
+	file := &instances.File{Channels: []instances.Channel{{
+		Type:  instances.ChannelGitea,
+		Host:  channel.Host,
+		Repos: []instances.Repo{{Name: "acme/one"}, {Name: "acme/two"}},
 	}}}
 	file.Normalize()
 	if err := instances.Save(configPath, file); err != nil {
@@ -258,13 +267,13 @@ func TestPrepareManagedTargetsIgnoresScaffolding(t *testing.T) {
 	stderr := &bytes.Buffer{}
 	command.SetErr(stderr)
 
+	channel := instances.Channel{
+		Type: instances.ChannelGitea, Host: "https://gitea.example.com",
+		Reviewer: "ai", Merger: "merge",
+	}
 	targetFor := func(name string) dispatchTarget {
-		instance := instances.Instance{
-			Host:     "https://gitea.example.com",
-			Reviewer: instances.Account{Name: "ai"},
-			Merger:   instances.Account{Name: "merge"},
-		}
-		target, err := resolveInstanceTarget(command, &instances.File{}, "", instance, instances.Repo{Name: name}, &dispatcherOptions{})
+		target, err := giteaTarget(command, &instances.File{}, "", instances.Runtime{}, &channel,
+			instances.Repo{Name: name}, &dispatcherOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -309,8 +318,8 @@ func TestPrepareManagedTargetsIgnoresScaffolding(t *testing.T) {
 	}
 }
 
-// provider 逐级回退写进运行配置（仅运行时覆盖）：repo > instance > 全局默认。
-func TestResolveInstanceTargetProviderCascade(t *testing.T) {
+// provider 逐级回退写进运行配置（仅运行时覆盖）：repo > 通道 > runtime > 全局默认。
+func TestGiteaTargetProviderCascade(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	withReviewCredential(t, "https://gitea.example.com")
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
@@ -324,17 +333,16 @@ func TestResolveInstanceTargetProviderCascade(t *testing.T) {
 			"repo":     {Env: map[string]string{"SCOPE": "repo"}},
 		},
 	}
-	instance := instances.Instance{
-		Host:     "https://gitea.example.com",
-		Provider: "instance",
-		Reviewer: instances.Account{Name: "ai"},
-		Merger:   instances.Account{Name: "merge"},
+	channel := instances.Channel{
+		Type: instances.ChannelGitea, Host: "https://gitea.example.com",
+		Reviewer: "ai", Merger: "merge", Provider: "instance",
 	}
+	runtime := instances.Runtime{}
 
 	repo := instances.Repo{Name: "acme/repo", Provider: "repo"}
-	target, err := resolveInstanceTarget(command, file, "", instance, repo, &dispatcherOptions{})
+	target, err := giteaTarget(command, file, "", runtime, &channel, repo, &dispatcherOptions{})
 	if err != nil {
-		t.Fatalf("resolveInstanceTarget: %v", err)
+		t.Fatalf("giteaTarget: %v", err)
 	}
 	if target.config.ProviderName != "repo" || target.config.Provider.Env["SCOPE"] != "repo" {
 		t.Errorf("repo 级 provider 未生效：%q %+v", target.config.ProviderName, target.config.Provider.Env)
@@ -347,16 +355,16 @@ func TestResolveInstanceTargetProviderCascade(t *testing.T) {
 	}
 
 	repo.Provider = ""
-	target, err = resolveInstanceTarget(command, file, "", instance, repo, &dispatcherOptions{})
+	target, err = giteaTarget(command, file, "", runtime, &channel, repo, &dispatcherOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if target.config.ProviderName != "instance" || target.config.Provider.Env["SCOPE"] != "instance" {
-		t.Errorf("instance 级 provider 未生效：%q %+v", target.config.ProviderName, target.config.Provider.Env)
+		t.Errorf("通道级 provider 未生效：%q %+v", target.config.ProviderName, target.config.Provider.Env)
 	}
 
-	instance.Provider = ""
-	target, err = resolveInstanceTarget(command, file, "", instance, repo, &dispatcherOptions{})
+	channel.Provider = ""
+	target, err = giteaTarget(command, file, "", runtime, &channel, repo, &dispatcherOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,9 +372,18 @@ func TestResolveInstanceTargetProviderCascade(t *testing.T) {
 		t.Errorf("全局 provider 未生效：%q %+v", target.config.ProviderName, target.config.Provider.Env)
 	}
 
+	runtime.Provider = "instance"
+	target, err = giteaTarget(command, file, "", runtime, &channel, repo, &dispatcherOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.config.ProviderName != "instance" || target.config.Provider.Env["SCOPE"] != "instance" {
+		t.Errorf("runtime 级 provider 未生效：%q %+v", target.config.ProviderName, target.config.Provider.Env)
+	}
+
 	// 引用了未定义的 provider 在配置校验期就会被拒绝
 	file.DefaultProvider = "missing"
-	file.Instances = []instances.Instance{instance}
+	file.Channels = []instances.Channel{channel}
 	file.Weixin = &instances.Weixin{BotToken: "t"}
 	file.Normalize()
 	if err := file.Validate(); err == nil {

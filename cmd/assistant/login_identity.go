@@ -128,7 +128,7 @@ func runIdentityLogin(command *cobra.Command, prompts *promptSession, host, conf
 		}
 		return fmt.Errorf("写入凭据库失败: %w", err)
 	}
-	upsertLoginInstance(file, host, func(*instances.Instance) {})
+	upsertLoginInstance(file, host)
 	if err := saveLoginFile(file, writePath); err != nil {
 		return err
 	}

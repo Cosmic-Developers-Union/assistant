@@ -30,6 +30,7 @@ import (
 	"syscall"
 	"time"
 
+	builtinagents "assistant/internal/agents"
 	"assistant/internal/claudecfg"
 	"assistant/internal/provider"
 	"assistant/skills"
@@ -386,11 +387,18 @@ func ReadReviewConventions(projectDir string) string {
 }
 
 // ReviewProtocolPrompt 组装评审/分诊会话的附加 system 提示词：assistant **内置**
-// 的 review 协议（与 skills/review/SKILL.md 同一份内容）打头，项目自有约定
-// （<projectDir>/.assistant/review.md，如存在）附在其后。协议随二进制走，因此
-// 仓库没有 install 过、或没有 .claude/skills 都不影响评审。
+// 的 review agent 协议（agents 注册表取值，唯一事实源 skills/review/SKILL.md）
+// 打头，项目自有约定（<projectDir>/.assistant/review.md，如存在）附在其后。
+// 协议随二进制走，因此仓库没有 install 过、或没有 .claude/skills 都不影响评审。
 func ReviewProtocolPrompt(projectDir string) string {
-	sections := []string{strings.TrimSpace(skills.Review)}
+	protocol := ""
+	if definition, ok := builtinagents.Lookup("review"); ok {
+		protocol = strings.TrimSpace(definition.SystemPrompt)
+	}
+	if protocol == "" {
+		protocol = strings.TrimSpace(skills.ReviewPrompt())
+	}
+	sections := []string{protocol}
 	if conventions := ReadReviewConventions(projectDir); conventions != "" {
 		sections = append(sections,
 			"## 项目评审约定（.assistant/review.md）\n\n"+conventions)

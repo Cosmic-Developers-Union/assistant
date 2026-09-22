@@ -72,7 +72,7 @@ func TestConfigInitPrefillsFromCredentials(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "已写入") {
 		t.Fatalf("没有 provider 时应当写入后报校验问题：err=%v\n%s", err, output)
 	}
-	if !strings.Contains(output, "+ instances[] https://gitea.mms.vincentge.top") ||
+	if !strings.Contains(output, "+ gitea 通道 https://gitea.mms.vincentge.top") ||
 		!strings.Contains(output, "+ $schema: "+schema.Reference) {
 		t.Errorf("输出缺少补全项：\n%s", output)
 	}
@@ -80,23 +80,23 @@ func TestConfigInitPrefillsFromCredentials(t *testing.T) {
 	if document["$schema"] != schema.Reference {
 		t.Errorf("$schema = %v", document["$schema"])
 	}
-	instances, _ := document["instances"].([]any)
-	if len(instances) != 2 {
-		t.Fatalf("instances = %v", document["instances"])
+	channels, _ := document["channels"].([]any)
+	if len(channels) != 2 {
+		t.Fatalf("channels = %v", document["channels"])
 	}
 	var prefilled map[string]any
-	for _, raw := range instances {
-		if instance, _ := raw.(map[string]any); instance["host"] == "https://gitea.mms.vincentge.top" {
-			prefilled = instance
+	for _, raw := range channels {
+		if channel, _ := raw.(map[string]any); channel["host"] == "https://gitea.mms.vincentge.top" {
+			prefilled = channel
 		}
 	}
 	if prefilled == nil {
-		t.Fatalf("未预填登录过的平台：%v", document["instances"])
+		t.Fatalf("未预填登录过的平台：%v", document["channels"])
 	}
-	if reviewer, _ := prefilled["reviewer"].(map[string]any); reviewer["name"] != "ai" {
+	if prefilled["reviewer"] != "ai" {
 		t.Errorf("reviewer 应由约定值补齐：%v", prefilled["reviewer"])
 	}
-	if merger, _ := prefilled["merger"].(map[string]any); merger["name"] != "merge" {
+	if prefilled["merger"] != "merge" {
 		t.Errorf("merger 应由约定值补齐：%v", prefilled["merger"])
 	}
 	// schema 随二进制写到旁边，内容与内嵌版本一致
@@ -225,8 +225,8 @@ func TestConfigInitBacksUpExistingFile(t *testing.T) {
 		t.Errorf("输出未提示备份：\n%s", output)
 	}
 	document := readConfig(t, path)
-	if instances, _ := document["instances"].([]any); len(instances) != 2 {
-		t.Errorf("应保留原有平台并补上新登录的平台：%v", document["instances"])
+	if channels, _ := document["channels"].([]any); len(channels) != 2 {
+		t.Errorf("应保留原有平台并补上新登录的平台：%v", document["channels"])
 	}
 }
 
@@ -255,9 +255,9 @@ func TestConfigNewWritesSkeleton(t *testing.T) {
 	if document["$schema"] != schema.Reference {
 		t.Errorf("$schema = %v, 期望 %v", document["$schema"], schema.Reference)
 	}
-	instances, ok := document["instances"].([]any)
-	if !ok || len(instances) != 0 {
-		t.Errorf("instances 应为空数组，得到 %v", document["instances"])
+	channels, ok := document["channels"].([]any)
+	if !ok || len(channels) != 0 {
+		t.Errorf("channels 应为空数组，得到 %v", document["channels"])
 	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(path), schema.FileName)); err != nil {
 		t.Errorf("schema 未写到配置旁边: %v", err)
@@ -310,8 +310,8 @@ func TestConfigInitCompletesSkeleton(t *testing.T) {
 		t.Fatalf("config init 应当在骨架上完成补全：err = %v\n%s", err, output)
 	}
 	document := readConfig(t, path)
-	instances, ok := document["instances"].([]any)
-	if !ok || len(instances) != 1 {
-		t.Fatalf("骨架应被补上 1 个 instance，得到 %v", document["instances"])
+	channels, ok := document["channels"].([]any)
+	if !ok || len(channels) != 1 {
+		t.Fatalf("骨架应被补上 1 个 gitea 通道，得到 %v", document["channels"])
 	}
 }

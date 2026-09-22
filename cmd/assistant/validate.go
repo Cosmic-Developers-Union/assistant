@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	builtinagents "assistant/internal/agents"
 	"assistant/internal/claudecfg"
 	"assistant/internal/credentials"
 	"assistant/internal/instances"
@@ -91,14 +92,18 @@ func printValidateFinding(stdout io.Writer, finding validateFinding) {
 
 // validateConfigFile 逐项校验配置本体（不联网、不写文件）。
 func validateConfigFile(path string, file *instances.File) []validateFinding {
+	giteaChannels := giteaChannelsOf(file)
 	findings := []validateFinding{{
 		status:  "OK",
 		subject: path,
-		detail: fmt.Sprintf("%d 个平台、%d 个仓库、%d 个 provider 定义",
-			len(file.Instances), configRepoCount(file), len(definedProviders(file))),
+		detail: fmt.Sprintf("%d 个 gitea 通道（%d 个仓库）、%d 条通道、%d 个 runtime、%d 个 provider 定义",
+			len(giteaChannels), configRepoCount(file), len(file.Channels), len(file.Runtimes), len(definedProviders(file))),
 	}}
+	for _, note := range file.Notes() {
+		findings = append(findings, validateFinding{"WARN", "配置规范化", note})
+	}
 
-	// provider 引用：default_provider / instance.provider / repo.provider / weixin.provider
+	// provider 引用：default_provider / channel.provider / repo.provider / weixin.provider
 	referenced := map[string]string{}
 	addReference := func(name, source string) {
 		name = strings.TrimSpace(name)
@@ -110,11 +115,14 @@ func validateConfigFile(path string, file *instances.File) []validateFinding {
 		}
 	}
 	addReference(file.DefaultProvider, "default_provider")
-	for _, instance := range file.Instances {
-		addReference(instance.Provider, "instance "+instance.Host)
-		for _, repo := range instance.Repos {
+	for _, channel := range giteaChannels {
+		addReference(channel.Provider, "channels."+channel.Key())
+		for _, repo := range channel.Repos {
 			addReference(repo.Provider, "repo "+repo.Name)
 		}
+	}
+	for _, runtime := range file.Runtimes {
+		addReference(runtime.Provider, "runtimes")
 	}
 	if file.Weixin != nil {
 		addReference(file.Weixin.Provider, "weixin.provider")
@@ -158,19 +166,19 @@ func validateConfigFile(path string, file *instances.File) []validateFinding {
 		}
 	}
 
-	// 平台与仓库
-	for _, instance := range file.Instances {
-		detail := fmt.Sprintf("%d 个仓库", len(instance.Repos))
+	// gitea 通道与仓库（监控面）
+	for _, channel := range giteaChannels {
+		detail := fmt.Sprintf("%d 个仓库", len(channel.Repos))
 		status := "OK"
-		if len(instance.Repos) == 0 {
+		if len(channel.Repos) == 0 {
 			status = "WARN"
-			detail = "没有配置仓库（assistant setup --repos 或 config.json 的 repos）"
+			detail = "没有配置仓库（channels." + channel.Key() + ".repos）"
 		}
-		if instance.Provider != "" {
-			detail += "；provider=" + instance.Provider
+		if channel.Provider != "" {
+			detail += "；provider=" + channel.Provider
 		}
-		findings = append(findings, validateFinding{status, "instance " + instance.Host, detail})
-		for _, repo := range instance.Repos {
+		findings = append(findings, validateFinding{status, "监控 " + channel.Key(), detail})
+		for _, repo := range channel.Repos {
 			dir := strings.TrimSpace(repo.Dir)
 			if dir == "" {
 				continue
@@ -247,13 +255,10 @@ func validateConfigFile(path string, file *instances.File) []validateFinding {
 		}
 	}
 
-	// channels 通道实例列表（有条目即启用）
+	// channels 通道实例列表（runtime 按键引用）
 	for _, entry := range file.Channels {
 		label := "channels." + entry.Key()
 		detail := "type=" + entry.Type
-		if entry.Agent != "" {
-			detail += "；agent=" + entry.Agent
-		}
 		var problems []string
 		switch entry.Type {
 		case instances.ChannelWeixin:
@@ -268,19 +273,64 @@ func validateConfigFile(path string, file *instances.File) []validateFinding {
 			if strings.TrimSpace(entry.BotToken) == "" {
 				problems = append(problems, "缺少 bot_token——@BotFather 发放")
 			}
+		case instances.ChannelGitea:
+			detail += fmt.Sprintf("；reviewer=%s merger=%s；%d 个仓库", entry.Reviewer, entry.Merger, len(entry.Repos))
+			if strings.TrimSpace(entry.Token) == "" {
+				detail += "；token 缺省回退凭据库 purpose=review"
+			}
 		default:
-			problems = append(problems, "未知 type（应为 weixin/qq/telegram）")
+			problems = append(problems, "未知 type（应为 weixin/qq/telegram/gitea）")
 		}
 		if len(problems) > 0 {
 			findings = append(findings, validateFinding{"ERROR", label,
 				detail + "；" + strings.Join(problems, "；")})
 			continue
 		}
+		if !entry.IsEnabled() {
+			findings = append(findings, validateFinding{"WARN", label,
+				detail + "；enabled=false：保留定义但不启动"})
+			continue
+		}
 		findings = append(findings, validateFinding{"OK", label, detail + "；凭据已写入"})
+	}
+
+	// runtimes 运行时
+	if len(file.Runtimes) == 0 {
+		findings = append(findings, validateFinding{"SKIP", "runtimes",
+			"未配置：`assistant run` 无可运行单元（至少一个 runtime 或通道）"})
+	}
+	for _, name := range sortedRuntimeKeys(file.Runtimes) {
+		runtime := file.Runtimes[name]
+		label := "runtimes." + name
+		mainAgent := runtime.MainAgent
+		if mainAgent == "" {
+			mainAgent = instances.DefaultMainAgent
+		}
+		subagents := runtime.Subagents
+		if len(subagents) == 0 {
+			subagents = builtinagents.SubagentNames()
+		}
+		detail := fmt.Sprintf("main agent=%s；子代理=%s；通道=%s",
+			mainAgent, strings.Join(subagents, "、"), strings.Join(runtime.Channels, "、"))
+		if runtime.Provider != "" {
+			detail += "；provider=" + runtime.Provider
+		}
+		findings = append(findings, validateFinding{"OK", label, detail})
 	}
 
 	findings = append(findings, validateProviderDirectory(path)...)
 	return append(findings, validateCredentials(path, file)...)
+}
+
+// giteaChannelsOf 返回通道池里的 gitea 通道（监控面来源）。
+func giteaChannelsOf(file *instances.File) []instances.Channel {
+	channels := make([]instances.Channel, 0, len(file.Channels))
+	for _, channel := range file.Channels {
+		if channel.Type == instances.ChannelGitea {
+			channels = append(channels, channel)
+		}
+	}
+	return channels
 }
 
 // validateProviderDirectory 指出遗留的 <配置目录>/providers/*.json：provider 现在
@@ -308,9 +358,11 @@ func validateProviderDirectory(configPath string) []validateFinding {
 		strings.Join(names, "、"))}}
 }
 
-// validateCredentials 检查每个平台的登录身份与用途令牌（只看有无，不打印令牌）。
+// validateCredentials 检查每个 gitea 通道站点的登录身份与用途令牌（只看有无，
+// 不打印令牌）。
 func validateCredentials(configPath string, file *instances.File) []validateFinding {
-	if len(file.Instances) == 0 {
+	giteaChannels := giteaChannelsOf(file)
+	if len(giteaChannels) == 0 {
 		return nil
 	}
 	path, err := credentials.PathFor(configPath)
@@ -321,9 +373,9 @@ func validateCredentials(configPath string, file *instances.File) []validateFind
 	if err != nil {
 		return []validateFinding{{"ERROR", "credentials.json", "解析失败：" + err.Error()}}
 	}
-	findings := make([]validateFinding, 0, len(file.Instances))
-	for _, instance := range file.Instances {
-		host := instance.Host
+	findings := make([]validateFinding, 0, len(giteaChannels))
+	for _, channel := range giteaChannels {
+		host := channel.Host
 		identity, ok := store.IdentityFor(host)
 		if !ok {
 			findings = append(findings, validateFinding{"ERROR", "credentials " + host,
@@ -337,15 +389,23 @@ func validateCredentials(configPath string, file *instances.File) []validateFind
 		have := []string{}
 		missingRequired := []string{}
 		missingOptional := []string{}
+		explicitToken := strings.TrimSpace(channel.Token) != ""
 		for _, purpose := range credentials.Purposes() {
 			if _, ok, _ := store.CredentialFor(host, purpose); ok {
 				have = append(have, purpose)
 				continue
 			}
 			switch purpose {
-			case "review", "merge":
+			case "review":
+				// 通道显式给了 token 时 review 令牌可不落凭据库；否则有仓库才派生
+				if explicitToken || len(channel.Repos) == 0 {
+					missingOptional = append(missingOptional, purpose)
+				} else {
+					missingRequired = append(missingRequired, purpose)
+				}
+			case "merge":
 				// 有仓库才会派生机器人令牌；只登录过的平台（还没 setup）不算错
-				if len(instance.Repos) > 0 {
+				if len(channel.Repos) > 0 {
 					missingRequired = append(missingRequired, purpose)
 				} else {
 					missingOptional = append(missingOptional, purpose)
@@ -406,8 +466,10 @@ func definedProviders(file *instances.File) []string {
 
 func configRepoCount(file *instances.File) int {
 	count := 0
-	for _, instance := range file.Instances {
-		count += len(instance.Repos)
+	for _, channel := range file.Channels {
+		if channel.Type == instances.ChannelGitea {
+			count += len(channel.Repos)
+		}
 	}
 	return count
 }
@@ -415,6 +477,16 @@ func configRepoCount(file *instances.File) int {
 func sortedKeys(values map[string]string) []string {
 	keys := make([]string, 0, len(values))
 	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// sortedRuntimeKeys 返回 runtime 名（排序，确定打印顺序）。
+func sortedRuntimeKeys(runtimes map[string]instances.Runtime) []string {
+	keys := make([]string, 0, len(runtimes))
+	for key := range runtimes {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)

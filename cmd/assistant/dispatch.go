@@ -3,8 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,7 +19,6 @@ import (
 	"assistant/internal/dispatcher"
 	"assistant/internal/instances"
 	"assistant/internal/provider"
-	"assistant/internal/runcfg"
 	"assistant/internal/statestore"
 	"assistant/internal/status"
 
@@ -50,6 +49,7 @@ type dispatcherOptions struct {
 	DockerImage   string
 	DockerNetwork string
 	Run           string
+	Runtime       string
 	DryRun        bool
 }
 
@@ -74,11 +74,11 @@ func targetToken(target dispatchTarget) string {
 	return target.config.AccessToken
 }
 
-// countRepos 统计配置中的仓库总数（--repo-dir 单目标校验用）。
+// countRepos 统计 gitea 通道的仓库总数（--repo-dir 单目标校验用）。
 func countRepos(file *instances.File) int {
 	total := 0
-	for _, instance := range file.Instances {
-		total += len(instance.Repos)
+	for _, channel := range giteaChannels(file) {
+		total += len(channel.Repos)
 	}
 	return total
 }
@@ -120,13 +120,13 @@ func newDispatcherCommands(repoFlag, configFlag *string) []*cobra.Command {
 		&runOptions.Run,
 		"run",
 		"",
-		"run.yaml 路径（缺省 ASSISTANT_RUN、config.json 同目录或平台标准配置目录下的 run.yaml；存在时 run 完全按它运行）",
+		"（已退役）run.yaml 已并入 config.json：`assistant config migrate` 导入旧文件后按 --config / 标准配置目录运行",
 	)
 	runCommand.Flags().StringVar(
 		&runOptions.APIListen,
 		"api-listen",
-		"127.0.0.1:8770",
-		"daemon 状态 API 监听地址（Bearer 鉴权，端点写入配置目录 daemon.json；none 关闭）",
+		"",
+		"daemon 状态 API 监听地址（Bearer 鉴权，端点写入配置目录 daemon.json；缺省取 runtime 的 api_listen=127.0.0.1:8770；off 关闭）",
 	)
 	runCommand.Flags().BoolVar(
 		&runOptions.Weixin,
@@ -193,6 +193,7 @@ func newDispatcherCommands(repoFlag, configFlag *string) []*cobra.Command {
 
 func addDispatcherConnectionFlags(command *cobra.Command, options *dispatcherOptions) {
 	flags := command.Flags()
+	flags.StringVar(&options.Runtime, "runtime", "", "运行时名（缺省 default_runtime；只有一个 runtime 时可省）")
 	flags.StringVar(&options.Host, "host", "", "Gitea API 根地址（缺省：GITEA_HOST 或 origin remote 推导）")
 	flags.StringVar(&options.RepoDir, "repo-dir", "",
 		"仓库检出目录（覆盖 repo.dir；config.json 多目标时需配合 --repo 指定唯一仓库）")
@@ -309,47 +310,27 @@ func dispatcherFlags(command *cobra.Command, repoFlag string, options *dispatche
 	return flags
 }
 
-// resolveDispatchTargets 解析运行目标：有配置文件时按 instance × repo 展开，
-// 否则退回环境变量单实例模式。
+// resolveDispatchTargets 解析运行目标：config.json 的 gitea 通道 × repos 按
+// runtime 展开（运行树与缺省参数来自 runtime），否则退回环境变量单实例模式。
+// 配置只带聊天通道时返回空目标（纯聊天 daemon：状态 API 与对话照常常驻）。
 func resolveDispatchTargets(
 	command *cobra.Command,
 	repoFlag, configPath string,
 	options *dispatcherOptions,
 ) ([]dispatchTarget, error) {
-	// run.yaml 存在时完全按它运行：站点与仓库来自 monitor，config.json 只承担
-	// 账号身份（providers/optimizations/weixin）——不再读它的 instances。
-	// --config 指向 run.yaml 是常见笔误（run.yaml 要用 --run）：点名纠正而不是
-	// 让它深入到凭据库报一个不相关的错
+	// run.yaml 已并入 config.json（runtime 节 + gitea 通道）：--run / --config
+	// 指向 YAML 时点名纠正，而不是让它深入到凭据库报一个不相关的错
+	if strings.TrimSpace(options.Run) != "" {
+		return nil, fmt.Errorf(
+			"--run 已退役：run.yaml 已并入 config.json——`assistant config migrate` 导入旧文件，之后按 --config / 标准配置目录运行")
+	}
 	if trimmed := strings.TrimSpace(configPath); trimmed != "" &&
 		(strings.HasSuffix(trimmed, ".yaml") || strings.HasSuffix(trimmed, ".yml")) {
 		if _, statErr := os.Stat(trimmed); statErr == nil {
 			return nil, fmt.Errorf(
-				"%s 是 run.yaml（运行配置），不是 config.json：请用 --run %s 传入（--config 只接受 config.json）",
+				"%s 是 YAML（旧 run.yaml），不是 config.json：run.yaml 已并入 config.json——`assistant config migrate %s` 导入",
 				trimmed, trimmed)
 		}
-	}
-	runPath, err := runcfg.ResolvePath(options.Run, configPath)
-	if err != nil {
-		return nil, err
-	}
-	if runPath != "" {
-		targets, err := resolveRunYamlTargets(command, runPath, configPath, options)
-		if err != nil {
-			return nil, err
-		}
-		if repoFlag == "" {
-			return targets, nil
-		}
-		filtered := make([]dispatchTarget, 0, len(targets))
-		for _, target := range targets {
-			if target.config.Repository.FullName() == repoFlag {
-				filtered = append(filtered, target)
-			}
-		}
-		if len(filtered) == 0 {
-			return nil, fmt.Errorf("仓库 %s 不在 run.yaml 的 monitor repos 中", repoFlag)
-		}
-		return filtered, nil
 	}
 	resolvedPath, file, err := resolveInstanceFile(commandOptions{ConfigPath: configPath})
 	if err != nil {
@@ -366,6 +347,10 @@ func resolveDispatchTargets(
 		}
 		return []dispatchTarget{{config: config, client: client, repoDir: repoDir}}, nil
 	}
+	runtime, err := file.ResolveRuntime(options.Runtime)
+	if err != nil {
+		return nil, err
+	}
 
 	// --repo-dir 是单目标覆盖：配置里出现多个仓库时要求 --repo 收敛到唯一仓库，
 	// 避免把同一个检出强加到多个循环（锁/worktree 会互相踩）
@@ -374,30 +359,25 @@ func resolveDispatchTargets(
 	}
 
 	var targets []dispatchTarget
-	var skipped []string
 	matchedFilter := repoFlag == ""
-	for _, instance := range file.Instances {
-		repos := instance.Repos
-		if repoFlag != "" {
-			repos = nil
-			for _, repo := range instance.Repos {
-				if repo.Name == repoFlag {
-					repos = append(repos, repo)
-				}
-			}
-			if len(repos) == 0 {
-				continue
-			}
-			matchedFilter = true
-		}
-		if len(repos) == 0 {
-			// 已登记但未 setup 的实例（如仅 login）：跳过，不阻断其他实例
-			fmt.Fprintf(command.ErrOrStderr(), "跳过 %s：未配置仓库（assistant setup 后写入 repos）\n", instance.Host)
-			skipped = append(skipped, instance.Host)
+	for _, channel := range giteaChannels(file) {
+		if !channel.IsEnabled() {
 			continue
 		}
-		for _, repo := range repos {
-			target, err := resolveInstanceTarget(command, file, resolvedPath, instance, repo, options)
+		if len(channel.Repos) == 0 {
+			// 已登记但未 setup 的站点（如仅 login）：跳过，不阻断其他站点
+			fmt.Fprintf(command.ErrOrStderr(), "跳过 gitea 通道 %s：未配置仓库（assistant setup --host %s 后写入 repos）\n",
+				channel.Key(), channel.Host)
+			continue
+		}
+		for _, repo := range channel.Repos {
+			if repoFlag != "" {
+				if repo.Name != repoFlag {
+					continue
+				}
+				matchedFilter = true
+			}
+			target, err := giteaTarget(command, file, resolvedPath, runtime, channel, repo, options)
 			if err != nil {
 				return nil, err
 			}
@@ -408,177 +388,22 @@ func resolveDispatchTargets(
 		}
 	}
 	if !matchedFilter {
-		return nil, fmt.Errorf("仓库 %s 不在配置文件的 instances[].repos 中", repoFlag)
+		return nil, fmt.Errorf("仓库 %s 不在 gitea 通道的 repos 中", repoFlag)
 	}
-	if len(targets) == 0 {
-		if len(skipped) > 0 {
-			return nil, fmt.Errorf(
-				"配置文件没有可运行的仓库（%s 未配置 repos，先 assistant setup）",
-				strings.Join(skipped, "、"))
-		}
-		return nil, fmt.Errorf("配置文件没有可运行的仓库")
+	if len(targets) == 0 && !hasChatService(file) {
+		return nil, fmt.Errorf("配置文件没有可运行的仓库（gitea 通道未配置 repos，先 assistant setup）")
 	}
 	return targets, nil
 }
 
-// resolveRunYamlTargets 是 run.yaml 模式的目标装配：run.yaml 存在时 run 完全
-// 按它运行——站点（monitor）与仓库清单来自 monitor，令牌来自 monitor.token
-// （缺省回退凭据库 purpose=review），落点与评审工作区按 root/repos-dir/review-*。
-// config.json 此时只承担账号身份（providers/optimizations/weixin）。
-func resolveRunYamlTargets(
-	command *cobra.Command,
-	runPath, configPath string,
-	options *dispatcherOptions,
-) ([]dispatchTarget, error) {
-	file, err := runcfg.Load(runPath)
-	if err != nil {
-		return nil, err
-	}
-	// configPath 未显式给出时按标准顺序定位（ASSISTANT_CONFIG / 标准配置目录）：
-	// run.yaml 模式下它只承担账号身份，缺省也不报错
-	if strings.TrimSpace(configPath) == "" {
-		configPath = strings.TrimSpace(os.Getenv("ASSISTANT_CONFIG"))
-	}
-	if strings.TrimSpace(configPath) == "" {
-		if standard, standardErr := instances.DefaultConfigPath(); standardErr == nil {
-			if _, statErr := os.Stat(standard); statErr == nil {
-				configPath = standard
-			}
+// hasChatService 报告配置是否带聊天通道（决定零 gitea 目标时是否纯聊天常驻）。
+func hasChatService(file *instances.File) bool {
+	for _, channel := range file.Channels {
+		if channel.Type != instances.ChannelGitea && channel.IsEnabled() {
+			return true
 		}
 	}
-
-	var targets []dispatchTarget
-	for host, monitor := range file.Monitor {
-		if len(monitor.Repos) == 0 {
-			// 已登记但暂无仓库的站点（如仅 login）：跳过，不阻断其他站点
-			dispatchLoggerStderr(command)(fmt.Sprintf("跳过 monitor[%s]：repos 为空", host))
-			continue
-		}
-		token := monitor.Token
-		tokenSource := "run.yaml monitor.token"
-		if token == "" {
-			// 未写令牌时回退凭据库：本地开发 run.yaml 不必含敏感值
-			credential, credentialErr := tokenForPurpose(configPath, host, credentials.PurposeReview)
-			if credentialErr != nil {
-				return nil, fmt.Errorf("monitor[%s]: %w", host, credentialErr)
-			}
-			token = credential.Token
-			tokenSource = "凭据库 purpose=review"
-		}
-		for _, repoName := range monitor.Repos {
-			target, err := runYamlTarget(command, file, configPath, host, repoName, token, options)
-			if err != nil {
-				return nil, err
-			}
-			logf := dispatchLoggerStderr(command)
-			logf(fmt.Sprintf("monitor[%s] %s：令牌=%s（%s）", host, repoName, maskTokenForLog(token), tokenSource))
-			targets = append(targets, target)
-		}
-	}
-	if len(targets) == 0 {
-		return nil, fmt.Errorf("run.yaml 没有可运行的仓库")
-	}
-	return targets, nil
-}
-
-// runYamlTarget 装配 run.yaml 模式下单个 (站点, 仓库) 的运行上下文：布局与
-// config.json 受管克隆一致（repos/{host}/{owner}/{name}，state/ 在检出之外），
-// 但根目录由 run.yaml 决定；worktree 按 review-root 与命名模板落到站点隔离的
-// 子目录。
-func runYamlTarget(
-	command *cobra.Command,
-	file *runcfg.File,
-	configPath, host, repoName, token string,
-	options *dispatcherOptions,
-) (dispatchTarget, error) {
-	repoDir, err := file.TargetPath(host, repoName)
-	if err != nil {
-		return dispatchTarget{}, fmt.Errorf("%s: %w", repoName, err)
-	}
-	stateDir, err := file.RepoStatePath(host, repoName)
-	if err != nil {
-		return dispatchTarget{}, fmt.Errorf("%s: %w", repoName, err)
-	}
-	flags := dispatcherFlags(command, repoName, options)
-	flags.Host = host
-	flags.Repository = repoName
-	flags.AccessToken = token
-	// 受管克隆：恒开镜像同步，日志/锁落状态目录
-	value := true
-	flags.SyncMirror = &value
-	if flags.LogDir == "" {
-		flags.LogDir = filepath.Join(stateDir, "logs")
-	}
-	if flags.LockFile == "" {
-		flags.LockFile = filepath.Join(stateDir, "dispatcher.lock")
-	}
-	if flags.WorktreeRoot == "" && strings.TrimSpace(os.Getenv("DISPATCH_WORKTREE_ROOT")) == "" {
-		// 评审工作区：run.yaml 的 review-root + 命名模板去掉逐待办叶子后的仓库
-		// 级基名（模板已含站点与仓库占位符，同名仓库跨站点不会相撞）
-		reviewBase, err := file.ReviewDirBase(host, repoName)
-		if err != nil {
-			return dispatchTarget{}, fmt.Errorf("%s: %w", repoName, err)
-		}
-		flags.WorktreeRoot = filepath.Join(file.ReviewRootDir(), reviewBase, "worktrees")
-	}
-	config, err := dispatcher.ResolveConfig(flags, repoDir, os.Getenv, func() (dispatcher.GitRemote, bool) {
-		return dispatcher.GitRemote{Host: host, Repository: repoName}, true
-	})
-	if err != nil {
-		return dispatchTarget{}, err
-	}
-	// 会话记录归档：sessions-dir + 命名模板展开到本仓库的目录（文件名按会话 ID）
-	if file.SessionsDir != "" {
-		archiveDir, err := file.SessionArchiveDir(host, repoName)
-		if err != nil {
-			return dispatchTarget{}, fmt.Errorf("%s: %w", repoName, err)
-		}
-		config.SessionArchiveDir = archiveDir
-	}
-	// provider/优化点：run.yaml 的 provider 节优先（type 选内置预设，token 简写
-	// 落 api_key），否则回退 config.json 的 default_provider（账号身份层）
-	_, configFile, fileErr := resolveInstanceFile(commandOptions{ConfigPath: configPath})
-	if fileErr != nil {
-		return dispatchTarget{}, fileErr
-	}
-	config.ConfigPath = configPath
-	providerName := ""
-	if file.Provider != nil {
-		providerName = file.Provider.Type
-	} else if configFile != nil {
-		providerName = configFile.DefaultProvider
-	}
-	if configFile != nil {
-		effective, err := configFile.EffectiveOverrides(providerName)
-		if err != nil {
-			return dispatchTarget{}, fmt.Errorf("%s（provider %s）: %w", repoName, providerName, err)
-		}
-		config.Provider = effective
-		config.ProviderName = providerName
-		config.Optimizations = configFile.Optimizations.Overrides()
-	}
-	if file.Provider != nil {
-		// run.yaml 的 token 简写按预设 TokenEnvs 落地，压过 config.json 同名值；
-		// 供应商语义（端点/模型映射/MCP）仍由内置预设与代码级 handler 提供
-		effective, err := provider.Resolve(file.Provider.Type, config.Optimizations, claudecfg.Overrides{}, file.Provider.Token)
-		if err != nil {
-			return dispatchTarget{}, fmt.Errorf("%s（provider %s）: %w", repoName, file.Provider.Type, err)
-		}
-		config.Provider = effective
-		config.ProviderName = file.Provider.Type
-	}
-	client, err := newDispatchClient(config, options.Debug)
-	if err != nil {
-		return dispatchTarget{}, err
-	}
-	return dispatchTarget{
-		instance: instances.Instance{Host: host},
-		repo:     instances.Repo{Name: repoName},
-		config:   config,
-		client:   client,
-		repoDir:  repoDir,
-		managed:  true,
-	}, nil
+	return file.Weixin != nil || file.QQ != nil
 }
 
 // maskTokenForLog 令牌打码（日志展示用）：只保留前后各 4 位。
@@ -592,15 +417,17 @@ func maskTokenForLog(token string) string {
 	return token[:4] + "***" + token[len(token)-4:]
 }
 
-// resolveInstanceTarget 解析 (instance, repo) 的运行上下文：repo.dir 缺省时用
-// 受管克隆落点（<数据目录>/…/repos/<host>/<owner>/<name>），与当前目录解耦；
-// 日志/锁同样落在检出之外的状态目录，避免被基线对齐的 clean -fd 波及。
-// provider 按 repo > instance > 全局默认解析，写进运行配置（仅运行时注入）。
-func resolveInstanceTarget(
+// giteaTarget 装配 gitea 通道 × 仓库的运行上下文（原 instances 与 run.yaml
+// 双轨的统一形态）：repo.dir 有则用共享检出，否则用 runtime 树下的受管克隆；
+// 令牌 = 通道 token（缺省回退凭据库 purpose=review）；日志/锁/评审工作区与
+// 轮询、超时、并发缺省值全部按 runtime。provider 按 repo > 通道 > runtime >
+// 全局默认解析（仅运行时注入）。
+func giteaTarget(
 	command *cobra.Command,
 	file *instances.File,
 	configPath string,
-	instance instances.Instance,
+	runtime instances.Runtime,
+	channel *instances.Channel,
 	repo instances.Repo,
 	options *dispatcherOptions,
 ) (dispatchTarget, error) {
@@ -614,35 +441,39 @@ func resolveInstanceTarget(
 			return dispatchTarget{}, fmt.Errorf("解析 --repo-dir: %w", err)
 		}
 		repoDir = absolute
+	case strings.TrimSpace(repo.Dir) != "":
+		repoDir = repo.Dir
 	default:
-		repoDir = strings.TrimSpace(repo.Dir)
-	}
-	if repoDir == "" {
 		managed = true
-		defaultDir, err := instances.DefaultRepoDir(instance.Host, repo.Name)
+		dir, err := runtime.TargetPath(channel.Host, repo.Name)
 		if err != nil {
-			return dispatchTarget{}, fmt.Errorf("定位 %s 的默认仓库目录: %w", repo.Name, err)
+			return dispatchTarget{}, fmt.Errorf("定位 %s 的受管克隆落点: %w", repo.Name, err)
 		}
-		repoDir = defaultDir
+		repoDir = dir
 	}
 	flags := dispatcherFlags(command, repo.Name, options)
-	flags.Host = instance.Host
+	flags.Host = channel.Host
 	flags.Repository = repo.Name
-	// 评审身份从凭据库取（purpose=review）：会话提交的 review 以该令牌账号落库
-	reviewCredential, err := tokenForPurpose(configPath, instance.Host, credentials.PurposeReview)
-	if err != nil {
-		return dispatchTarget{}, err
+	// 评审身份：通道显式 token 优先，否则凭据库 purpose=review（会话提交的
+	// review 以该令牌账号落库）
+	if token := strings.TrimSpace(channel.Token); token != "" {
+		flags.AccessToken = token
+	} else {
+		reviewCredential, err := tokenForPurpose(configPath, channel.Host, credentials.PurposeReview)
+		if err != nil {
+			return dispatchTarget{}, err
+		}
+		flags.AccessToken = reviewCredential.Token
 	}
-	flags.AccessToken = reviewCredential.Token
 	if flags.Reviewer == "" {
-		flags.Reviewer = instance.Reviewer.Name
+		flags.Reviewer = channel.Reviewer
 	}
 	if managed {
 		// 受管克隆必须随时与 origin/<基线> 一致：恒开镜像同步（配置预览也如实
 		// 反映）；显式 dir 的共享检出仍由 --sync-mirror 控制
 		value := true
 		flags.SyncMirror = &value
-		stateDir, err := instances.DefaultRepoStateDir(instance.Host, repo.Name)
+		stateDir, err := runtime.RepoStatePath(channel.Host, repo.Name)
 		if err != nil {
 			return dispatchTarget{}, fmt.Errorf("定位 %s 的状态目录: %w", repo.Name, err)
 		}
@@ -654,23 +485,41 @@ func resolveInstanceTarget(
 		}
 	}
 	if flags.WorktreeRoot == "" && strings.TrimSpace(os.Getenv("DISPATCH_WORKTREE_ROOT")) == "" {
-		// 多仓库共用同一 worktree 根会撞 `pr-<N>` 目录名：按仓库（含站点）隔离
-		slug, err := instances.HostSlug(instance.Host)
+		// 评审工作区：runtime 的 review_root + 命名模板去掉逐待办叶子后的仓库
+		// 级基名（模板已含站点与仓库占位符，同名仓库跨站点不会相撞）
+		base, err := runtime.ReviewDirBase(channel.Host, repo.Name)
 		if err != nil {
-			return dispatchTarget{}, err
+			return dispatchTarget{}, fmt.Errorf("展开 %s 的评审工作区基名: %w", repo.Name, err)
 		}
-		flags.WorktreeRoot = filepath.Join(
-			os.TempDir(), "agent-dispatcher",
-			slug+"-"+strings.ReplaceAll(repo.Name, "/", "-"), "worktrees",
-		)
+		flags.WorktreeRoot = filepath.Join(runtime.ReviewRootDir(), base, "worktrees")
+	}
+	// 轮询/超时/并发缺省取 runtime（旗标优先；毫秒数字面量解析无歧义）
+	if flags.Interval == "" {
+		flags.Interval = strconv.FormatInt(runtime.Interval(), 10)
+	}
+	if flags.Timeout == "" {
+		flags.Timeout = strconv.FormatInt(runtime.Timeout(), 10)
+	}
+	if flags.Concurrency == "" {
+		flags.Concurrency = strconv.Itoa(runtime.Workers())
 	}
 	config, err := dispatcher.ResolveConfig(flags, repoDir, os.Getenv, func() (dispatcher.GitRemote, bool) {
-		return dispatcher.GitRemote{Host: instance.Host, Repository: repo.Name}, true
+		return dispatcher.GitRemote{Host: channel.Host, Repository: repo.Name}, true
 	})
 	if err != nil {
 		return dispatchTarget{}, err
 	}
-	providerName := file.ProviderName(&instance, &repo)
+	// review agent 定义（agents 池，用户同名覆盖内置）：独立执行时它的
+	// model/claude_bin 生效；provider 仍走 repo > 通道 > runtime > 全局链
+	if reviewAgent, ok := file.Agents["review"]; ok {
+		if flags.Model == "" {
+			flags.Model = reviewAgent.Model
+		}
+		if flags.ClaudeBin == "" {
+			flags.ClaudeBin = reviewAgent.ClaudeBin
+		}
+	}
+	providerName := file.GiteaProviderName(runtime, channel, &repo)
 	effective, err := file.EffectiveOverrides(providerName)
 	if err != nil {
 		return dispatchTarget{}, fmt.Errorf("%s（provider %s）: %w", repo.Name, providerName, err)
@@ -683,7 +532,7 @@ func resolveInstanceTarget(
 		return dispatchTarget{}, err
 	}
 	return dispatchTarget{
-		instance: instance,
+		instance: channelInstance(channel),
 		repo:     repo,
 		config:   config,
 		client:   client,
@@ -741,7 +590,6 @@ func checkTargetsHealth(ctx context.Context, targets []dispatchTarget, log func(
 	}
 	return nil
 }
-
 
 // shortGiteaPath 把 Gitea 请求 URL 折成站点相对路径（日志可读性）：
 // https://host/api/v1/repos/a/b/issues?limit=50 → GET /repos/a/b/issues?limit=50
@@ -996,7 +844,6 @@ func newDispatchLoggers(w io.Writer, verbose, debug bool) dispatchLoggers {
 	}
 }
 
-
 // dispatchLoggerStderr 是 stderr 上的 default 级日志（run.yaml 解析期提示）。
 func dispatchLoggerStderr(command *cobra.Command) func(string) {
 	return func(line string) {
@@ -1031,32 +878,32 @@ func newDispatchDeps(target dispatchTarget, w io.Writer, store *daemon.Store, st
 		PrepareIssue: func(worktreeDir string) (string, error) {
 			return dispatcher.PrepareBaselineWorktree(repoDir, config.BaseBranch, worktreeDir, token)
 		},
-			RemoveWorktree: func(dir string) error {
-				return dispatcher.RemoveWorktree(repoDir, dir)
-			},
-			// 追问轮的输入：会话开始（since）之后他人（非 assistant 账号）的
-			// 新评论，保证「ai 回复前必须读到消息」
-			FollowUpMessages: func(ctx context.Context, item dispatcher.WorkItem, since time.Time) ([]string, error) {
-				comments, err := target.client.ListIssueCommentsSince(ctx, config.Repository, item.Number, since)
-				if err != nil {
-					return nil, err
+		RemoveWorktree: func(dir string) error {
+			return dispatcher.RemoveWorktree(repoDir, dir)
+		},
+		// 追问轮的输入：会话开始（since）之后他人（非 assistant 账号）的
+		// 新评论，保证「ai 回复前必须读到消息」
+		FollowUpMessages: func(ctx context.Context, item dispatcher.WorkItem, since time.Time) ([]string, error) {
+			comments, err := target.client.ListIssueCommentsSince(ctx, config.Repository, item.Number, since)
+			if err != nil {
+				return nil, err
+			}
+			var messages []string
+			for _, comment := range comments {
+				if comment.User == config.Reviewer || comment.User == "" {
+					continue
 				}
-				var messages []string
-				for _, comment := range comments {
-					if comment.User == config.Reviewer || comment.User == "" {
-						continue
-					}
-					if strings.TrimSpace(comment.Body) == "" {
-						continue
-					}
-					messages = append(messages, fmt.Sprintf("@%s：%s", comment.User, comment.Body))
+				if strings.TrimSpace(comment.Body) == "" {
+					continue
 				}
-				return messages, nil
-			},
-			PostFollowUpNote: func(ctx context.Context, item dispatcher.WorkItem, count int) error {
-				body := fmt.Sprintf("检测到 %d 条新消息，正在续接会话读取并回应（回复前先完整阅读全部消息）。", count)
-				return target.client.CreateIssueComment(ctx, config.Repository, item.Number, body)
-			},
+				messages = append(messages, fmt.Sprintf("@%s：%s", comment.User, comment.Body))
+			}
+			return messages, nil
+		},
+		PostFollowUpNote: func(ctx context.Context, item dispatcher.WorkItem, count int) error {
+			body := fmt.Sprintf("检测到 %d 条新消息，正在续接会话读取并回应（回复前先完整阅读全部消息）。", count)
+			return target.client.CreateIssueComment(ctx, config.Repository, item.Number, body)
+		},
 		RunSession: func(request dispatcher.SessionRequest) dispatcher.SessionOutcome {
 			item := request.Item
 			// 稳定会话 ID：PR 以 head 为锚点（head 变化换新记录），Issue 以标题
@@ -1195,15 +1042,13 @@ func appendOnFinish(first func(dispatcher.WorkItem, dispatcher.SessionOutcome), 
 // openStateStore 按 run.yaml 的 state-dir/state-file 打开 SQLite 状态库；未配置
 // 返回 nil（内省与互斥退化为进程内守卫）。runPath 是已定位的 run.yaml 路径
 // （空串表示 run.yaml 模式未激活，状态库随之下线）。
-func openStateStore(runPath string, log func(string)) (*statestore.Store, error) {
-	if strings.TrimSpace(runPath) == "" {
+// openStateStore 打开 runtime 的 SQLite 状态库：默认开启（$root/state 下），
+// state_file = "off" 显式关闭；环境变量单实例模式 runtime 为 nil（无状态库）。
+func openStateStore(runtime *instances.Runtime, log func(string)) (*statestore.Store, error) {
+	if runtime == nil {
 		return nil, nil
 	}
-	file, err := runcfg.Load(runPath)
-	if err != nil {
-		return nil, err
-	}
-	path := file.StatePath()
+	path := runtime.StatePath()
 	if path == "" {
 		return nil, nil
 	}
@@ -1220,10 +1065,16 @@ func runDispatchLoop(command *cobra.Command, repoFlag, configPath string, option
 	if err != nil {
 		return err
 	}
-	// run.yaml 路径（run.yaml 模式激活时非空）：状态库随之启用
-	runPath, err := runcfg.ResolvePath(options.Run, configPath)
-	if err != nil {
-		return err
+	// runtime 选定运行树：状态库/状态 API/对话落点都按它
+	var runtime *instances.Runtime
+	if _, configFile, fileErr := resolveInstanceFile(commandOptions{ConfigPath: configPath}); fileErr != nil {
+		return fileErr
+	} else if configFile != nil {
+		resolved, rtErr := configFile.ResolveRuntime(options.Runtime)
+		if rtErr != nil {
+			return rtErr
+		}
+		runtime = &resolved
 	}
 	// dry-run 零副作用：受管克隆只提示将发生的动作，不 clone/不 fetch
 	if options.DryRun {
@@ -1266,9 +1117,8 @@ func runDispatchLoop(command *cobra.Command, repoFlag, configPath string, option
 	// daemon 运行态：调度循环写入，状态 API 与对话会话的 MCP 读取；未就绪仓库也
 	// 登记（带原因），对话/状态查询能解释「为什么这个仓库没在跑」
 	store := daemon.NewStore(version)
-	// SQLite WAL 共享状态（run.yaml 配了 state-dir/state-file 时启用）：跨进程
-	// 内省 + 同一待办的跨进程互斥
-	stateStore, err := openStateStore(runPath, log)
+	// SQLite WAL 共享状态（runtime 默认开启）：跨进程内省 + 同一待办的跨进程互斥
+	stateStore, err := openStateStore(runtime, log)
 	if err != nil {
 		return err
 	}

@@ -4,10 +4,13 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
 
+// 载入即规范化：instances 迁移为 gitea 通道（host 去尾斜杠、账号缺省、repo
+// 简写展开），并合成缺省 runtime。
 func TestLoadNormalizesDefaultsAndRepoShorthand(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	content := `{
@@ -25,21 +28,34 @@ func TestLoadNormalizesDefaultsAndRepoShorthand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	instance := file.Instances[0]
-	if instance.Host != "https://gitea.example.com" {
-		t.Errorf("Host = %q, want trailing slash trimmed", instance.Host)
+	if len(file.Instances) != 0 {
+		t.Errorf("instances 应已迁移清空：%+v", file.Instances)
 	}
-	if instance.Reviewer.Name != DefaultReviewerName || instance.Merger.Name != DefaultMergerName {
-		t.Errorf("account defaults = %+v/%+v", instance.Reviewer, instance.Merger)
+	if len(file.Channels) != 1 {
+		t.Fatalf("Channels = %+v", file.Channels)
 	}
-	if len(instance.Repos) != 2 {
-		t.Fatalf("Repos = %+v", instance.Repos)
+	channel := file.Channels[0]
+	if channel.Type != ChannelGitea || channel.Host != "https://gitea.example.com" {
+		t.Errorf("channel = %+v", channel)
 	}
-	if instance.Repos[0].Name != "owner/repo" || instance.Repos[0].Dir != "" {
-		t.Errorf("Repos[0] = %+v", instance.Repos[0])
+	if channel.Reviewer != DefaultReviewerName || channel.Merger != DefaultMergerName {
+		t.Errorf("account defaults = %q/%q", channel.Reviewer, channel.Merger)
 	}
-	if instance.Repos[1].Name != "owner/another" || instance.Repos[1].Dir != "/srv/another" {
-		t.Errorf("Repos[1] = %+v", instance.Repos[1])
+	if len(channel.Repos) != 2 {
+		t.Fatalf("Repos = %+v", channel.Repos)
+	}
+	if channel.Repos[0].Name != "owner/repo" || channel.Repos[0].Dir != "" {
+		t.Errorf("Repos[0] = %+v", channel.Repos[0])
+	}
+	if channel.Repos[1].Name != "owner/another" || channel.Repos[1].Dir != "/srv/another" {
+		t.Errorf("Repos[1] = %+v", channel.Repos[1])
+	}
+	runtime, err := file.ResolveRuntime("")
+	if err != nil {
+		t.Fatalf("ResolveRuntime: %v", err)
+	}
+	if len(runtime.Channels) != 1 || runtime.Channels[0] != "gitea" {
+		t.Errorf("合成 runtime 应引用全部通道：%+v", runtime.Channels)
 	}
 }
 
@@ -77,6 +93,10 @@ func TestSaveWritesRestrictedFileAndRoundTrips(t *testing.T) {
 		Merger:   Account{Name: "merge"},
 		Repos:    []Repo{{Name: "owner/repo"}, {Name: "owner/another", Dir: "/srv/another"}},
 	}}}
+	file.Normalize()
+	if err := file.canonicalize(t.TempDir()); err != nil {
+		t.Fatalf("canonicalize: %v", err)
+	}
 	if err := Save(path, file); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
@@ -87,23 +107,31 @@ func TestSaveWritesRestrictedFileAndRoundTrips(t *testing.T) {
 	if permission := info.Mode().Perm(); permission != 0o600 {
 		t.Errorf("permissions = %o, want 600", permission)
 	}
-	loaded, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if loaded.Instances[0].Reviewer.Name != "ai" || loaded.Instances[0].Merger.Name != "merge" {
-		t.Errorf("account round-trip failed: %+v/%+v", loaded.Instances[0].Reviewer, loaded.Instances[0].Merger)
-	}
-	if len(loaded.Instances[0].Repos) != 2 ||
-		loaded.Instances[0].Repos[0].Name != "owner/repo" ||
-		loaded.Instances[0].Repos[1].Dir != "/srv/another" {
-		t.Errorf("repo round-trip failed: %+v", loaded.Instances[0].Repos)
-	}
-	// 凭据已迁出配置：配置里不应再出现任何令牌字段。
+	// 规范形写回：instances 消失，gitea 通道落地
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if strings.Contains(string(raw), `"instances"`) {
+		t.Errorf("规范形不应再写 instances：\n%s", raw)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(loaded.Channels) != 1 || loaded.Channels[0].Type != ChannelGitea {
+		t.Fatalf("Channels = %+v", loaded.Channels)
+	}
+	channel := loaded.Channels[0]
+	if channel.Reviewer != "ai" || channel.Merger != "merge" {
+		t.Errorf("account round-trip failed: %q/%q", channel.Reviewer, channel.Merger)
+	}
+	if len(channel.Repos) != 2 ||
+		channel.Repos[0].Name != "owner/repo" ||
+		channel.Repos[1].Dir != "/srv/another" {
+		t.Errorf("repo round-trip failed: %+v", channel.Repos)
+	}
+	// 凭据已迁出配置：配置里不应再出现任何令牌字段。
 	if strings.Contains(string(raw), "token") {
 		t.Errorf("凭据不应再写入 config.json：\n%s", raw)
 	}
@@ -226,11 +254,16 @@ func TestProviderConfigTolerantParseAndRoundTrip(t *testing.T) {
 	if server["command"] != "npx" {
 		t.Errorf("MCP = %+v", provider.MCP)
 	}
-	// 选择粒度：repo > instance > 全局默认
-	if got := file.ProviderName(&file.Instances[0], &file.Instances[0].Repos[0]); got != "gateway" {
+	// 选择粒度：repo > 通道 > 全局默认（instances 已迁移为 gitea 通道）
+	if len(file.Channels) != 1 || len(file.Channels[0].Repos) != 2 {
+		t.Fatalf("Channels = %+v", file.Channels)
+	}
+	instance := Instance{Host: file.Channels[0].Host, Provider: file.Channels[0].Provider}
+	repo := file.Channels[0].Repos[0]
+	if got := file.ProviderName(&instance, &repo); got != "gateway" {
 		t.Errorf("repo provider = %q, want gateway", got)
 	}
-	if got := file.ProviderName(&file.Instances[0], nil); got != "gateway" {
+	if got := file.ProviderName(&instance, nil); got != "gateway" {
 		t.Errorf("instance provider = %q, want gateway", got)
 	}
 	if got := file.ProviderName(&Instance{}, nil); got != "gateway" {
@@ -536,12 +569,12 @@ func TestLoadChannels(t *testing.T) {
 	}
 
 	rejects := map[string]string{
-		"bad type":        `{"channels": [{"type": "slack", "bot_token": "x"}]}`,
-		"weixin no token": `{"channels": [{"type": "weixin"}]}`,
-		"qq no secret":    `{"channels": [{"type": "qq", "app_id": "1"}]}`,
-		"tg no token":     `{"channels": [{"type": "telegram"}]}`,
-		"dup key":         `{"channels": [{"type": "weixin", "bot_token": "a"}, {"type": "weixin", "bot_token": "b"}]}`,
-		"name with slash": `{"channels": [{"type": "weixin", "name": "a/b", "bot_token": "t"}]}`,
+		"bad type":                `{"channels": [{"type": "slack", "bot_token": "x"}]}`,
+		"weixin no token":         `{"channels": [{"type": "weixin"}]}`,
+		"qq no secret":            `{"channels": [{"type": "qq", "app_id": "1"}]}`,
+		"tg no token":             `{"channels": [{"type": "telegram"}]}`,
+		"dup key":                 `{"channels": [{"type": "weixin", "bot_token": "a"}, {"type": "weixin", "bot_token": "b"}]}`,
+		"name with slash":         `{"channels": [{"type": "weixin", "name": "a/b", "bot_token": "t"}]}`,
 		"unnamed vs weixin block": `{"weixin": {"enabled": true, "bot_token": "t"}, "channels": [{"type": "weixin", "bot_token": "t2"}]}`,
 		"unnamed vs qq block":     `{"qq": {"enabled": true, "app_id": "1", "app_secret": "s"}, "channels": [{"type": "qq", "app_id": "1", "app_secret": "s"}]}`,
 		"unknown agent ref":       `{"channels": [{"type": "weixin", "bot_token": "t", "agent": "nope"}]}`,
@@ -577,5 +610,165 @@ func TestAgentMCPField(t *testing.T) {
 	search, ok := mcp["search"].(map[string]any)
 	if !ok || search["command"] != "search-mcp" {
 		t.Errorf("agent.mcp = %+v", mcp)
+	}
+}
+
+// gitea 通道：host 校验、repo 名校验、token 的 ${VAR} 展开与 enabled 开关。
+func TestGiteaChannel(t *testing.T) {
+	t.Setenv("ASSISTANT_TEST_TOKEN", "sec-ret")
+	path := filepath.Join(t.TempDir(), "config.json")
+	content := `{
+		"channels": [
+			{"type": "gitea", "host": "https://gitea.example.com/", "token": "${ASSISTANT_TEST_TOKEN}",
+			 "repos": ["acme/repo"], "agent": "review"},
+			{"type": "gitea", "name": "mirror", "host": "https://mirror.example.com", "repos": ["acme/b"], "enabled": false}
+		],
+		"runtimes": {"main": {"channels": ["gitea"]}}
+	}`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	file, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := file.Channels[0].Token; got != "sec-ret" {
+		t.Errorf("token 应展开环境变量引用：%q", got)
+	}
+	if file.Channels[0].Key() != "gitea" || file.Channels[1].Key() != "gitea/mirror" {
+		t.Errorf("Key = %q %q", file.Channels[0].Key(), file.Channels[1].Key())
+	}
+	if file.Channels[1].IsEnabled() {
+		t.Error("enabled=false 的通道应报告停用")
+	}
+	if !file.Channels[0].IsEnabled() {
+		t.Error("缺省应启用")
+	}
+
+	rejects := map[string]string{
+		"no host":          `{"channels": [{"type": "gitea", "repos": ["a/b"]}]}`,
+		"bad host":         `{"channels": [{"type": "gitea", "host": "gitea.example.com", "repos": ["a/b"]}]}`,
+		"bad repo":         `{"channels": [{"type": "gitea", "host": "https://gitea.example.com", "repos": ["nope"]}]}`,
+		"unclosed token":   `{"channels": [{"type": "gitea", "host": "https://gitea.example.com", "token": "${VAR", "repos": ["a/b"]}]}`,
+		"unknown provider": `{"channels": [{"type": "gitea", "host": "https://gitea.example.com", "provider": "nope", "repos": ["a/b"]}]}`,
+	}
+	for name, bad := range rejects {
+		t.Run(name, func(t *testing.T) {
+			badPath := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(badPath, []byte(bad), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(badPath); err == nil {
+				t.Errorf("Load 应拒绝：%s", bad)
+			}
+		})
+	}
+}
+
+// runtime 路径解析：缺省值收敛到 $root、${VAR:-default} 展开与 $root 自引用、
+// state/api_listen 的 "off" 开关。
+func TestRuntimeResolution(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	t.Setenv("ASSISTANT_TEST_ROOT", "")
+	path := filepath.Join(t.TempDir(), "config.json")
+	content := `{
+		"channels": [{"type": "gitea", "host": "https://gitea.example.com"}],
+		"runtimes": {
+			"main": {
+				"root": "${ASSISTANT_TEST_ROOT:-$XDG_DATA_HOME}/assistant",
+				"repos_dir": "$root/clones",
+				"state_file": "off",
+				"api_listen": "off",
+				"interval_ms": 5000,
+				"concurrency": 3
+			}
+		}
+	}`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	file, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	runtime, err := file.ResolveRuntime("")
+	if err != nil {
+		t.Fatalf("ResolveRuntime: %v", err)
+	}
+	dataRoot := filepath.Join(os.Getenv("XDG_DATA_HOME"), "assistant")
+	if runtime.DataRoot() != dataRoot {
+		t.Errorf("DataRoot = %q, want %q", runtime.DataRoot(), dataRoot)
+	}
+	if runtime.ReposRoot() != filepath.Join(dataRoot, "clones") {
+		t.Errorf("$root 自引用未生效：%q", runtime.ReposRoot())
+	}
+	if runtime.ReviewRootDir() != filepath.Join(dataRoot, "review") {
+		t.Errorf("ReviewRootDir 缺省 = %q", runtime.ReviewRootDir())
+	}
+	if runtime.ChatStateDir() != filepath.Join(dataRoot, "chat") {
+		t.Errorf("ChatStateDir 缺省 = %q", runtime.ChatStateDir())
+	}
+	if runtime.StatePath() != "" || runtime.ListenAddr() != "" {
+		t.Errorf("\"off\" 未关闭：%q %q", runtime.StatePath(), runtime.ListenAddr())
+	}
+	if runtime.Interval() != 5000 || runtime.Workers() != 3 || runtime.Timeout() != DefaultSessionTimeoutMS {
+		t.Errorf("参数缺省/覆盖 = %d/%d/%d", runtime.Interval(), runtime.Workers(), runtime.Timeout())
+	}
+	reviewName, err := runtime.ReviewName("https://gitea.example.com", "acme/repo", "pr", 7)
+	if err != nil {
+		t.Fatalf("ReviewName: %v", err)
+	}
+	if reviewName != "gitea.example.com-acme--repo-pr-7" {
+		t.Errorf("ReviewName = %q", reviewName)
+	}
+}
+
+// runtime 引用校验与选择：main_agent/subagents/channels/provider 引用不存在
+// 直接报错；多 runtime 必须指定；default_runtime 兜底。
+func TestRuntimeSelection(t *testing.T) {
+	base := func(runtimes string) string {
+		return `{"channels": [{"type": "weixin", "bot_token": "t"}],
+			"providers": {"gw": {}},
+			"agents": {"qa": {"provider": "gw"}},
+			"runtimes": ` + runtimes + `}`
+	}
+	valid := base(`{"review": {"main_agent": "qa", "subagents": ["ops"], "channels": ["weixin"], "provider": "gw"},
+		"chat": {"channels": ["weixin"]}}`)
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(valid), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	file, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	runtime, err := file.ResolveRuntime("review")
+	if err != nil {
+		t.Fatalf("ResolveRuntime(review): %v", err)
+	}
+	if runtime.MainAgent != "qa" || !slices.Equal(runtime.Subagents, []string{"ops"}) {
+		t.Errorf("runtime = %+v", runtime)
+	}
+	if _, err := file.ResolveRuntime(""); err == nil {
+		t.Error("无 default_runtime 的多 runtime 配置应要求显式指定")
+	}
+	rejects := map[string]string{
+		"unknown main agent": base(`{"main": {"main_agent": "nope"}}`),
+		"unknown subagent":   base(`{"main": {"subagents": ["nope"]}}`),
+		"unknown channel":    base(`{"main": {"channels": ["telegram"]}}`),
+		"unknown provider":   base(`{"main": {"provider": "nope"}}`),
+		"negative interval":  base(`{"main": {"interval_ms": -1}}`),
+		"bad default":        base(`{"main": {}}`)[:0] + `{"channels": [{"type": "weixin", "bot_token": "t"}], "runtimes": {"main": {}}, "default_runtime": "nope"}`,
+	}
+	for name, bad := range rejects {
+		t.Run(name, func(t *testing.T) {
+			badPath := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(badPath, []byte(bad), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(badPath); err == nil {
+				t.Errorf("Load 应拒绝：%s", bad)
+			}
+		})
 	}
 }

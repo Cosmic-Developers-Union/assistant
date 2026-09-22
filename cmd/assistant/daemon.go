@@ -2,11 +2,11 @@ package main
 
 import (
 	"bufio"
+	"cmp"
 	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
@@ -212,10 +212,11 @@ func runWeixinLogin(command *cobra.Command, configPath string, options *weixinLo
 	return nil
 }
 
-// startDaemonServices 启动 daemon 模式的服务面：只读状态 API（默认
-// 127.0.0.1:8770）与启用的对话通道（weixin/qq）。API 先就绪——对话会话的
-// daemon MCP 依赖端点文件自举发现。通道共享一个 Chat 实例：multi-user 由
-// 「通道 + 用户 → 会话」映射隔离，multi-agent 由命名 agent 池提供。
+// startDaemonServices 启动 daemon 模式的服务面：只读状态 API、runtime 引用的
+// 对话通道（weixin/qq/telegram；gitea 通道由调度引擎接管）与旧版单实例块。
+// API 先就绪——对话会话的 daemon MCP 依赖端点文件自举发现。通道共享一个 Chat
+// 实例：multi-user 由「通道 + 用户 → 会话」映射隔离，对话统一由 runtime 的
+// 主 agent 接待、子代理按需委派。
 func startDaemonServices(
 	command *cobra.Command,
 	configPath string,
@@ -227,12 +228,6 @@ func startDaemonServices(
 		fmt.Fprintf(command.OutOrStdout(), "[daemon %s] %s\n",
 			time.Now().UTC().Format("2006-01-02T15:04:05.000Z"), fmt.Sprintf(format, arguments...))
 	}
-	listen := strings.TrimSpace(options.APIListen)
-	if listen != "" && !strings.EqualFold(listen, "none") && !strings.EqualFold(listen, "off") {
-		if _, err := daemon.Serve(command.Context(), listen, store, version, logf, stateStore); err != nil {
-			return err
-		}
-	}
 
 	_, file, err := resolveInstanceFile(commandOptions{ConfigPath: configPath})
 	if err != nil {
@@ -243,65 +238,78 @@ func startDaemonServices(
 			return fmt.Errorf("--weixin/--qq 需要 config.json 配置：先 assistant config init（或 weixin login）")
 		}
 		// 静默跳过是最难排查的一种：明确说清通道没起以及为什么
-		logf("对话通道未启用：config.json 里没有 weixin/qq 配置")
+		logf("对话通道未启用：config.json 里没有通道配置")
 		return nil
 	}
-
-	// agent 池：每个 agent 独立 provider 链与执行参数；启动期解析（配置问题
-	// 立刻报错），凭据自检逐 provider 实测（失败只告警，不拦启动）
-	agents, err := buildAgentRuntimes(file, options)
+	runtime, err := file.ResolveRuntime(options.Runtime)
 	if err != nil {
 		return err
 	}
+	logRuntimeSummary(logf, file, runtime)
 
-	// 内置缺省 agent 的取值沿用 weixin 节的对话参数（weixin.provider > 全局默认），
-	// 未配置 agent 池时行为与旧版本一致
-	weixinConfig := file.Weixin
-	providerName := file.WeixinProviderName()
-	providerOverrides, err := file.EffectiveOverrides(providerName)
+	// 状态 API 监听：旗标 > runtime.api_listen（off/none 关闭）
+	listen := firstNonEmpty(strings.TrimSpace(options.APIListen), runtime.ListenAddr())
+	if listen != "" && !strings.EqualFold(listen, "none") && !strings.EqualFold(listen, "off") {
+		if _, err := daemon.Serve(command.Context(), listen, store, version, logf, stateStore); err != nil {
+			return err
+		}
+	}
+
+	// 主 agent + 子代理：启动期解析（配置问题立刻报错），凭据自检逐 provider
+	// 实测（失败只告警，不拦启动）
+	mainAgent, err := buildMainAgentRuntime(file, runtime, options)
 	if err != nil {
-		return fmt.Errorf("对话会话 provider %s: %w", providerName, err)
+		return err
 	}
-	claudeBin := firstNonEmpty(options.ClaudeBin, "claude")
-	var model string
-	var timeout time.Duration
-	if weixinConfig != nil {
-		claudeBin = firstNonEmpty(weixinConfig.ClaudeBin, options.ClaudeBin, "claude")
-		model = weixinConfig.Model
-		timeout = time.Duration(weixinConfig.SessionTimeoutMS) * time.Millisecond
+	subagents, err := buildSubagents(file, runtime, options)
+	if err != nil {
+		return err
 	}
-	// 对话会话走 claude 的最小模式（--bare）：上下文本就全由显式参数给出，最小
-	// 模式顺带甩掉 hooks、插件同步、CLAUDE.md 自动发现与记忆。仅在 claude 真的
-	// 支持该参数时打开，不支持就退回普通模式，不让对话起不来。
-	bare := claudecfg.SupportsBare(claudeBin)
 	remote := sessionstore.ResolveRemote(filepath.Dir(configPath))
 	chat, err := daemon.NewChat(daemon.ChatConfig{
-		ClaudeBin:    claudeBin,
-		Bare:         bare,
-		Debug:        options.Debug,
-		Remote:       remote,
-		Model:        firstNonEmpty(model, options.Model),
-		Provider:     providerOverrides,
-		ProviderName: providerName,
-		Timeout:      timeout,
-		Agents:       agents,
-		DefaultAgent: file.DefaultAgent,
-		Log:          logf,
+		MainAgent:  mainAgent,
+		Subagents:  subagents,
+		StateDir:   migrateRuntimeDir(filepath.Join(filepath.Dir(configPath), "chat"), runtime.ChatStateDir(), logf),
+		SessionDir: migrateRuntimeDir(filepath.Join(filepath.Dir(configPath), "claude"), runtime.ClaudeConfigDir(), logf),
+		Debug:      options.Debug,
+		Remote:     remote,
+		Log:        logf,
 	})
 	if err != nil {
 		return err
 	}
-	logChatSummary(logf, file, chat, claudeBin, bare, remote, agents)
-	checkChatCredentials(command, file, providerName, providerOverrides, agents, logf)
+	logChatSummary(logf, mainAgent, subagents, chat, remote)
+	checkChatCredentials(command, file, mainAgent, subagents, logf)
 
-	// 通道：channels 列表（多实例，推荐）逐条启动；旧版单实例 weixin/qq 块
-	// 继续按 enabled/--旗标语义工作
+	// 通道：只启动 runtime 引用的通道；gitea 通道由调度引擎接管（本函数跳过）。
+	// 旧版单实例 weixin/qq 块继续按 enabled/--旗标语义工作。
+	referenced := map[string]bool{}
+	for _, key := range runtime.Channels {
+		referenced[key] = true
+	}
+	started := 0
 	for index := range file.Channels {
-		if err := startChannelEntry(command, file.Channels[index], options, chat, logf); err != nil {
+		entry := file.Channels[index]
+		if entry.Type == instances.ChannelGitea {
+			continue
+		}
+		if len(runtime.Channels) > 0 && !referenced[entry.Key()] {
+			logf("通道 %s 未被 runtime 引用，不启动（runtimes.<名>.channels 里加上它）", entry.Key())
+			continue
+		}
+		if !entry.IsEnabled() {
+			logf("通道 %s 已停用（enabled=false）", entry.Key())
+			continue
+		}
+		if err := startChannelEntry(command, entry, options, chat, logf); err != nil {
 			return err
 		}
+		started++
 	}
-	if err := startWeixinChannel(command, file, weixinConfig, options, chat, logf); err != nil {
+	if len(runtime.Channels) > 0 && started == 0 {
+		logf("runtime 未引用任何对话通道：只运行 gitea 通道（调度引擎）与状态 API")
+	}
+	if err := startWeixinChannel(command, file, options, chat, logf); err != nil {
 		return err
 	}
 	if err := startQQChannel(command, file, options, chat, logf); err != nil {
@@ -310,7 +318,50 @@ func startDaemonServices(
 	return nil
 }
 
-// startChannelEntry 启动 channels 列表里的一条通道实例（列表里有条目即启用）。
+// logRuntimeSummary 打印运行时装配结果：主 agent、子代理、通道、运行树。
+func logRuntimeSummary(logf func(string, ...any), file *instances.File, runtime instances.Runtime) {
+	mainAgent := runtime.MainAgent
+	if mainAgent == "" {
+		mainAgent = instances.DefaultMainAgent
+	}
+	subagents := runtime.Subagents
+	if len(subagents) == 0 {
+		subagents = builtinagents.SubagentNames()
+	}
+	logf("runtime 装配：main agent = %s；子代理 = %s；通道 = %s",
+		mainAgent, strings.Join(subagents, "、"), strings.Join(runtime.Channels, "、"))
+	logf("运行树：root = %s（repos=%s state=%s review=%s）",
+		runtime.DataRoot(), runtime.ReposRoot(), filepath.Dir(runtime.StatePath()), runtime.ReviewRootDir())
+}
+
+// migrateRuntimeDir 把旧运行目录整体搬到 runtime 树下：同盘 rename 一次性迁移，
+// 失败（跨盘/占用）回退旧路径继续用，不让目录搬迁拦住 daemon 启动。
+func migrateRuntimeDir(oldDir, newDir string, logf func(string, ...any)) string {
+	oldDir = filepath.Clean(oldDir)
+	newDir = filepath.Clean(newDir)
+	if oldDir == newDir {
+		return newDir
+	}
+	if _, err := os.Stat(oldDir); err != nil {
+		return newDir // 旧目录不存在：直接用新路径
+	}
+	if _, err := os.Stat(newDir); err == nil {
+		// 新目录已在用（迁移过或用户自配）：旧目录留给用户自行处理
+		return newDir
+	}
+	if err := os.MkdirAll(filepath.Dir(newDir), 0o755); err != nil {
+		logf("运行目录迁移失败（%s → %s）：%v；继续用旧路径", oldDir, newDir, err)
+		return oldDir
+	}
+	if err := os.Rename(oldDir, newDir); err != nil {
+		logf("运行目录迁移失败（%s → %s）：%v；继续用旧路径", oldDir, newDir, err)
+		return oldDir
+	}
+	logf("运行目录已迁移：%s → %s", oldDir, newDir)
+	return newDir
+}
+
+// startChannelEntry 启动 channels 列表里的一条通道实例（runtime 引用即启动）。
 func startChannelEntry(
 	command *cobra.Command,
 	entry instances.Channel,
@@ -334,7 +385,7 @@ func startChannelEntry(
 			LoginUserID: entry.LoginUserID,
 			SplitLimit:  entry.SplitLimit,
 		}, logf)
-		startChannel(command, channel, chat, entry.Agent, options.Debug, logf)
+		startChannel(command, channel, chat, options.Debug, logf)
 	case instances.ChannelQQ:
 		channel := daemon.NewQQChannel(instances.QQ{
 			Enabled:    true,
@@ -346,7 +397,7 @@ func startChannelEntry(
 			Agent:      entry.Agent,
 			SplitLimit: entry.SplitLimit,
 		}, key, options.Debug, logf)
-		startChannel(command, channel, chat, entry.Agent, options.Debug, logf)
+		startChannel(command, channel, chat, options.Debug, logf)
 	case instances.ChannelTelegram:
 		channel := daemon.NewTelegramChannel(daemon.TelegramChannelConfig{
 			Name:       key,
@@ -355,9 +406,11 @@ func startChannelEntry(
 			AdminUsers: entry.AdminUsers,
 			SplitLimit: entry.SplitLimit,
 		}, logf)
-		startChannel(command, channel, chat, entry.Agent, options.Debug, logf)
+		startChannel(command, channel, chat, options.Debug, logf)
+	case instances.ChannelGitea:
+		return fmt.Errorf("gitea 通道不经过对话桥启动（由调度引擎接管）：%s", key)
 	default:
-		return fmt.Errorf("channels: 未知平台类型 %q（应为 weixin/qq/telegram）", entry.Type)
+		return fmt.Errorf("channels: 未知平台类型 %q（应为 weixin/qq/telegram/gitea）", entry.Type)
 	}
 	logf("通道 %s 已启动（白名单 %d 人）", key, len(entry.AdminUsers))
 	return nil
@@ -368,11 +421,10 @@ func startChannel(
 	command *cobra.Command,
 	channel daemon.Channel,
 	chat *daemon.Chat,
-	agent string,
 	debug bool,
 	logf func(string, ...any),
 ) {
-	config := daemon.ChannelConfig{Chat: chat, DefaultAgent: agent, Log: logf, Debug: debug}
+	config := daemon.ChannelConfig{Chat: chat, Log: logf, Debug: debug}
 	go func() {
 		if err := daemon.RunChannel(command.Context(), channel, config); err != nil {
 			logf("通道 %s 退出：%v", channel.Name(), err)
@@ -380,139 +432,203 @@ func startChannel(
 	}()
 }
 
-// buildAgentRuntimes 组装生效的 agent 池：内嵌预设（internal/agents，随二进制
-// 分发，system prompt/MCP 开箱即用）打底，config.json 的 agents 同名覆盖其上、
-// 其余为新增。provider 链解析与 bare 探测逐 agent 进行。
-func buildAgentRuntimes(file *instances.File, options *dispatcherOptions) (map[string]daemon.AgentRuntime, error) {
-	agents := make(map[string]daemon.AgentRuntime, len(file.Agents)+len(builtinagents.List()))
-	defaultClaudeBin := firstNonEmpty(options.ClaudeBin, "claude")
-	defaultBare := claudecfg.SupportsBare(defaultClaudeBin)
-	for _, definition := range builtinagents.List() {
-		agents[definition.Name] = daemon.AgentRuntime{
-			Name:         definition.Name,
-			Model:        definition.Model,
-			SystemPrompt: definition.SystemPrompt,
-			ClaudeBin:    defaultClaudeBin,
-			Bare:         defaultBare,
+// buildMainAgentRuntime 解析 runtime 的主 agent 生效运行时：内置 main 预设打底，
+// config.json 的 agents[main_agent] 同名覆盖；provider 链 agent > runtime.provider
+// > 全局默认，bare 探测与超时逐项落实。
+func buildMainAgentRuntime(
+	file *instances.File,
+	runtime instances.Runtime,
+	options *dispatcherOptions,
+) (daemon.AgentRuntime, error) {
+	name := runtime.MainAgent
+	if name == "" {
+		name = instances.DefaultMainAgent
+	}
+	definition, builtinOK := builtinagents.Lookup(name)
+	if !builtinOK {
+		if _, userOK := file.Agents[name]; !userOK {
+			return daemon.AgentRuntime{}, fmt.Errorf("主 agent %q 未定义（用户 agents：%s；内置：%s）",
+				name, file.AgentNames(), strings.Join(builtinagents.Names(), "、"))
 		}
 	}
-	for _, name := range file.AgentNames() {
-		definition := file.Agents[name]
-		providerName := file.AgentProviderName(name)
-		overrides, err := file.EffectiveOverrides(providerName)
-		if err != nil {
-			return nil, fmt.Errorf("agents[%s] provider %s: %w", name, providerName, err)
-		}
-		claudeBin := firstNonEmpty(definition.ClaudeBin, options.ClaudeBin, "claude")
-		// agent 专属 MCP 合并进 provider 覆盖（同名 server 覆盖自举与供应商的）
-		if len(definition.MCP) > 0 {
-			if overrides.MCP == nil {
-				overrides.MCP = map[string]any{}
-			}
-			maps.Copy(overrides.MCP, definition.MCP)
-		}
-		agents[name] = daemon.AgentRuntime{
-			Name:         name,
-			Provider:     overrides,
-			ProviderName: providerName,
-			Model:        definition.Model,
-			SystemPrompt: definition.SystemPrompt,
-			ClaudeBin:    claudeBin,
-			Bare:         claudecfg.SupportsBare(claudeBin),
-			Timeout:      time.Duration(definition.SessionTimeoutMS) * time.Millisecond,
-		}
+	if user, ok := file.Agents[name]; ok {
+		definition.Description = cmp.Or(user.Description, definition.Description)
+		definition.SystemPrompt = cmp.Or(user.SystemPrompt, definition.SystemPrompt)
+		definition.Model = cmp.Or(user.Model, definition.Model)
+		definition.MCP = user.MCP
 	}
-	return agents, nil
+	return agentRuntimeFromDefinition(file, definition, runtime, options)
 }
 
-// logChatSummary 打印对话会话的前提：claude 与最小模式、目录布局、agent 池、
-// 记录库。一次说清，别让「为什么没生效」靠猜。
+// buildSubagents 解析 runtime 的子代理定义：缺省全部内置子代理；显式清单逐个
+// 解析（用户 agents 同名覆盖内置预设）。子代理的 MCP 并入会话面、模型进
+// --agents JSON；provider 仍走主 agent 的（委派执行不换供应商）。
+func buildSubagents(
+	file *instances.File,
+	runtime instances.Runtime,
+	options *dispatcherOptions,
+) ([]daemon.SubagentDefinition, error) {
+	definitions := make([]builtinagents.Definition, 0, len(runtime.Subagents))
+	if len(runtime.Subagents) == 0 {
+		definitions = builtinagents.Subagents()
+	} else {
+		for _, name := range runtime.Subagents {
+			definition, ok := builtinagents.Lookup(name)
+			if !ok {
+				definition = builtinagents.Definition{Name: name}
+			}
+			if user, ok := file.Agents[name]; ok {
+				definition.Description = cmp.Or(user.Description, definition.Description)
+				definition.SystemPrompt = cmp.Or(user.SystemPrompt, definition.SystemPrompt)
+				definition.Model = cmp.Or(user.Model, definition.Model)
+				definition.MCP = user.MCP
+			}
+			definitions = append(definitions, definition)
+		}
+	}
+	subagents := make([]daemon.SubagentDefinition, 0, len(definitions))
+	for _, definition := range definitions {
+		if strings.TrimSpace(definition.Description) == "" {
+			definition.Description = truncateDescription(definition.SystemPrompt)
+		}
+		subagents = append(subagents, daemon.SubagentDefinition{
+			Name:        definition.Name,
+			Description: definition.Description,
+			Prompt:      definition.SystemPrompt,
+			Model:       definition.Model,
+			MCP:         definition.MCP,
+		})
+	}
+	return subagents, nil
+}
+
+// agentRuntimeFromDefinition 把 agent 定义落成生效运行时：provider 链解析、
+// MCP 合并、claude_bin 探测与超时。
+func agentRuntimeFromDefinition(
+	file *instances.File,
+	definition builtinagents.Definition,
+	runtime instances.Runtime,
+	options *dispatcherOptions,
+) (daemon.AgentRuntime, error) {
+	providerName := file.AgentProviderName(definition.Name)
+	if definition.Name != "" && file.Agents[definition.Name].Provider == "" {
+		// 内置预设/未写 provider 的 agent：runtime.provider 优先于全局默认
+		if runtime.Provider != "" {
+			providerName = runtime.Provider
+		}
+	}
+	overrides, err := file.EffectiveOverrides(providerName)
+	if err != nil {
+		return daemon.AgentRuntime{}, fmt.Errorf("agents[%s] provider %s: %w", definition.Name, providerName, err)
+	}
+	if len(definition.MCP) > 0 {
+		if overrides.MCP == nil {
+			overrides.MCP = map[string]any{}
+		}
+		maps.Copy(overrides.MCP, definition.MCP)
+	}
+	claudeBin := firstNonEmpty(file.Agents[definition.Name].ClaudeBin, options.ClaudeBin, "claude")
+	return daemon.AgentRuntime{
+		Name:         definition.Name,
+		Provider:     overrides,
+		ProviderName: providerName,
+		Model:        definition.Model,
+		SystemPrompt: definition.SystemPrompt,
+		ClaudeBin:    claudeBin,
+		Bare:         claudecfg.SupportsBare(claudeBin),
+		Timeout:      time.Duration(file.Agents[definition.Name].SessionTimeoutMS) * time.Millisecond,
+	}, nil
+}
+
+// truncateDescription 取提示词首行做描述兜底（委派质量靠 description）。
+func truncateDescription(prompt string) string {
+	prompt = strings.TrimSpace(prompt)
+	if head, _, found := strings.Cut(prompt, "\n"); found {
+		prompt = head
+	}
+	runes := []rune(prompt)
+	if len(runes) > 80 {
+		return string(runes[:80]) + "…"
+	}
+	if prompt == "" {
+		return "专项任务子代理"
+	}
+	return prompt
+}
+
+// logChatSummary 打印对话会话的前提：claude 与最小模式、目录布局、主 agent 与
+// 子代理、记录库。一次说清，别让「为什么没生效」靠猜。
 func logChatSummary(
 	logf func(string, ...any),
-	file *instances.File,
+	mainAgent daemon.AgentRuntime,
+	subagents []daemon.SubagentDefinition,
 	chat *daemon.Chat,
-	claudeBin string,
-	bare bool,
 	remote sessionstore.RemoteConfig,
-	agents map[string]daemon.AgentRuntime,
 ) {
 	bareLabel := "关（claude 不支持 --bare 或未探测到）"
-	if bare {
+	if mainAgent.Bare {
 		bareLabel = "开（不读 hooks/插件/CLAUDE.md，只用显式 settings 与自举 MCP）"
 	}
 	logf("对话会话：")
-	logf("  claude   = %s", claudeBin)
-	logf("  bare     = %s", bareLabel)
-	logf("  配置根   = %s", chat.SessionDir())
-	logf("  会话目录 = %s（每个会话一个稳定工作目录 <chat-xxxxxxxx>，含 session.json）", chat.StateDir())
-	logf("  续聊     = cd <会话目录> && claude --continue")
-	if len(agents) == 0 {
-		logf("  agent 池 = 空（所有会话用内置缺省；/agent 不可用）")
-	} else {
-		defaultAgent := file.DefaultAgent
-		if defaultAgent == "" {
-			defaultAgent = "内置缺省"
-		}
-		logf("  agent 池 = %s（默认 %s；带 * 为用户定义，其余为内置预设；聊天里 /agent 可切换）",
-			agentPoolSummary(file, agents), defaultAgent)
-	}
+	logf("  main agent = %s（provider %s，model %s）", agentLabel(mainAgent.Name),
+		displayName(mainAgent.ProviderName, nil), orDash(mainAgent.Model))
+	logf("  子代理     = %s（注入 --agents，主模型按 description 委派）",
+		strings.Join(subagentNames(subagents), "、"))
+	logf("  claude     = %s", mainAgent.ClaudeBin)
+	logf("  bare       = %s", bareLabel)
+	logf("  配置根     = %s", chat.SessionDir())
+	logf("  会话目录   = %s（每个会话一个稳定工作目录 <chat-xxxxxxxx>，含 session.json）", chat.StateDir())
+	logf("  续聊       = cd <会话目录> && claude --continue")
 	if remote.URL != "" {
-		logf("  记录库   = %s（每轮结束归档该会话，可用 sessions MCP 回查）", remote.URL)
+		logf("  记录库     = %s（每轮结束归档该会话，可用 sessions MCP 回查）", remote.URL)
 	} else {
-		logf("  记录库   = 未配置（assistant serve + session push 可远端留存记录）")
+		logf("  记录库     = 未配置（assistant serve + session push 可远端留存记录）")
 	}
 }
 
-// agentPoolSummary 是 agent 池的日志展示：名字排序，用户定义的带 * 标记。
-func agentPoolSummary(file *instances.File, agents map[string]daemon.AgentRuntime) string {
-	names := slices.Sorted(maps.Keys(agents))
-	labeled := make([]string, 0, len(names))
-	for _, name := range names {
-		if _, ok := file.Agents[name]; ok {
-			labeled = append(labeled, name+"*")
-			continue
-		}
-		labeled = append(labeled, name)
+// subagentNames 返回子代理名（保持 runtime 声明顺序）。
+func subagentNames(subagents []daemon.SubagentDefinition) []string {
+	names := make([]string, 0, len(subagents))
+	for _, subagent := range subagents {
+		names = append(names, subagent.Name)
 	}
-	return strings.Join(labeled, "、")
+	return names
 }
 
-// checkChatCredentials 对内置缺省与每个 agent 的 provider 做最小请求实测：
-// 密钥/端点不配套会让每条消息静默重试几分钟，启动时就说清楚。失败只告警。
+// agentLabel 是日志里的 agent 展示名。
+func agentLabel(name string) string {
+	if strings.TrimSpace(name) == "" {
+		return "内置 main"
+	}
+	return name
+}
+
+// checkChatCredentials 对主 agent 的 provider 做最小请求实测：密钥/端点不配套
+// 会让每条消息静默重试几分钟，启动时就说清楚。失败只告警。
 func checkChatCredentials(
 	command *cobra.Command,
 	file *instances.File,
-	providerName string,
-	providerOverrides claudecfg.Overrides,
-	agents map[string]daemon.AgentRuntime,
+	mainAgent daemon.AgentRuntime,
+	subagents []daemon.SubagentDefinition,
 	logf func(string, ...any),
 ) {
 	warnf := func(format string, arguments ...any) {
 		fmt.Fprintf(command.ErrOrStderr(), "警告："+format+"\n", arguments...)
 	}
-	checked := map[string]bool{}
-	verify := func(label, name string, overrides claudecfg.Overrides) {
-		if name == "" || checked[name] {
-			return
-		}
-		checked[name] = true
-		source := claudecfg.CredentialSource(overrides)
-		if source == "" {
-			warnf("%s 没有可用的 AI 凭据：对话会认证失败；%s", label, claudecfg.MissingCredentialHint)
-			return
-		}
-		check := provider.CheckCredential(command.Context(), overrides)
-		if check.OK() {
-			logf("%s AI 凭据：provider = %s，来源 = %s，自检 = %s", label, displayName(name, file), source, check.Describe())
-			return
-		}
-		warnf("%s 凭据自检失败：%s", label, check.Describe())
-		warnf("%s", provider.CredentialHint)
+	source := claudecfg.CredentialSource(mainAgent.Provider)
+	if source == "" {
+		warnf("主 agent %s 没有可用的 AI 凭据：对话会认证失败；%s",
+			agentLabel(mainAgent.Name), claudecfg.MissingCredentialHint)
+		return
 	}
-	verify("内置缺省", providerName, providerOverrides)
-	for _, agent := range agents {
-		verify("agent "+agent.Name, agent.ProviderName, agent.Provider)
+	check := provider.CheckCredential(command.Context(), mainAgent.Provider)
+	if check.OK() {
+		logf("主 agent AI 凭据：provider = %s，来源 = %s，自检 = %s",
+			displayName(mainAgent.ProviderName, file), source, check.Describe())
+		return
 	}
+	warnf("主 agent 凭据自检失败：%s", check.Describe())
+	warnf("%s", provider.CredentialHint)
 }
 
 // displayName 是 provider 名的日志展示（内置预设加标注，缺省名可读化）。
@@ -530,11 +646,11 @@ func displayName(name string, file *instances.File) string {
 func startWeixinChannel(
 	command *cobra.Command,
 	file *instances.File,
-	weixinConfig *instances.Weixin,
 	options *dispatcherOptions,
 	chat *daemon.Chat,
 	logf func(string, ...any),
 ) error {
+	weixinConfig := file.Weixin
 	if weixinConfig == nil {
 		if options.Weixin {
 			return fmt.Errorf("--weixin 需要 config.json 的 weixin 配置：先 assistant weixin login")
@@ -561,10 +677,9 @@ func startWeixinChannel(
 		LoginUserID: weixinConfig.LoginUserID,
 	}, logf)
 	channelConfig := daemon.ChannelConfig{
-		Chat:         chat,
-		DefaultAgent: weixinConfig.Agent,
-		Log:          logf,
-		Debug:        options.Debug,
+		Chat:  chat,
+		Log:   logf,
+		Debug: options.Debug,
 	}
 	go func() {
 		if err := daemon.RunChannel(command.Context(), channel, channelConfig); err != nil {
@@ -600,10 +715,9 @@ func startQQChannel(
 	}
 	channel := daemon.NewQQChannel(*qqConfig, "qq", options.Debug, logf)
 	channelConfig := daemon.ChannelConfig{
-		Chat:         chat,
-		DefaultAgent: qqConfig.Agent,
-		Log:          logf,
-		Debug:        options.Debug,
+		Chat:  chat,
+		Log:   logf,
+		Debug: options.Debug,
 	}
 	go func() {
 		if err := daemon.RunChannel(command.Context(), channel, channelConfig); err != nil {

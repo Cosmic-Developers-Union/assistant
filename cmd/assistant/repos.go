@@ -57,34 +57,34 @@ func newReposListCommand(configFlag *string, options *reposOptions) *cobra.Comma
 				return err
 			}
 			stdout := command.OutOrStdout()
-			if file == nil || len(file.Instances) == 0 {
+			if file == nil || giteaHostCount(file) == 0 {
 				fmt.Fprintln(stdout, "未登记任何平台（先 assistant login <host> 或 assistant setup）")
 				return nil
 			}
-			selected := file.Instances
+			selected := giteaChannels(file)
 			if host := strings.TrimRight(strings.TrimSpace(options.Host), "/"); host != "" {
-				instance, ok := findInstanceByHost(file, host)
+				channel, ok := findGiteaChannel(file, host)
 				if !ok {
 					return fmt.Errorf("平台 %s 不在配置中", host)
 				}
-				selected = []instances.Instance{instance}
+				selected = []*instances.Channel{channel}
 			}
 			total := 0
-			for _, instance := range selected {
-				if len(instance.Repos) == 0 {
-					fmt.Fprintf(stdout, "%s\t未登记仓库\n", instance.Host)
+			for _, channel := range selected {
+				if len(channel.Repos) == 0 {
+					fmt.Fprintf(stdout, "%s\t未登记仓库\n", channel.Host)
 					continue
 				}
-				for _, repo := range instance.Repos {
+				for _, repo := range channel.Repos {
 					dir := repo.Dir
 					if dir == "" {
 						dir = "-"
 					}
 					merge := "no"
-					if credential, ok, credentialErr := credentialFor(configPath, instance.Host, credentials.PurposeMerge); credentialErr == nil && ok {
+					if credential, ok, credentialErr := credentialFor(configPath, channel.Host, credentials.PurposeMerge); credentialErr == nil && ok {
 						merge = "token@" + credential.User
 					}
-					fmt.Fprintf(stdout, "%s\t%s\tdir=%s\tmerge=%s\n", instance.Host, repo.Name, dir, merge)
+					fmt.Fprintf(stdout, "%s\t%s\tdir=%s\tmerge=%s\n", channel.Host, repo.Name, dir, merge)
 					total++
 				}
 			}
@@ -138,7 +138,7 @@ func runReposAdd(command *cobra.Command, configPath, repoArg, hostFlag, dirFlag 
 	if strings.TrimSpace(hostFlag) == "" || !explicitDir {
 		hintHost, checkoutDir = detectCheckout(repoName)
 	}
-	instance, err := selectRepoInstance(file, hostFlag, repoName, hintHost)
+	channel, err := selectRepoGitea(file, hostFlag, repoName, hintHost)
 	if err != nil {
 		return err
 	}
@@ -149,12 +149,11 @@ func runReposAdd(command *cobra.Command, configPath, repoArg, hostFlag, dirFlag 
 		if dir, err = filepath.Abs(strings.TrimSpace(dirFlag)); err != nil {
 			return fmt.Errorf("解析 --dir: %w", err)
 		}
-	case hintHost != "" && sameHost(hintHost, instance.Host):
+	case hintHost != "" && sameHost(hintHost, channel.Host):
 		dir = checkoutDir
 	}
 
-	updated := instance
-	existing, found := instance.FindRepo(repoName)
+	existing, found := channel.FindRepo(repoName)
 	switch {
 	case found:
 		target := existing.Dir
@@ -162,26 +161,26 @@ func runReposAdd(command *cobra.Command, configPath, repoArg, hostFlag, dirFlag 
 			target = dir
 		}
 		if target == existing.Dir {
-			fmt.Fprintf(stdout, "%s 已在配置中（%s，dir=%s）\n", repoName, instance.Host, repoDirDisplay(target))
+			fmt.Fprintf(stdout, "%s 已在配置中（%s，dir=%s）\n", repoName, channel.Host, repoDirDisplay(target))
 			return nil
 		}
-		for index := range updated.Repos {
-			if updated.Repos[index].Name == repoName {
-				updated.Repos[index].Dir = target
+		for index := range channel.Repos {
+			if channel.Repos[index].Name == repoName {
+				channel.Repos[index].Dir = target
 			}
 		}
-		if err := saveInstance(file, path, instance.Host, updated); err != nil {
+		if err := saveConfig(file, path); err != nil {
 			return err
 		}
 		fmt.Fprintf(stdout, "已更新 %s 的 dir：%s → %s\n", repoName, repoDirDisplay(existing.Dir), repoDirDisplay(target))
 		return nil
 	default:
-		updated.Repos = append(slices.Clone(updated.Repos), instances.Repo{Name: repoName, Dir: dir})
-		if err := saveInstance(file, path, instance.Host, updated); err != nil {
+		channel.Repos = append(slices.Clone(channel.Repos), instances.Repo{Name: repoName, Dir: dir})
+		if err := saveConfig(file, path); err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "已登记 %s → %s（dir=%s）\n", repoName, instance.Host, repoDirDisplay(dir))
-		fmt.Fprintf(stdout, "服务端配置用 `assistant setup --host %s` 补齐（或对当前检出运行 assistant init）\n", instance.Host)
+		fmt.Fprintf(stdout, "已登记 %s → %s（dir=%s）\n", repoName, channel.Host, repoDirDisplay(dir))
+		fmt.Fprintf(stdout, "服务端配置用 `assistant setup --host %s` 补齐（或对当前检出运行 assistant init）\n", channel.Host)
 		return nil
 	}
 }
@@ -203,76 +202,27 @@ func runReposRemove(command *cobra.Command, configPath, repoArg, hostFlag string
 	if !repoRegistered(file, repoName) {
 		return fmt.Errorf("仓库 %s 不在任何平台的 repos[] 中（assistant repos list 查看）", repoName)
 	}
-	instance, err := selectRepoInstance(file, hostFlag, repoName)
+	channel, err := selectRepoGitea(file, hostFlag, repoName)
 	if err != nil {
 		return err
 	}
-	index := slices.IndexFunc(instance.Repos, func(repo instances.Repo) bool { return repo.Name == repoName })
+	index := slices.IndexFunc(channel.Repos, func(repo instances.Repo) bool { return repo.Name == repoName })
 	if index < 0 {
-		return fmt.Errorf("仓库 %s 不在 %s 的 repos[] 中（assistant repos list 查看）", repoName, instance.Host)
+		return fmt.Errorf("仓库 %s 不在 %s 的 repos[] 中（assistant repos list 查看）", repoName, channel.Host)
 	}
-	updated := instance
-	updated.Repos = slices.Delete(slices.Clone(instance.Repos), index, index+1)
-	if err := saveInstance(file, path, instance.Host, updated); err != nil {
+	channel.Repos = slices.Delete(slices.Clone(channel.Repos), index, index+1)
+	if err := saveConfig(file, path); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "已移除 %s（%s，剩余 %d 个仓库）\n", repoName, instance.Host, len(updated.Repos))
+	fmt.Fprintf(stdout, "已移除 %s（%s，剩余 %d 个仓库）\n", repoName, channel.Host, len(channel.Repos))
 	fmt.Fprintln(stdout, "服务端未触碰：分支保护/协作者与 MERGE_TOKEN secret 如需回收，请在 Gitea 服务端手动处理")
 	return nil
 }
 
-// selectRepoInstance 选择仓库登记所属的平台：--host 指定 > 检出 remote 对应的
-// 平台（autoHosts，仅命中配置时生效）> 已登记该仓库的平台（repoName 非空时）>
-// 配置中唯一实例。歧义或多平台时报可行动错误。
-func selectRepoInstance(file *instances.File, hostFlag, repoName string, autoHosts ...string) (instances.Instance, error) {
-	if host := strings.TrimRight(strings.TrimSpace(hostFlag), "/"); host != "" {
-		instance, ok := findInstanceByHost(file, host)
-		if !ok {
-			return instances.Instance{}, fmt.Errorf("平台 %s 不在配置中：先 assistant login %s", host, host)
-		}
-		return instance, nil
-	}
-	for _, hint := range autoHosts {
-		if hint = strings.TrimRight(strings.TrimSpace(hint), "/"); hint == "" {
-			continue
-		}
-		if instance, ok := findInstanceByHost(file, hint); ok {
-			return instance, nil
-		}
-	}
-	if repoName != "" {
-		var matches []instances.Instance
-		for _, instance := range file.Instances {
-			if _, ok := instance.FindRepo(repoName); ok {
-				matches = append(matches, instance)
-			}
-		}
-		switch len(matches) {
-		case 1:
-			return matches[0], nil
-		case 0:
-		default:
-			return instances.Instance{}, fmt.Errorf("仓库 %s 登记在多个平台，请用 --host 指定", repoName)
-		}
-	}
-	switch len(file.Instances) {
-	case 0:
-		return instances.Instance{}, fmt.Errorf("配置中没有平台：先 assistant login <host>")
-	case 1:
-		return file.Instances[0], nil
-	default:
-		hosts := make([]string, 0, len(file.Instances))
-		for _, instance := range file.Instances {
-			hosts = append(hosts, instance.Host)
-		}
-		return instances.Instance{}, fmt.Errorf("配置中有多个平台（%s），请用 --host 指定", strings.Join(hosts, "、"))
-	}
-}
-
-// repoRegistered 判断仓库是否登记在任一平台的 repos[] 中。
+// repoRegistered 判断仓库是否登记在任一 gitea 通道的 repos[] 中。
 func repoRegistered(file *instances.File, repoName string) bool {
-	for _, instance := range file.Instances {
-		if _, ok := instance.FindRepo(repoName); ok {
+	for _, channel := range giteaChannels(file) {
+		if _, ok := channel.FindRepo(repoName); ok {
 			return true
 		}
 	}

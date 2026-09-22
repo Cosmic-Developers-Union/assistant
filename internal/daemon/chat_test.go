@@ -19,15 +19,15 @@ func TestChatBareArgs(t *testing.T) {
 	chat, err := NewChat(ChatConfig{
 		StateDir:   t.TempDir(),
 		SessionDir: t.TempDir(),
-		Bare:       true,
+		MainAgent:  AgentRuntime{Bare: true},
 	})
 	if err != nil {
 		t.Fatalf("NewChat: %v", err)
 	}
-	if !chat.agentFor("user-1", "").Bare {
-		t.Fatal("内置缺省 agent 的 Bare 应为 true")
+	if !chat.config.MainAgent.Bare {
+		t.Fatal("主 agent 的 Bare 应为 true")
 	}
-	args, err := chat.sessionArgs("11111111-2222-4333-8444-555555555555", "chat-test", true, "你好", t.TempDir(), chat.agentFor("user-1", ""))
+	args, err := chat.sessionArgs("11111111-2222-4333-8444-555555555555", "chat-test", true, "你好", t.TempDir(), chat.config.MainAgent)
 	if err != nil {
 		t.Fatalf("sessionArgs: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestChatWithoutBareArgs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewChat: %v", err)
 	}
-	args, err := chat.sessionArgs("11111111-2222-4333-8444-555555555555", "", true, "你好", t.TempDir(), chat.agentFor("user-1", ""))
+	args, err := chat.sessionArgs("11111111-2222-4333-8444-555555555555", "", true, "你好", t.TempDir(), chat.config.MainAgent)
 	if err != nil {
 		t.Fatalf("sessionArgs: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestChatLogsEffectiveConfigWithMaskedSecrets(t *testing.T) {
 	chat, err := NewChat(ChatConfig{
 		StateDir:   t.TempDir(),
 		SessionDir: t.TempDir(),
-		Provider: claudecfg.Overrides{
+		MainAgent: AgentRuntime{Provider: claudecfg.Overrides{
 			Env: map[string]string{
 				"ANTHROPIC_AUTH_TOKEN": "sk-cp-abcdefghijklmn",
 				"ANTHROPIC_BASE_URL":   "https://api.minimaxi.com/anthropic",
@@ -258,7 +258,7 @@ func TestChatLogsEffectiveConfigWithMaskedSecrets(t *testing.T) {
 				"command": "uvx", "args": []any{"minimax-coding-plan-mcp"},
 				"env": map[string]any{"MINIMAX_API_KEY": "sk-cp-abcdefghijklmn"},
 			}},
-		},
+		}},
 		Log: func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
 		RunClaude: func(_ context.Context, _ string, _ []string, _ string, _ []string) ([]byte, error) {
 			return []byte(`{"subtype":"success","is_error":false,"result":"好的"}`), nil

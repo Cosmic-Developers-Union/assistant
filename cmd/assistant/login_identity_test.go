@@ -171,8 +171,8 @@ func TestLoginDerivesMCPAndAdminTokens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(file.Instances) != 1 || file.Instances[0].Host != server.URL {
-		t.Fatalf("instances = %+v", file.Instances)
+	if len(file.Channels) != 1 || file.Channels[0].Host != server.URL {
+		t.Fatalf("channels = %+v", file.Channels)
 	}
 
 	for _, want := range []string{"已登录", "@developer", "mcp 令牌", "admin 令牌"} {

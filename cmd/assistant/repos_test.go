@@ -32,7 +32,7 @@ func TestReposAddAndUpdateDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repo, ok := loaded.Instances[0].FindRepo("acme/repo")
+	repo, ok := loaded.Channels[0].FindRepo("acme/repo")
 	if !ok || repo.Dir != checkout {
 		t.Fatalf("登记结果 = %+v ok=%v", repo, ok)
 	}
@@ -61,7 +61,7 @@ func TestReposAddAndUpdateDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repo, _ = loaded.Instances[0].FindRepo("acme/repo")
+	repo, _ = loaded.Channels[0].FindRepo("acme/repo")
 	if repo.Dir != moved {
 		t.Fatalf("更新后 dir = %q, want %q", repo.Dir, moved)
 	}
@@ -101,12 +101,12 @@ func TestReposAddDetectsCheckout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// remote 指向 b.example.com：登记到对应实例，并自动带上检出根目录
-	instance, ok := findInstanceByHost(loaded, "https://b.example.com")
+	// remote 指向 b.example.com：登记到对应通道，并自动带上检出根目录
+	channel, ok := findGiteaChannel(loaded, "https://b.example.com")
 	if !ok {
-		t.Fatal("缺少 b.example.com 实例")
+		t.Fatal("缺少 b.example.com 通道")
 	}
-	repo, ok := instance.FindRepo("acme/repo")
+	repo, ok := channel.FindRepo("acme/repo")
 	if !ok {
 		t.Fatal("acme/repo 未登记")
 	}
@@ -142,7 +142,7 @@ func TestReposRemoveAndErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := loaded.Instances[0].FindRepo("acme/repo"); ok {
+	if _, ok := loaded.Channels[0].FindRepo("acme/repo"); ok {
 		t.Fatal("acme/repo 应已移除")
 	}
 

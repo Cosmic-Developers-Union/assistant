@@ -90,8 +90,8 @@ func TestResolveInstanceFileReportsRealProblems(t *testing.T) {
 	if err != nil || file == nil {
 		t.Fatalf("填好的配置应正常加载: err=%v file=%v", err, file)
 	}
-	if path != filled || len(file.Instances) != 1 {
-		t.Errorf("应加载填好的配置: path=%q instances=%d", path, len(file.Instances))
+	if path != filled || len(giteaChannels(file)) != 1 {
+		t.Errorf("应加载填好的配置: path=%q channels=%d", path, len(giteaChannels(file)))
 	}
 
 	if err := os.WriteFile(filled, []byte("{oops"), 0o600); err != nil {

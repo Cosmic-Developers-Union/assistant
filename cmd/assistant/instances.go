@@ -46,7 +46,8 @@ func resolveInstanceFile(options commandOptions) (string, *instances.File, error
 		// 单实例模式——token 走 GITEA_HOST/GITEA_ACCESS_TOKEN 即可跑，填好
 		// instances 后配置文件自然接管。其余错误（语法坏、语义错）照报。
 		if skeleton, parseErr := instances.Parse(path); parseErr == nil &&
-			len(skeleton.Instances) == 0 && skeleton.Weixin == nil {
+			len(skeleton.Instances) == 0 && len(skeleton.Channels) == 0 &&
+			len(skeleton.Runtimes) == 0 && skeleton.Weixin == nil && skeleton.QQ == nil {
 			return "", nil, nil
 		}
 		return "", nil, err
@@ -78,7 +79,7 @@ func instanceManagers(
 ) ([]*status.Manager, error) {
 	var managers []*status.Manager
 	matchedFilter := repoFilter == ""
-	for _, instance := range file.Instances {
+	for _, instance := range giteaViews(file) {
 		logf := func(format string, arguments ...any) {
 			fmt.Fprintf(stderr, "[%s] %s\n", instance.Host, fmt.Sprintf(format, arguments...))
 		}

@@ -240,38 +240,35 @@ func resolveServerTargetWithProbe(
 ) (host, fullName string, fromConfig bool) {
 	remotes := dispatcher.ListRemotes(dir)
 	if file != nil {
+		views := giteaViews(file)
 		if repositoryFlag != "" {
-			for _, instance := range file.Instances {
-				for _, repo := range instance.Repos {
-					if repo.Name == repositoryFlag {
-						return instance.Host, repositoryFlag, true
-					}
+			for _, instance := range views {
+				if _, ok := instance.FindRepo(repositoryFlag); ok {
+					return instance.Host, repositoryFlag, true
 				}
 			}
 		}
-		// remote 与实例 host 匹配：优先仓库也已登记的实例，其次 host 命中即可
+		// remote 与通道 host 匹配：优先仓库也已登记的通道，其次 host 命中即可
 		// （login 只表达作者身份，当前仓库未必在 repos[] 里）
 		for _, remote := range remotes {
-			for _, instance := range file.Instances {
+			for _, instance := range views {
 				if !sameHost(instance.Host, remote.Host) {
 					continue
 				}
-				for _, repo := range instance.Repos {
-					if repo.Name == remote.Repository {
-						return instance.Host, remote.Repository, true
-					}
+				if _, ok := instance.FindRepo(remote.Repository); ok {
+					return instance.Host, remote.Repository, true
 				}
 			}
 		}
 		for _, remote := range remotes {
-			for _, instance := range file.Instances {
+			for _, instance := range views {
 				if sameHost(instance.Host, remote.Host) {
 					return instance.Host, remote.Repository, true
 				}
 			}
 		}
-		if repositoryFlag != "" && len(file.Instances) == 1 {
-			return file.Instances[0].Host, repositoryFlag, true
+		if repositoryFlag != "" && len(views) == 1 {
+			return views[0].Host, repositoryFlag, true
 		}
 	}
 
@@ -290,14 +287,12 @@ func sameHost(a, b string) bool {
 	return strings.EqualFold(strings.TrimRight(a, "/"), strings.TrimRight(b, "/"))
 }
 
-// findInstanceByHost 按站点定位实例配置：当前仓库可以不在 repos[] 中——
-// login/setup 写入的 admin 凭据表达的是平台（作者）身份，doctor 用它检查
-// 当前仓库的服务端配置。
+// findInstanceByHost 按站点定位 gitea 通道（折算成旧 Instance 视图）：当前仓库
+// 可以不在 repos[] 中——login/setup 写入的 admin 凭据表达的是平台（作者）身份，
+// doctor 用它检查当前仓库的服务端配置。
 func findInstanceByHost(file *instances.File, host string) (instances.Instance, bool) {
-	for _, instance := range file.Instances {
-		if sameHost(instance.Host, host) {
-			return instance, true
-		}
+	if channel, ok := findGiteaChannel(file, host); ok {
+		return channelInstance(channel), true
 	}
 	return instances.Instance{}, false
 }

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://gitea.mms.vincentge.top/Ge/assistant/raw/branch/main/schema/config.schema.json",
   "title": "assistant config.json",
-  "description": "assistant 的用户配置：管理哪些 Gitea 平台与仓库、各会话用哪个 AI 供应商、对话服务端的通道（微信/QQ）与命名 agent 池。凭据不在这个文件里——助手派生与机器人令牌由 assistant 管理在 credentials.json。编辑器认得 $schema 键，因此本文件同时是补全与悬停文档的来源；语义校验以 `assistant validate` 为准。",
+  "description": "assistant 的用户配置：三个池（providers/agents/channels，大量配置）加 N 个 runtime（少量运行——每个 runtime 集合一个 main agent、若干 subagents、若干通道与一棵独立运行树）。凭据不在这个文件里——机器人令牌写在各通道字段，助手派生与用途令牌由 assistant 管理在 credentials.json。编辑器认得 $schema 键，因此本文件同时是补全与悬停文档的来源；语义校验以 `assistant validate` 为准。",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -12,7 +12,7 @@
     },
     "instances": {
       "type": "array",
-      "description": "要管理的 Gitea 平台。至少一个平台；只配对话通道（weixin/qq）时可以留空。",
+      "description": "已废弃：载入时自动迁移为 gitea 通道，写回后本节消失。请直接写 channels 里的 {\"type\": \"gitea\"}。",
       "items": { "$ref": "#/$defs/instance" }
     },
     "providers": {
@@ -22,16 +22,16 @@
     },
     "default_provider": {
       "type": "string",
-      "description": "未在 repo/instance/weixin 指定时的兜底供应商名；留空表示内置缺省（Anthropic 官方）。引用了未定义的名字会直接报错。"
+      "description": "未在 agent/runtime/channel/repo 指定时的兜底供应商名；留空表示内置缺省（Anthropic 官方）。引用了未定义的名字会直接报错。"
     },
     "agents": {
       "type": "object",
-      "description": "命名 agent 池（multi-agent）：每个 agent 一份独立的 provider/model/系统提示词/执行参数。对话轮按「会话上 /agent 的选择 > 通道默认 > default_agent」解析；用户在聊天里 /agent <名> 切换并按会话记忆。",
+      "description": "命名 agent 定义池：每个 agent 一份独立的 provider/model/系统提示词/MCP。内置预设（main/ops/coder/writer/review）为基，同名覆盖。runtime 从这里按名选一个 main agent（接待所有对话）与若干 subagents（主模型经 claude 原生 Task 工具委派）。",
       "additionalProperties": { "$ref": "#/$defs/agent" }
     },
     "default_agent": {
       "type": "string",
-      "description": "通道与会话都未指定 agent 时的兜底 agent 名；留空表示内置缺省（weixin 节的对话参数 + default_provider）。引用了未定义的名字会直接报错。"
+      "description": "已废弃：由 runtimes.<名>.main_agent 取代。仍会校验引用存在，但不再参与解析。"
     },
     "optimizations": {
       "$ref": "#/$defs/provider",
@@ -47,8 +47,17 @@
     },
     "channels": {
       "type": "array",
-      "description": "多实例对话通道列表（推荐写法）：type 决定平台（weixin/qq/telegram），name 是可选实例标签——多开同一平台（多个微信号、多个 QQ 机器人、多个 Telegram bot）时用它区分。会话键为 type（未命名，与旧版单实例一致）或 type/name（命名）。列表里有条目即启用。",
+      "description": "通道池：type 决定平台（weixin/qq/telegram/gitea），name 是可选实例标签——多开同一平台时用它区分。会话键为 type（未命名）或 type/name（命名）。runtime 按键引用；enabled=false 可保留定义但停用。",
       "items": { "$ref": "#/$defs/channel" }
+    },
+    "runtimes": {
+      "type": "object",
+      "description": "运行时集合（名字 → 定义）：每个 runtime 集合一个 main agent、若干 subagents、若干通道与一棵独立 $root 运行树。`assistant run --runtime <名>` 按它装配 daemon；只配通道不配 runtime 时自动合成 main。",
+      "additionalProperties": { "$ref": "#/$defs/runtime" }
+    },
+    "default_runtime": {
+      "type": "string",
+      "description": "`assistant run` 未指定 --runtime 时使用的运行时名；只有一个 runtime 时可省。"
     }
   },
   "$defs": {
@@ -173,31 +182,72 @@
     },
     "agent": {
       "type": "object",
-      "description": "命名 agent 池中的一员：provider/model/系统提示词/MCP/执行参数独立。只配 provider/model 即可让不同用户群用不同模型；system_prompt 会整体替换对话会话的基础提示词；mcp 给该 agent 挂专属工具面。同名覆盖内置预设（ops/coder/writer）。",
+      "description": "命名 agent 定义：runtime 选一个作 main agent（接待所有对话），若干作 subagents（注入会话供主模型按 description 委派；review 还被调度引擎独立执行）。同名覆盖内置预设（main/ops/coder/writer/review）。",
       "additionalProperties": false,
       "properties": {
-        "provider": { "type": "string", "description": "该 agent 使用的供应商名（缺省回退 default_provider）。" },
-        "model": { "type": "string", "description": "该 agent 的模型覆盖（claude --model）。" },
-        "system_prompt": { "type": "string", "description": "该 agent 的系统提示词（整体替换基础提示词；留空用内置）。" },
+        "description": { "type": "string", "description": "一句话能力描述：subagent 委派时主模型看它决定何时派给谁。" },
+        "provider": { "type": "string", "description": "该 agent 独立执行时的供应商名（委派执行沿用 main agent 的 provider；缺省回退 runtime.provider 与 default_provider）。" },
+        "model": { "type": "string", "description": "该 agent 的模型覆盖。" },
+        "system_prompt": { "type": "string", "description": "该 agent 的系统提示词（留空用内置预设）。" },
         "mcp": {
           "type": "object",
-          "description": "该 agent 专属的 MCP server 定义（.mcp.json 形态）：合并进会话 MCP 配置，同名 server 覆盖自举（daemon/sessions）与供应商的。"
+          "description": "该 agent 专属的 MCP server 定义（.mcp.json 形态）：子代理的并入所在会话 MCP 配置，同名 server 覆盖自举（daemon/sessions）与供应商的。"
         },
         "claude_bin": { "type": "string", "description": "该 agent 的 claude 可执行文件（缺省 PATH 上的 claude）。" },
-        "session_timeout_ms": { "type": "integer", "minimum": 0, "description": "该 agent 的单轮对话超时（毫秒，缺省 180000）。" }
+        "session_timeout_ms": { "type": "integer", "minimum": 0, "description": "该 agent 独立执行的单轮超时（毫秒，缺省 180000；调度会话超时由 runtime.session_timeout_ms 决定）。" }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "description": "一个可运行单元：main agent + subagents + 通道 + 运行参数。路径字段支持 ${VAR:-default} 环境变量展开与 $root/$state-dir 自引用，相对路径锚定到 config.json 所在目录。",
+      "additionalProperties": false,
+      "properties": {
+        "main_agent": { "type": "string", "description": "主 agent 名（agents 池或内置预设）：本运行时唯一接待所有对话通道的 agent。缺省 main（内置通用主 agent）。" },
+        "subagents": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "子代理名清单：以 claude 自定义 agent 注入会话，主模型经原生 Task 工具按 description 委派。缺省 = 全部内置子代理（ops/coder/writer/review）。"
+        },
+        "channels": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "本运行时启用的通道（键 = type 或 type/name，与 channels 池对应）。gitea 通道由调度引擎接管。"
+        },
+        "provider": { "type": "string", "description": "本运行时的缺省供应商名（agent 未指定 provider 时的回退，优先级高于 default_provider）。" },
+        "root": { "type": "string", "description": "数据根：受管克隆、状态、日志、评审工作区、对话状态都落它下面。缺省平台数据目录下的 Cosmic-Developers-Union/assistant。" },
+        "repos_dir": { "type": "string", "description": "受管克隆根目录；缺省 $root/repos。" },
+        "review_root": { "type": "string", "description": "评审会话工作区根（PR/Issue 的 worktree 建在它下面）；缺省 $root/review。" },
+        "review_name_template": {
+          "type": "string",
+          "description": "评审工作区命名模板，占位符：{instance-name} {username-or-org} {name} {pr|issue} {index}。缺省 \"{instance-name}-{username-or-org}--{name}-{pr|issue}-{index}\"。"
+        },
+        "sessions_dir": { "type": "string", "description": "claude 会话 jsonl 记录的归档根；留空不归档。" },
+        "sessions_name_template": {
+          "type": "string",
+          "description": "会话记录归档命名模板，占位符：{instance-name} {username-or-org} {name} {session-id}。缺省 \"{instance-name}-{username-or-org}--{name}/{session-id}.jsonl\"。"
+        },
+        "state_dir": { "type": "string", "description": "共享状态目录（SQLite WAL：daemon 内省 + 跨进程互斥锁）；缺省 $root/state。" },
+        "state_file": { "type": "string", "description": "SQLite 状态库文件；缺省 $state-dir/state.sqlite3（默认开启）。写 \"off\" 显式关闭。" },
+        "chat_dir": { "type": "string", "description": "对话状态目录（conversations.json、sessions.json）；缺省 $root/chat。" },
+        "claude_dir": { "type": "string", "description": "Claude Code 配置根（会话文本记录与会话状态）；$CLAUDE_CONFIG_DIR 优先，缺省 $root/claude。" },
+        "api_listen": { "type": "string", "description": "状态 API 监听地址（缺省 127.0.0.1:8770）；写 \"off\" 关闭。" },
+        "interval_ms": { "type": "integer", "minimum": 0, "description": "调度引擎的轮询间隔（毫秒；缺省 30000）。" },
+        "session_timeout_ms": { "type": "integer", "minimum": 0, "description": "调度会话（review/triage）的 claude 超时（毫秒；缺省 1800000）。对话会话的超时在各 agent 上单独配。" },
+        "concurrency": { "type": "integer", "minimum": 0, "description": "调度引擎的并发会话数（缺省 8）。" }
       }
     },
     "channel": {
       "type": "object",
-      "description": "对话通道实例：type 决定平台，字段按 type 生效（union 平铺）。weixin 认 base_url/bot_token/login_user_id/ilink_bot_id/bot_agent/channel_version/route_tag；qq 认 app_id/app_secret/sandbox；telegram 认 bot_token/api_base_url；api_base_url 与 admin_users/agent/split_limit 多平台共用。",
+      "description": "通道池里的一条实例：type 决定平台，字段按 type 生效（union 平铺）。weixin 认 base_url/bot_token/login_user_id/ilink_bot_id/bot_agent/channel_version/route_tag；qq 认 app_id/app_secret/sandbox；telegram 认 bot_token/api_base_url；gitea 认 host/token/reviewer/merger/repos；api_base_url 与 admin_users/split_limit 多平台共用。",
       "additionalProperties": false,
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["weixin", "qq", "telegram"],
-          "description": "平台类型：weixin（openclaw ilink）/ qq（开放平台 Bot API v2）/ telegram（Bot API 长轮询）。"
+          "enum": ["weixin", "qq", "telegram", "gitea"],
+          "description": "平台类型：weixin（openclaw ilink）/ qq（开放平台 Bot API v2）/ telegram（Bot API 长轮询）/ gitea（评审调度通道）。"
         },
         "name": { "type": "string", "pattern": "^[^/\\s]+$", "description": "实例标签（多开同平台时区分）。会话键：未命名 = type，命名 = type/name。" },
+        "enabled": { "type": "boolean", "description": "false 时保留定义但不启用（daemon 不启动该通道）；缺省启用。" },
         "base_url": { "type": "string", "description": "（weixin）ilink API 根地址（缺省官方地址）。" },
         "bot_token": { "type": "string", "description": "凭据：（weixin）扫码登录的 Bot token；（telegram）@BotFather 发放的 token。" },
         "login_user_id": { "type": "string", "description": "（weixin）扫码登录的用户 ID（诊断用；空白名单时只允许此人）。" },
@@ -209,12 +259,22 @@
         "app_secret": { "type": "string", "description": "（qq）开放平台机器人的 AppSecret（config.json 为 0600）。" },
         "api_base_url": { "type": "string", "description": "Bot API 根地址：（qq）缺省 https://api.sgroup.qq.com；（telegram）缺省 https://api.telegram.org（被墙环境可换自建反代）。" },
         "sandbox": { "type": "boolean", "description": "沙箱环境标记（当前版本仅用于日志区分）。" },
+        "host": { "type": "string", "pattern": "^https?://", "description": "（gitea）站点根地址（绝对 HTTP(S) URL）。" },
+        "token": { "type": "string", "description": "（gitea）站点访问令牌：调度检测、克隆与会话 MCP 都以它身份运行。支持 ${VAR}/$VAR 环境变量引用（令牌不落配置文件）；缺省回退凭据库 purpose=review 的令牌。" },
+        "reviewer": { "type": "string", "description": "（gitea）内容评审机器人账号名（缺省 ai；令牌在凭据库）。" },
+        "merger": { "type": "string", "description": "（gitea）状态评审/合并机器人账号名（缺省 merge）。" },
+        "provider": { "type": "string", "description": "（gitea）本通道仓库使用的供应商名（仓库自身 provider 优先）。" },
+        "repos": {
+          "type": "array",
+          "description": "（gitea）要监控的仓库清单；缺省用简写 owner/name。",
+          "items": { "$ref": "#/$defs/repo" }
+        },
         "admin_users": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "允许对话的用户白名单（qq/telegram 为 openid/数字 id）；空时 weixin 只允许 LoginUserID、qq/telegram 全拒；含 \"*\" 放开所有人。"
+          "description": "允许对话的用户白名单（qq/telegram 为 openid/数字 id）；空时 weixin 只允许 LoginUserID、qq/telegram 全拒；含 \"*\" 放开所有人。gitea 通道不适用。"
         },
-        "agent": { "type": "string", "description": "该通道实例的默认 agent 名（缺省回退 default_agent；内置 ops/coder/writer 可直接引用）。" },
+        "agent": { "type": "string", "description": "已废弃：由 runtime 的 main agent 统一接待。" },
         "split_limit": { "type": "integer", "minimum": 0, "description": "回复切块的字符上限（缺省按平台：weixin 1800 / qq 1000 / telegram 4000）。" }
       },
       "required": ["type"]

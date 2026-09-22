@@ -157,8 +157,8 @@ func TestLoginRemoveKeepsOtherPlatforms(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(loaded.Instances) != 1 || loaded.Instances[0].Host != "https://b.example.com" {
-		t.Fatalf("剩余平台 = %+v", loaded.Instances)
+	if len(giteaChannels(loaded)) != 1 || giteaChannels(loaded)[0].Host != "https://b.example.com" {
+		t.Fatalf("剩余平台 = %+v", giteaChannels(loaded))
 	}
 	reloaded, err := credentials.Load(filepath.Join(dir, "credentials.json"))
 	if err != nil {

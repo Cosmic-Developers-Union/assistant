@@ -57,6 +57,7 @@ func TestStartDaemonServicesServesAPI(t *testing.T) {
 // startDaemonServices 全部说清。
 func TestStartDaemonServicesStartsChannels(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	file := &instances.File{
 		Agents: map[string]instances.Agent{
@@ -92,7 +93,8 @@ func TestStartDaemonServicesStartsChannels(t *testing.T) {
 
 	logs := output.String()
 	for _, want := range []string{
-		"agent 池 = coder、ops*、writer（默认 ops", // 内置 coder/writer + 用户 ops*
+		"runtime 装配：main agent = main", // 缺省主 agent（用户 agents.ops 覆盖内置同名预设）
+		"子代理     = coder、ops、review、writer",
 		"通道 qq 已启动",
 		"通道 weixin 未启用",
 	} {
@@ -124,6 +126,7 @@ func (b *safeBuffer) String() string {
 // 引用直接生效。端点指向不可达地址，只验证启动面与日志。
 func TestStartDaemonServicesStartsChannelList(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	dead := "http://127.0.0.1:1"
 	file := &instances.File{
@@ -154,7 +157,9 @@ func TestStartDaemonServicesStartsChannelList(t *testing.T) {
 		"通道 weixin/work 已启动",
 		"通道 qq/support 已启动",
 		"通道 telegram 已启动",
-		"agent 池 = coder、ops、writer（默认 内置缺省", // 纯内置：无用户 agent
+		// 无 runtimes 时即时合成 main：全部通道 + 内置 main agent
+		"通道 = weixin/work、qq/support、telegram",
+		"main agent = main（provider 内置缺省",
 	} {
 		if !strings.Contains(logs, want) {
 			t.Errorf("日志缺少 %q：\n%s", want, logs)
