@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -209,10 +210,15 @@ func validateConfigFile(path string, file *instances.File) []validateFinding {
 		}
 	}
 
-	// 微信桥
+	// 微信桥（channels 里已有同平台条目时旧块不再赘述）
+	hasWeixinChannel := slices.ContainsFunc(file.Channels, func(c instances.Channel) bool {
+		return c.Type == instances.ChannelWeixin
+	})
 	if file.Weixin == nil {
-		findings = append(findings, validateFinding{"SKIP", "weixin",
-			"未配置：微信对话桥不会启动（需要时 assistant weixin login）"})
+		if !hasWeixinChannel {
+			findings = append(findings, validateFinding{"SKIP", "weixin",
+				"未配置：微信对话桥不会启动（需要时 assistant weixin login）"})
+		}
 	} else {
 		weixin := file.Weixin
 		detail := "enabled=" + fmt.Sprintf("%t", weixin.Enabled)
@@ -233,10 +239,15 @@ func validateConfigFile(path string, file *instances.File) []validateFinding {
 		}
 	}
 
-	// QQ 通道
+	// QQ 通道（channels 里已有同平台条目时旧块不再赘述）
+	hasQQChannel := slices.ContainsFunc(file.Channels, func(c instances.Channel) bool {
+		return c.Type == instances.ChannelQQ
+	})
 	if file.QQ == nil {
-		findings = append(findings, validateFinding{"SKIP", "qq",
-			"旧版 qq 节未配置（对话通道看 channels 里的 qq 条目；旧块用 q.qq.com 的 app_id/app_secret）"})
+		if !hasQQChannel {
+			findings = append(findings, validateFinding{"SKIP", "qq",
+				"未配置：QQ 对话桥不会启动（在 q.qq.com 开放平台创建机器人后把 app_id/app_secret 写入 qq 节或 channels）"})
+		}
 	} else {
 		qqConfig := file.QQ
 		detail := "enabled=" + fmt.Sprintf("%t", qqConfig.Enabled)

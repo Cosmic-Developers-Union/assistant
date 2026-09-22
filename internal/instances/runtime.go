@@ -497,8 +497,6 @@ func trimNonEmpty(values []string) []string {
 			kept = append(kept, value)
 		}
 	}
-	if len(kept) == 0 {
-		return nil
-	}
+	// 全被过滤也返回非 nil：调用方（Subagents）依赖「显式空数组」语义
 	return kept
 }
