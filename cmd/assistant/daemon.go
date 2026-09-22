@@ -258,11 +258,11 @@ func runWeixinLogin(command *cobra.Command, configPath string, options *weixinLo
 	return nil
 }
 
-// startDaemonServices 启动 daemon 模式的服务面：只读状态 API、runtime 引用的
-// 对话通道（weixin/qq/telegram；gitea 通道由调度引擎接管）与旧版单实例块。
-// API 先就绪——对话会话的 daemon MCP 依赖端点文件自举发现。通道共享一个 Chat
-// 实例：multi-user 由「通道 + 用户 → 会话」映射隔离，对话统一由 runtime 的
-// 主 agent 接待、子代理按需委派。
+// startDaemonServices 启动 daemon 模式的服务面：只读状态 API 与 runtime 引用的
+// 对话通道（weixin/qq/telegram；gitea 通道由调度引擎接管）。API 先就绪——对话
+// 会话的 daemon MCP 依赖端点文件自举发现。通道共享一个 Chat 实例：multi-user
+// 由「通道 + 用户 → 会话」映射隔离，对话统一由 runtime 的主 agent 接待、子代理
+// 按需委派。configPath 是解析后的配置路径：端点文件与会话环境都锚定它。
 func startDaemonServices(
 	command *cobra.Command,
 	configPath string,
@@ -275,7 +275,7 @@ func startDaemonServices(
 			time.Now().UTC().Format("2006-01-02T15:04:05.000Z"), fmt.Sprintf(format, arguments...))
 	}
 
-	_, file, err := resolveInstanceFile(commandOptions{ConfigPath: configPath})
+	resolvedPath, file, err := resolveInstanceFile(commandOptions{ConfigPath: configPath})
 	if err != nil {
 		return err
 	}
@@ -290,10 +290,11 @@ func startDaemonServices(
 	}
 	logRuntimeSummary(logf, file, runtime)
 
-	// 状态 API 监听：旗标 > runtime.api_listen（off/none 关闭）
+	// 状态 API 监听：旗标 > runtime.api_listen（off/none 关闭）；端点文件锚定
+	// 解析后的配置目录（--config 指向哪里，daemon.json 就落哪里）
 	listen := firstNonEmpty(strings.TrimSpace(options.APIListen), runtime.ListenAddr())
 	if listen != "" && !strings.EqualFold(listen, "none") && !strings.EqualFold(listen, "off") {
-		if _, err := daemon.Serve(command.Context(), listen, store, version, logf, stateStore); err != nil {
+		if _, err := daemon.Serve(command.Context(), listen, resolvedPath, store, version, logf, stateStore); err != nil {
 			return err
 		}
 	}
@@ -317,6 +318,8 @@ func startDaemonServices(
 		Debug:      options.Debug,
 		Remote:     remote,
 		Log:        logf,
+		// 会话内 assistant mcp daemon/sessions 靠它定位同一份配置与端点文件
+		AssistantConfig: resolvedPath,
 	})
 	if err != nil {
 		return err

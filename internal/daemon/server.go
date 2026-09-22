@@ -30,9 +30,11 @@ type Endpoint struct {
 }
 
 // Serve 在 listen 上提供只读状态 API（Bearer token 鉴权），返回端点并落盘
-// daemon.json（0600）。ctx 取消时关闭服务并删除端点文件。listen 支持 ":0"
-// （随机端口，实际地址以返回值/端点文件为准）。
-func Serve(ctx context.Context, listen string, store *Store, version string, logf func(string, ...any), state ...*statestore.Store) (*Endpoint, error) {
+// daemon.json（0600，落 configPath 同目录；ctx 取消时关闭服务并删除端点文件，
+// 进程崩溃会残留——下次启动覆盖同路径）。listen 支持 ":0"（随机端口，实际地址
+// 以返回值/端点文件为准）。configPath 是解析后的 config.json 路径，决定端点
+// 文件落点；空串回落 ASSISTANT_CONFIG/平台配置目录。
+func Serve(ctx context.Context, listen, configPath string, store *Store, version string, logf func(string, ...any), state ...*statestore.Store) (*Endpoint, error) {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
@@ -53,7 +55,7 @@ func Serve(ctx context.Context, listen string, store *Store, version string, log
 		StartedAt: time.Now(),
 	}
 
-	path, err := instances.DaemonEndpointPath()
+	path, err := instances.DaemonEndpointPathFor(configPath)
 	if err != nil {
 		_ = listener.Close()
 		return nil, err

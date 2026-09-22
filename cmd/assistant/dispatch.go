@@ -1077,9 +1077,11 @@ func runDispatchLoop(command *cobra.Command, repoFlag, configPath string, option
 	if err != nil {
 		return err
 	}
-	// runtime 选定运行树：状态库/状态 API/对话落点都按它
+	// runtime 选定运行树：状态库/状态 API/对话落点都按它；resolvedPath 是解析
+	// 后的配置路径（daemon.json 端点与会话环境锚定它）
 	var runtime *instances.Runtime
-	if _, configFile, fileErr := resolveInstanceFile(commandOptions{ConfigPath: configPath}); fileErr != nil {
+	resolvedPath, configFile, fileErr := resolveInstanceFile(commandOptions{ConfigPath: configPath})
+	if fileErr != nil {
 		return fileErr
 	} else if configFile != nil {
 		resolved, rtErr := configFile.ResolveRuntime(options.Runtime)
@@ -1161,7 +1163,7 @@ func runDispatchLoop(command *cobra.Command, repoFlag, configPath string, option
 		}
 	}
 	if !options.DryRun {
-		if err := startDaemonServices(command, configPath, options, store, stateStore); err != nil {
+		if err := startDaemonServices(command, resolvedPath, options, store, stateStore); err != nil {
 			return err
 		}
 	}

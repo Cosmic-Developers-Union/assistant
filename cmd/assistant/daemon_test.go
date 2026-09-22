@@ -19,6 +19,9 @@ import (
 func TestStartDaemonServicesServesAPI(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	configPath := filepath.Join(t.TempDir(), "config.json")
+	// Discover 靠 ASSISTANT_CONFIG 定位端点文件：端点落 config 同目录（回归
+	// 探针——此前端点文件跟 cwd，测试靠 cwd 巧合通过）
+	t.Setenv("ASSISTANT_CONFIG", configPath)
 	savePlatform(t, configPath, instances.Instance{
 		Host:     "https://gitea.example.com",
 		Reviewer: instances.Account{Name: "ai"},
@@ -47,6 +50,14 @@ func TestStartDaemonServicesServesAPI(t *testing.T) {
 	}
 	if status.Version != "test-version" || len(status.Targets) != 1 {
 		t.Errorf("status = %+v", status)
+	}
+	// 端点文件必须落配置同目录（不跟 cwd）
+	endpointPath, err := instances.DaemonEndpointPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if endpointPath != filepath.Join(filepath.Dir(configPath), "daemon.json") {
+		t.Errorf("daemon.json 落点应跟随 --config：%q", endpointPath)
 	}
 	if output := command.OutOrStdout().(*bytes.Buffer).String(); !strings.Contains(output, "状态 API 监听") {
 		t.Errorf("日志缺少 API 监听提示：%s", output)

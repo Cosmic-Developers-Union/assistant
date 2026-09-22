@@ -52,7 +52,7 @@ func TestServeAndClientRoundTrip(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	endpoint, err := Serve(ctx, "127.0.0.1:0", store, "v-round", nil)
+	endpoint, err := Serve(ctx, "127.0.0.1:0", "", store, "v-round", nil)
 	if err != nil {
 		t.Fatalf("Serve: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestMCPTools(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if _, err := Serve(ctx, "127.0.0.1:0", store, "v-mcp", nil); err != nil {
+	if _, err := Serve(ctx, "127.0.0.1:0", "", store, "v-mcp", nil); err != nil {
 		t.Fatalf("Serve: %v", err)
 	}
 

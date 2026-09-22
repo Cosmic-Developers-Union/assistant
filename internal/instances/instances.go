@@ -1376,7 +1376,7 @@ func ClaudeDir() (string, error) {
 // DaemonEndpointPath 返回 daemon 端点文件的落点：
 // <配置文件所在目录>/daemon.json（含 API 地址/令牌/PID，0600；assistant mcp
 // daemon 靠它自举发现运行中的 daemon）。ASSISTANT_CONFIG 指向别处时端点文件
-// 跟着配置走。
+// 跟着配置走；都没有时用平台标准配置目录。
 func DaemonEndpointPath() (string, error) {
 	if value := strings.TrimSpace(os.Getenv("ASSISTANT_CONFIG")); value != "" {
 		return filepath.Join(filepath.Dir(value), "daemon.json"), nil
@@ -1386,6 +1386,16 @@ func DaemonEndpointPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(directory, "daemon.json"), nil
+}
+
+// DaemonEndpointPathFor 返回随 --config 解析出的配置文件落盘的端点文件路径：
+// configPath 非空 → 同目录 daemon.json（--config /tmp/x/config.json 时端点也落
+// /tmp/x/，不跟 cwd）；空串回落 DaemonEndpointPath（env 模式与外部调用方）。
+func DaemonEndpointPathFor(configPath string) (string, error) {
+	if path := strings.TrimSpace(configPath); path != "" {
+		return filepath.Join(filepath.Dir(path), "daemon.json"), nil
+	}
+	return DaemonEndpointPath()
 }
 
 // HostSlug 把站点地址折成目录/路径名：去 scheme，保留 host[:port]，其余字符
