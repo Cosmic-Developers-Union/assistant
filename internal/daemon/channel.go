@@ -4,6 +4,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -100,8 +101,10 @@ func RunChannel(ctx context.Context, channel Channel, config ChannelConfig) erro
 				break
 			}
 			// 凭据/配置类致命错误（如 QQ 凭据被平台拒绝）重试无意义：停掉本
-			// 通道并报给操作者，其余通道与 daemon 不受影响。
-			if fatal, ok := err.(interface{ Fatal() bool }); ok && fatal.Fatal() {
+			// 通道并报给操作者，其余通道与 daemon 不受影响。错误可能被下层
+			// 包装过，用 errors.As 穿透取 Fatal 标记。
+			var fatal interface{ Fatal() bool }
+			if errors.As(err, &fatal) && fatal.Fatal() {
 				config.Log("通道 %s 已停止（配置错误不重试，其余通道不受影响）：%v", channel.Name(), err)
 				return err
 			}
