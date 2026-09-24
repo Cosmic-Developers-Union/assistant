@@ -41,8 +41,9 @@ func newLoginCommand(configFlag *string) *cobra.Command {
 			"  2. 派生 purpose=mcp 的长期令牌（仓库/Issue 读写），供编辑器/CLI 的 MCP 使用；\n" +
 			"  3. 账号是实例管理员时再派生 purpose=admin 的长期令牌，供\n" +
 			"     setup/init/actions 等管理操作使用。\n\n" +
-			"令牌写在 config.json 同目录的 credentials.json（0600），按 (host, user, purpose)\n" +
-			"唯一；重复登录时仍然有效的令牌原样复用，不重复创建。\n\n" +
+			"令牌写在平台标准配置目录的 credentials.json（Linux: ~/.config/Cosmic-Developers-Union/assistant/；\n" +
+			"0600），按 (host, user, purpose) 唯一；重复登录时仍然有效的令牌原样复用，不重复创建\n" +
+			"（ASSISTANT_CREDENTIALS 可显式指定凭据库位置）。\n\n" +
 			"  assistant login list            列出平台、身份与该站点的各用途令牌\n" +
 			"  assistant login remove <host>   移除平台条目与该站点的本地凭据",
 		Args: cobra.MaximumNArgs(1),
@@ -193,7 +194,7 @@ func newLoginListCommand(configFlag *string) *cobra.Command {
 
 // loadCredentialStore 读取凭据库；缺失/损坏时返回空库并告警（list 只做展示）。
 func loadCredentialStore(command *cobra.Command, configPath string) (*credentials.File, string) {
-	path, err := credentials.PathFor(configPath)
+	path, err := credentials.Path()
 	if err != nil {
 		return &credentials.File{}, ""
 	}
@@ -278,7 +279,7 @@ func newLoginRemoveCommand(configFlag *string) *cobra.Command {
 				file.Channels = kept
 			}
 
-			credentialPath, err := credentials.PathFor(path)
+			credentialPath, err := credentials.Path()
 			if err != nil {
 				return err
 			}

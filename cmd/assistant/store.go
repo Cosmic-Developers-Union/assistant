@@ -11,7 +11,7 @@ import (
 
 // credentialFor 解析 (host, purpose) 的令牌；该用途没有登录过时 ok=false。
 func credentialFor(configPath, host, purpose string) (credentials.Credential, bool, error) {
-	path, err := credentials.PathFor(configPath)
+	path, err := credentials.Path()
 	if err != nil {
 		return credentials.Credential{}, false, err
 	}

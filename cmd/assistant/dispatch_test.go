@@ -39,7 +39,7 @@ func TestResolveDispatchTargetsFromGiteaChannel(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	withReviewCredentialFor(t, configPath, "https://gitea.example.com")
+	withReviewCredential(t, "https://gitea.example.com")
 
 	stderr := &bytes.Buffer{}
 	command := &cobra.Command{}
@@ -122,7 +122,7 @@ func TestResolveDispatchTargetsSkipsChannelsWithoutRepos(t *testing.T) {
 		t.Fatalf("save config: %v", err)
 	}
 
-	withReviewCredentialFor(t, path, "https://gitea.mms.vincentge.top")
+	withReviewCredential(t, "https://gitea.mms.vincentge.top")
 
 	stderr := &bytes.Buffer{}
 	command := &cobra.Command{}

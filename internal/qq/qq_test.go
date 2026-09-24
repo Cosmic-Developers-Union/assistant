@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	jsonv2 "encoding/json/v2"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -34,7 +35,15 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 	fake := &fakeAPI{t: t}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /token", func(writer http.ResponseWriter, request *http.Request) {
-		if err := request.ParseForm(); err != nil || request.Form.Get("appId") != "app-1" || request.Form.Get("clientSecret") != "sec-1" {
+		// 官方端点只接受 JSON body（appId/clientSecret）；表单会被解析成空
+		// appId，平台报 100007 invalid appid——即使凭据正确。
+		var payload struct {
+			AppID        string `json:"appId"`
+			ClientSecret string `json:"clientSecret"`
+		}
+		body, _ := io.ReadAll(request.Body)
+		_ = json.Unmarshal(body, &payload)
+		if request.Header.Get("Content-Type") != "application/json" || payload.AppID != "app-1" || payload.ClientSecret != "sec-1" {
 			http.Error(writer, "bad credentials", http.StatusBadRequest)
 			return
 		}
@@ -71,7 +80,8 @@ func (f *fakeAPI) handleSend(writer http.ResponseWriter, request *http.Request) 
 	f.mu.Lock()
 	f.sent = append(f.sent, payload)
 	f.mu.Unlock()
-	if strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ") == "" {
+	// REST 鉴权头是 "QQBot <token>"（不是 Bearer）
+	if !strings.HasPrefix(request.Header.Get("Authorization"), "QQBot ") {
 		http.Error(writer, "missing token", http.StatusUnauthorized)
 		return
 	}
@@ -133,7 +143,7 @@ func readFrameTimeout(t *testing.T, conn *websocket.Conn, timeout time.Duration)
 	return f, true
 }
 
-// 发消息：带 Bearer token、msg_type/msg_id/msg_seq 正确；token 被缓存复用。
+// 发消息：带 QQBot 方案 token、msg_type/msg_id/msg_seq 正确；token 被缓存复用。
 func TestClientSendC2CCachesToken(t *testing.T) {
 	fake := newFakeAPI(t)
 	client := newTestClient(fake)
@@ -429,5 +439,151 @@ func TestGatewayResumeAfterDrop(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("Run 未退出")
+	}
+}
+
+// token 请求回归测试：必须以 JSON body（{"appId","clientSecret"}）POST，并带
+// User-Agent。发成表单会被平台解析成空 appId，返回 100007 invalid appid——
+// 即使凭据正确（线上真实故障）。
+func TestTokenRequestIsJSON(t *testing.T) {
+	var gotContentType, gotUserAgent, gotBody string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		gotContentType = request.Header.Get("Content-Type")
+		gotUserAgent = request.Header.Get("User-Agent")
+		body, _ := io.ReadAll(request.Body)
+		gotBody = string(body)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"access_token":"tok-ok","expires_in":"7200"}`))
+	}))
+	t.Cleanup(server.Close)
+	client := NewClient(Config{
+		AppID:      "  app-1  ", // 平台侧容忍首尾空白（SDK 同样 trim）
+		AppSecret:  "sec-1",
+		APIBaseURL: server.URL,
+		TokenURL:   server.URL + "/app/getAppAccessToken",
+		HTTPClient: server.Client(),
+	})
+	if err := client.VerifyCredential(t.Context()); err != nil {
+		t.Fatalf("VerifyCredential: %v", err)
+	}
+	if gotContentType != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", gotContentType)
+	}
+	if gotUserAgent == "" {
+		t.Error("缺少 User-Agent")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(gotBody), &payload); err != nil {
+		t.Fatalf("body 不是 JSON：%q（%v）", gotBody, err)
+	}
+	if payload["appId"] != "app-1" || payload["clientSecret"] != "sec-1" {
+		t.Errorf("body = %s（appId 应去空白）", gotBody)
+	}
+}
+
+// op 9 d=false（会话彻底作废）：丢弃会话、强制刷新 token，重连后走全新
+// Identify（token 是重新获取的 tok-2）而不是 Resume。
+func TestGatewayReidentifyAfterInvalidSession(t *testing.T) {
+	fake := newFakeAPI(t)
+	reidentified := make(chan identifyPayload, 1)
+	var connections int32
+	var mu sync.Mutex
+	fake.wsHandler = func(t *testing.T, conn *websocket.Conn) {
+		mu.Lock()
+		connections++
+		which := connections
+		mu.Unlock()
+		writeFrameMarshalled(t, conn, frame{Op: opHello, D: json.RawMessage(`{"heartbeat_interval":30000}`)})
+		first, ok := readFrameTimeout(t, conn, 2*time.Second)
+		if !ok {
+			return
+		}
+		var payload identifyPayload
+		_ = jsonv2.Unmarshal(first.D, &payload)
+		switch which {
+		case 1:
+			if first.Op != opIdentify {
+				t.Errorf("第一条连接应 Identify，got op=%d", first.Op)
+				return
+			}
+			writeFrameMarshalled(t, conn, frame{Op: opDispatch, S: 1, T: EventReady,
+				D: json.RawMessage(`{"session_id":"sess-dead0001","user":{"id":"bot"}}`)})
+			// 会话彻底作废（d=false），随后断开
+			writeFrameMarshalled(t, conn, frame{Op: opInvalidSession, D: json.RawMessage(`false`)})
+			time.Sleep(100 * time.Millisecond)
+			conn.Close(websocket.StatusNormalClosure, "")
+		case 2:
+			if first.Op != opIdentify {
+				t.Errorf("op 9 d=false 后应重新 Identify，got op=%d", first.Op)
+				return
+			}
+			select {
+			case reidentified <- payload:
+			default:
+			}
+			// 保持连接到测试结束
+			for {
+				if _, ok := readFrameTimeout(t, conn, 500*time.Millisecond); !ok {
+					return
+				}
+			}
+		}
+	}
+	client := newTestClient(fake)
+	gateway := NewGateway(client, IntentGroupAndC2CEvent)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- gateway.Run(ctx, func(string, json.RawMessage) {})
+	}()
+	select {
+	case payload := <-reidentified:
+		if payload.Token != "QQBot tok-2" {
+			t.Errorf("重连应强制刷新 token，got %q", payload.Token)
+		}
+		if gateway.sessionID == "sess-dead0001" {
+			t.Error("作废的会话应被丢弃")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("未观察到重新 Identify")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run 未退出")
+	}
+}
+
+// identifyPayload 是 Identify/Resume 帧的 d 载荷（测试断言用）。
+type identifyPayload struct {
+	Token     string `json:"token"`
+	Intents   int    `json:"intents"`
+	Shard     []int  `json:"shard"`
+	SessionID string `json:"session_id"`
+	Seq       int    `json:"seq"`
+}
+
+// 网关 close 4004（token 无效/权限不足）是致命错误：Run 立即透传，不退避重连。
+func TestGatewayStopsOnClose4004(t *testing.T) {
+	fake := newFakeAPI(t)
+	fake.wsHandler = func(t *testing.T, conn *websocket.Conn) {
+		writeFrameMarshalled(t, conn, frame{Op: opHello, D: json.RawMessage(`{"heartbeat_interval":30000}`)})
+		readFrameTimeout(t, conn, 2*time.Second) // Identify
+		conn.Close(gatewayCloseAuthFailed, "invalid token")
+	}
+	client := newTestClient(fake)
+	gateway := NewGateway(client, IntentGroupAndC2CEvent)
+	done := make(chan error, 1)
+	go func() {
+		done <- gateway.Run(context.Background(), func(string, json.RawMessage) {})
+	}()
+	select {
+	case err := <-done:
+		if _, fatal := errors.AsType[*FatalError](err); !fatal {
+			t.Errorf("close 4004 应按致命错误返回，got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run 未停止（close 4004 不应退避重试）")
 	}
 }

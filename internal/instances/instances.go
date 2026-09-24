@@ -859,9 +859,9 @@ func (f *File) Validate() error {
 	return nil
 }
 
-// validateSecretRefs 校验全部密钥字段的 $VAR/${VAR} 引用：语法合法且变量
-// 已定义（fail fast——密钥以字面量或空串发出去都难以排查）。要表达「可为
-// 空」用显式空缺省 ${VAR:-}。File 始终保留原始引用，展开在消费点。
+// validateSecretRefs 校验密钥字段与 QQ AppID 的 $VAR/${VAR} 引用：语法合法
+// 且变量已定义（fail fast——凭据以字面量或空串发出去都难以排查）。要表达
+// 「可为空」用显式空缺省 ${VAR:-}。File 始终保留原始引用，展开在消费点。
 func (f *File) validateSecretRefs() error {
 	for _, name := range slices.Sorted(maps.Keys(f.Providers)) {
 		if err := validateProviderSecretRefs(fmt.Sprintf("providers[%s]", name), f.Providers[name]); err != nil {
@@ -873,6 +873,13 @@ func (f *File) validateSecretRefs() error {
 	}
 	for index := range f.Channels {
 		channel := f.Channels[index]
+		if channel.Type == ChannelQQ {
+			if err := envref.Validate(channel.AppID, envref.Options{
+				Field: fmt.Sprintf("channels[%s].app_id", channel.Key()),
+			}); err != nil {
+				return err
+			}
+		}
 		field, value := channel.SecretField()
 		if field == "" {
 			continue
@@ -1241,7 +1248,6 @@ func (f *File) GiteaProviderName(runtime Runtime, channel *Channel, repo *Repo) 
 	}
 	return f.DefaultProvider
 }
-
 
 // AgentProviderName 返回命名 agent 生效的 provider 名：agents[name].provider >
 // 全局默认；名字不存在时回退全局默认（Validate 已保证引用存在）。

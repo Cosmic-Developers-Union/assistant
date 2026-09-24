@@ -241,7 +241,7 @@ func loadOptionalConfig(path string) (*instances.File, error) {
 // prefillInstances 用 credentials.json 里已登录的平台补 instances：登录过就该出现在
 // 配置里（reviewer/merger 是约定值 ai/merge）；已登记的平台不动。
 func prefillInstances(configPath string, file *instances.File) ([]string, error) {
-	storePath, err := credentials.PathFor(configPath)
+	storePath, err := credentials.Path()
 	if err != nil {
 		return nil, err
 	}

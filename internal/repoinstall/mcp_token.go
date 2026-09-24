@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"assistant/internal/credentials"
-	"assistant/internal/instances"
 )
 
 // resolveMCPToken 选择与目标站点绑定的 MCP 令牌，按优先级：
@@ -17,7 +16,7 @@ import (
 // 环境变量优先是为了让评审会话的显式注入（dispatcher 以 reviewer 身份启动会话）
 // 能覆盖本地登录；其余情况一律以凭据库为准。显式覆盖出错时不降级，避免配置错误
 // 意外切换调用身份。
-func resolveMCPToken(host, configPath string, getenv func(string) string) (string, string, error) {
+func resolveMCPToken(host string, getenv func(string) string) (string, string, error) {
 	if token := strings.TrimSpace(getenv("GITEA_ACCESS_TOKEN")); token != "" {
 		return token, "GITEA_ACCESS_TOKEN", nil
 	}
@@ -32,7 +31,7 @@ func resolveMCPToken(host, configPath string, getenv func(string) string) (strin
 		}
 		return token, path, nil
 	}
-	credentialPath, err := mcpCredentialPath(configPath, getenv)
+	credentialPath, err := credentials.Path()
 	if err != nil {
 		return "", "", err
 	}
@@ -50,22 +49,3 @@ func resolveMCPToken(host, configPath string, getenv func(string) string) (strin
 	return credential.Token, "assistant login (" + credentialPath + "，@" + credential.User + ")", nil
 }
 
-// mcpCredentialPath 决定凭据库位置：ASSISTANT_CREDENTIALS > 与 config.json 同目录
-// > 标准配置目录。
-func mcpCredentialPath(configPath string, getenv func(string) string) (string, error) {
-	if override := strings.TrimSpace(getenv("ASSISTANT_CREDENTIALS")); override != "" {
-		return override, nil
-	}
-	effective := strings.TrimSpace(configPath)
-	if effective == "" {
-		effective = strings.TrimSpace(getenv("ASSISTANT_CONFIG"))
-	}
-	if effective == "" {
-		path, err := instances.DefaultConfigPath()
-		if err != nil {
-			return "", err
-		}
-		effective = path
-	}
-	return credentials.PathFor(effective)
-}

@@ -18,7 +18,7 @@ func TestLoginCredentialIsolation(t *testing.T) {
 	state, server := newLoginServer(t, "developer", false)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	t.Setenv("ASSISTANT_CREDENTIALS", "")
+	t.Setenv("ASSISTANT_CREDENTIALS", filepath.Join(dir, "credentials.json"))
 	savePlatform(t, path, instances.Instance{
 		Host:     server.URL,
 		Reviewer: instances.Account{Name: "ai"},
@@ -61,7 +61,7 @@ func TestLoginCredentialIsolation(t *testing.T) {
 		t.Fatal("登录输出泄露令牌")
 	}
 	spec, err := repoinstall.ResolveMCP(command.Context(), repoinstall.MCPOptions{
-		Host: server.URL, ConfigPath: path, Getenv: func(string) string { return "" },
+		Host: server.URL, Getenv: func(string) string { return "" },
 	})
 	if err != nil || spec.Token != credential.Token {
 		t.Fatalf("MCP 未使用登录写入的令牌：%v", err)
@@ -78,7 +78,7 @@ func savePlatform(t *testing.T, path string, instance instances.Instance) {
 func TestLoginListAndRemove(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	t.Setenv("ASSISTANT_CREDENTIALS", "")
+	t.Setenv("ASSISTANT_CREDENTIALS", filepath.Join(dir, "credentials.json"))
 	savePlatform(t, path, instances.Instance{
 		Host:     "https://gitea.example.com",
 		Reviewer: instances.Account{Name: "ai"},
@@ -131,7 +131,7 @@ func TestLoginListAndRemove(t *testing.T) {
 func TestLoginRemoveKeepsOtherPlatforms(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	t.Setenv("ASSISTANT_CREDENTIALS", "")
+	t.Setenv("ASSISTANT_CREDENTIALS", filepath.Join(dir, "credentials.json"))
 	file := &instances.File{Instances: []instances.Instance{
 		{Host: "https://a.example.com", Reviewer: instances.Account{Name: "ai"}, Merger: instances.Account{Name: "merge"}},
 		{Host: "https://b.example.com", Reviewer: instances.Account{Name: "ai"}, Merger: instances.Account{Name: "merge"}},

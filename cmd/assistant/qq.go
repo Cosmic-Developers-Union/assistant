@@ -87,6 +87,10 @@ func qqChannelViews(file *instances.File) []qqChannelView {
 		if channel.Type != instances.ChannelQQ {
 			continue
 		}
+		appID := channel.AppID
+		if expanded, err := expandQQAppID(channel); err == nil {
+			appID = expanded
+		}
 		secret := channel.AppSecret
 		if field, value := channel.SecretField(); field == "app_secret" {
 			if expanded, err := envref.Expand(value, envref.Options{
@@ -100,13 +104,19 @@ func qqChannelViews(file *instances.File) []qqChannelView {
 			Key:        channel.Key(),
 			Enabled:    channel.IsEnabled(),
 			APIBaseURL: channel.APIBaseURL,
-			AppID:      channel.AppID,
+			AppID:      appID,
 			AppSecret:  secret,
 			AdminUsers: channel.AdminUsers,
 			SplitLimit: channel.SplitLimit,
 		})
 	}
 	return views
+}
+
+func expandQQAppID(channel instances.Channel) (string, error) {
+	return envref.Expand(channel.AppID, envref.Options{
+		Field: fmt.Sprintf("channels[%s].app_id", channel.Key()),
+	})
 }
 
 // verifyQQ 实测单个 QQ 通道的凭据（AppSecret 已展开）。

@@ -15,6 +15,7 @@ func validateFixture(t *testing.T, config map[string]any, purposes []string) str
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
 	dir := t.TempDir()
+	t.Setenv("ASSISTANT_CREDENTIALS", filepath.Join(dir, "credentials.json"))
 	path := filepath.Join(dir, "config.json")
 	document, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {

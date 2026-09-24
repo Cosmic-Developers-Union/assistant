@@ -387,18 +387,12 @@ func TestWaitForReportStopsWhenCheckIsCancelled(t *testing.T) {
 	}
 }
 
-// withReviewCredential 在默认凭据库写入 (host, ai, review) 令牌：dispatcher 的令牌
-// 全部来自凭据库，测试用目标解析前需要先有它。
+// withReviewCredential 在凭据库（平台标准配置目录，测试经 TestMain 隔离）写入
+// (host, ai, review) 令牌：dispatcher 的令牌全部来自凭据库，测试用目标解析前
+// 需要先有它。
 func withReviewCredential(t *testing.T, host string) {
 	t.Helper()
-	withReviewCredentialFor(t, "", host)
-}
-
-// withReviewCredentialFor 在指定 config.json 同目录的凭据库写入 review 令牌
-// （configPath 为空表示默认凭据库）。
-func withReviewCredentialFor(t *testing.T, configPath, host string) {
-	t.Helper()
-	path, err := credentials.PathFor(configPath)
+	path, err := credentials.Path()
 	if err != nil {
 		t.Fatal(err)
 	}

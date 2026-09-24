@@ -109,7 +109,7 @@ func TestLoginDerivesMCPAndAdminTokens(t *testing.T) {
 	state, server := newLoginServer(t, "developer", true)
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
-	t.Setenv("ASSISTANT_CREDENTIALS", "")
+	t.Setenv("ASSISTANT_CREDENTIALS", filepath.Join(dir, "credentials.json"))
 
 	var out bytes.Buffer
 	command := newLoginCommand(&configPath)
@@ -199,7 +199,7 @@ func TestLoginNonAdminOnlyDerivesMCP(t *testing.T) {
 	state, server := newLoginServer(t, "developer", false)
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
-	t.Setenv("ASSISTANT_CREDENTIALS", "")
+	t.Setenv("ASSISTANT_CREDENTIALS", filepath.Join(dir, "credentials.json"))
 
 	var out bytes.Buffer
 	command := newLoginCommand(&configPath)
@@ -230,7 +230,7 @@ func TestLoginReusesValidTokenWithoutPassword(t *testing.T) {
 	state, server := newLoginServer(t, "developer", true)
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
-	t.Setenv("ASSISTANT_CREDENTIALS", "")
+	t.Setenv("ASSISTANT_CREDENTIALS", filepath.Join(dir, "credentials.json"))
 	store := &credentials.File{}
 	store.SetIdentity(credentials.Identity{Host: server.URL, User: "developer", IsAdmin: true})
 	for purpose, token := range map[string]string{
@@ -271,7 +271,7 @@ func TestLoginRotateReplacesTokens(t *testing.T) {
 	state, server := newLoginServer(t, "developer", false)
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
-	t.Setenv("ASSISTANT_CREDENTIALS", "")
+	t.Setenv("ASSISTANT_CREDENTIALS", filepath.Join(dir, "credentials.json"))
 	derived, err := credentials.TokenName(server.URL, "developer", credentials.PurposeMCP)
 	if err != nil {
 		t.Fatal(err)
@@ -308,7 +308,7 @@ func TestLoginInteractivePrompts(t *testing.T) {
 	state, server := newLoginServer(t, "developer", false)
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
-	t.Setenv("ASSISTANT_CREDENTIALS", "")
+	t.Setenv("ASSISTANT_CREDENTIALS", filepath.Join(dir, "credentials.json"))
 	t.Chdir(t.TempDir()) // 无 remote、无配置：host 必须靠询问
 
 	var out bytes.Buffer
@@ -342,7 +342,7 @@ func TestLoginBadPasswordKeepsStoreEmpty(t *testing.T) {
 	_, server := newLoginServer(t, "developer", false)
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
-	t.Setenv("ASSISTANT_CREDENTIALS", "")
+	t.Setenv("ASSISTANT_CREDENTIALS", filepath.Join(dir, "credentials.json"))
 	var out bytes.Buffer
 	command := newLoginCommand(&configPath)
 	command.SetOut(&out)

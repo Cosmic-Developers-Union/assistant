@@ -109,12 +109,12 @@ func newMCPCommand(configFlag *string) *cobra.Command {
 			"  host：--host > GITEA_HOST > origin remote 推导；\n" +
 			"  token：--token > GITEA_ACCESS_TOKEN > GITEA_ACCESS_TOKEN_FILE >\n" +
 			"         assistant login <host> --user <账号> 的上站点凭据（凭据库）。\n" +
-			"使用 --config / ASSISTANT_CONFIG 选择登录配置；不自动读取历史全局 token 文件。",
+			"凭据库在平台标准配置目录（ASSISTANT_CREDENTIALS 可显式指定位置），与当前\n" +
+			"目录无关——从任何项目启动都解析同一份登录状态。",
 		Args: cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			return repoinstall.RunMCPGitea(command.Context(), repoinstall.MCPOptions{
 				Dir:        giteaOptions.Dir,
-				ConfigPath: *configFlag,
 				Host:       giteaOptions.Host,
 				Token:      giteaOptions.Token,
 				Log: func(format string, arguments ...any) {

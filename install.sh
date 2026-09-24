@@ -215,8 +215,9 @@ install_linux() {
 
   local service_group=$SERVICE_USER
   [ -n "$SERVICE_HOME" ] || SERVICE_HOME=/var/lib/$SERVICE_USER
-  # 显式模式：工作目录即配置目录（config.json/credentials.json/daemon.json/data
-  # 全在这里），systemd 单元以它为 WorkingDirectory
+  # 显式模式：工作目录即配置目录（config.json/daemon.json/data 全在这里），
+  # systemd 单元以它为 WorkingDirectory；credentials.json 走平台标准配置目录
+  # （服务用户的 ~/.config/Cosmic-Developers-Union/assistant/）
   local work_dir=$SERVICE_HOME/work
 
   # ---------- 独立系统服务用户（nologin、无密码，无需登陆） ----------

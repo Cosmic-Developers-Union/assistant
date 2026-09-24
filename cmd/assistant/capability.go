@@ -17,7 +17,7 @@ import (
 //
 // 记录在案的身份只是加速失败的缓存；真正的授权事实永远来自服务端。
 func requireAdminIdentity(configPath, host string) error {
-	path, err := credentials.PathFor(configPath)
+	path, err := credentials.Path()
 	if err != nil {
 		return nil
 	}

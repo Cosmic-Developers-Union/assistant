@@ -14,7 +14,7 @@ import (
 func TestRequireAdminIdentity(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
-	t.Setenv("ASSISTANT_CREDENTIALS", "")
+	t.Setenv("ASSISTANT_CREDENTIALS", filepath.Join(dir, "credentials.json"))
 
 	if err := requireAdminIdentity(configPath, "https://a.example.com"); err != nil {
 		t.Fatalf("没有身份记录时不应拦截：%v", err)
@@ -44,7 +44,7 @@ func TestRequireAdminIdentity(t *testing.T) {
 func TestSetupRefusesRecordedNonAdmin(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
-	t.Setenv("ASSISTANT_CREDENTIALS", "")
+	t.Setenv("ASSISTANT_CREDENTIALS", filepath.Join(dir, "credentials.json"))
 	if err := instances.Save(configPath, &instances.File{Instances: []instances.Instance{
 		{Host: "https://a.example.com"},
 	}}); err != nil {

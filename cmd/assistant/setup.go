@@ -113,7 +113,7 @@ func runSetup(command *cobra.Command, configPath string, options *setupOptions) 
 	if err != nil {
 		return err
 	}
-	credentialPath, err := credentials.PathFor(writePath)
+	credentialPath, err := credentials.Path()
 	if err != nil {
 		return err
 	}

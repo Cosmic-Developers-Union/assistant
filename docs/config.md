@@ -53,19 +53,23 @@ credentials.json（0600）。
 ## 落点（显式模式）
 
 assistant 是工具不是常驻应用：配置按 `--config` → `ASSISTANT_CONFIG` →
-**当前目录的 `./config.json`** 定位，不读也不写用户的平台配置目录（XDG
-config home / Known Folders / Library）。所有产物都收在配置旁边：
+**当前目录的 `./config.json`** 定位，运行产物收在配置旁边。**凭据是例外**：
+`credentials.json` 是用户级状态（这台机器上的当前用户是谁），不是项目级——
+按 XDG Base Directory / Windows Known Folders / macOS Library 规范落在平台
+标准配置目录，从任何目录启动的 MCP/CLI 都解析同一份登录态，绝不锚定 cwd
+（`ASSISTANT_CREDENTIALS` 可显式覆盖）。
 
 | 文件/目录 | 落点 | 说明 |
 | --- | --- | --- |
 | `config.json` | 配置目录（缺省当前目录） | 唯一的用户配置 |
-| `credentials.json` | 同目录 | login/setup 派生的用途令牌（0600） |
-| `daemon.json` | 同目录 | 运行中 daemon 的端点发现文件 |
-| `config.schema.json` | 同目录 | `assistant config init` 写入（编辑器补全） |
+| `credentials.json` | 平台标准配置目录（Linux `~/.config/Cosmic-Developers-Union/assistant/`） | login/setup 派生的用途令牌（0600） |
+| `daemon.json` | 同目录（配置目录） | 运行中 daemon 的端点发现文件 |
+| `config.schema.json` | 同目录（配置目录） | `assistant config init` 写入（编辑器补全） |
 | `data/` | 同目录（`runtime.root` 缺省） | 运行树：repos/state/review/chat/claude |
 
-把项目入库时排除它们（`.gitignore`）：`config.json`、`credentials.json`、
-`daemon.json`、`data/` 等——参考仓库根的 `.gitignore`。
+把项目入库时排除它们（`.gitignore`）：`config.json`、`daemon.json`、
+`data/` 等——参考仓库根的 `.gitignore`（`credentials.json` 在用户配置目录，
+天然不在仓库里）。
 
 ## 运行与边界
 

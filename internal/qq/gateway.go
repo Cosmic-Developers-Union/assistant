@@ -6,6 +6,7 @@ import (
 	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -39,6 +40,10 @@ const (
 // defaultHeartbeatInterval 是 Hello 未给出间隔时的兜底值。
 const defaultHeartbeatInterval = 45 * time.Second
 
+// gatewayCloseAuthFailed 是网关 close code 4004（token 无效/权限不足）：重连
+// 不会自愈，按致命错误处理（官方 SDK 同样将其归为 fatal）。
+const gatewayCloseAuthFailed = 4004
+
 // frame 是网关收发的一帧。
 type frame struct {
 	Op int             `json:"op"`
@@ -57,6 +62,9 @@ type Gateway struct {
 
 	sessionID string
 	lastSeq   atomic.Int64
+	// forceRefresh 在会话被彻底作废（op 9 d=false）时置位：官方 SDK 认为此
+	// 场景 token 可能已失效，下次连接强制重新换取，避免 Identify 再被拒。
+	forceRefresh bool
 }
 
 // NewGateway 创建网关。intents 是事件订阅位（如 IntentGroupAndC2CEvent）。
@@ -101,7 +109,10 @@ func (g *Gateway) connect(ctx context.Context, onEvent func(string, json.RawMess
 	if g.debug {
 		g.log("连接网关 %s", gatewayURL)
 	}
-	conn, _, err := websocket.Dial(ctx, gatewayURL, &websocket.DialOptions{HTTPClient: g.client.HTTPClient()})
+	conn, _, err := websocket.Dial(ctx, gatewayURL, &websocket.DialOptions{
+		HTTPClient: g.client.HTTPClient(),
+		HTTPHeader: http.Header{"User-Agent": []string{defaultUserAgent}},
+	})
 	if err != nil {
 		return fmt.Errorf("连接网关: %w", err)
 	}
@@ -124,7 +135,7 @@ func (g *Gateway) connect(ctx context.Context, onEvent func(string, json.RawMess
 	// Hello 是服务器建连后先发的唯一一帧，带心跳间隔
 	hello, err := readFrame(loopCtx, conn, defaultHeartbeatInterval*2)
 	if err != nil {
-		return fmt.Errorf("等待 Hello: %w", err)
+		return g.fatalIfAuthRejected(fmt.Errorf("等待 Hello: %w", err))
 	}
 	if hello.Op != opHello {
 		return fmt.Errorf("首帧不是 Hello（op=%d）", hello.Op)
@@ -132,13 +143,14 @@ func (g *Gateway) connect(ctx context.Context, onEvent func(string, json.RawMess
 	interval := decodeHeartbeatInterval(hello.D)
 
 	// 新会话走 Identify，断线且手里有会话时走 Resume（服务端补发漏掉的事件）
-	token, err := g.client.tokens.get(ctx, false)
+	token, err := g.client.tokens.get(ctx, g.forceRefresh)
+	g.forceRefresh = false
 	if err != nil {
 		return err
 	}
 	if resume := g.sessionID != "" && g.lastSeq.Load() > 0; resume {
 		payload, _ := jsonv2.Marshal(map[string]any{
-			"token": "QQBot " + token, "session_id": g.sessionID, "seq": g.lastSeq.Load(),
+			"token": authScheme + token, "session_id": g.sessionID, "seq": g.lastSeq.Load(),
 		})
 		if err := writeFrame(frame{Op: opResume, D: payload}); err != nil {
 			return fmt.Errorf("发送 Resume: %w", err)
@@ -146,7 +158,7 @@ func (g *Gateway) connect(ctx context.Context, onEvent func(string, json.RawMess
 		g.log("网关续接会话 %s（seq %d）", shortSessionID(g.sessionID), g.lastSeq.Load())
 	} else {
 		payload, _ := jsonv2.Marshal(map[string]any{
-			"token": "QQBot " + token, "intents": g.intents, "shard": []int{0, 1},
+			"token": authScheme + token, "intents": g.intents, "shard": []int{0, 1},
 		})
 		if err := writeFrame(frame{Op: opIdentify, D: payload}); err != nil {
 			return fmt.Errorf("发送 Identify: %w", err)
@@ -184,7 +196,7 @@ func (g *Gateway) connect(ctx context.Context, onEvent func(string, json.RawMess
 	for {
 		f, err := readFrame(loopCtx, conn, interval*2)
 		if err != nil {
-			return err
+			return g.fatalIfAuthRejected(err)
 		}
 		switch f.Op {
 		case opDispatch:
@@ -210,9 +222,19 @@ func (g *Gateway) connect(ctx context.Context, onEvent func(string, json.RawMess
 			g.log("服务端要求重连（op 7）")
 			return nil
 		case opInvalidSession:
-			g.log("会话失效（op 9），下次重连重新 Identify")
+			// d 是布尔值：true 表示会话还在、重连可续接；false 表示彻底作废，
+			// 丢弃会话重新 Identify，且 token 可能已被吊销，强制重新换取
+			//（官方 SDK 同样在此清 token 缓存）。
+			var canResume bool
+			_ = jsonv2.Unmarshal(f.D, &canResume)
+			if canResume {
+				g.log("会话失效（op 9 d=true），重连后续接")
+				return nil
+			}
+			g.log("会话作废（op 9 d=false），丢弃会话并强制刷新 token")
 			g.sessionID = ""
 			g.lastSeq.Store(0)
+			g.forceRefresh = true
 			return nil
 		default:
 			if g.debug {
@@ -220,6 +242,15 @@ func (g *Gateway) connect(ctx context.Context, onEvent func(string, json.RawMess
 			}
 		}
 	}
+}
+
+// fatalIfAuthRejected 把网关 close 4004（token 无效/权限不足）升级为致命错误：
+// 这类失败重连不会自愈，通道层应停下而不是退避刷屏。
+func (g *Gateway) fatalIfAuthRejected(err error) error {
+	if websocket.CloseStatus(err) == gatewayCloseAuthFailed {
+		return &FatalError{Stage: "网关鉴权", Message: err.Error()}
+	}
+	return err
 }
 
 // readFrame 读一帧，超过 timeout 没有任何字节按失败处理。

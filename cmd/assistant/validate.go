@@ -316,7 +316,7 @@ func validateCredentials(configPath string, file *instances.File) []validateFind
 	if len(giteaChannels) == 0 {
 		return nil
 	}
-	path, err := credentials.PathFor(configPath)
+	path, err := credentials.Path()
 	if err != nil {
 		return []validateFinding{{"ERROR", "credentials.json", err.Error()}}
 	}

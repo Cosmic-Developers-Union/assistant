@@ -302,7 +302,7 @@ func TestConfigExampleLoads(t *testing.T) {
 	// 示例配置的密钥用 $VAR 引用示范「密钥不落配置文件」；严格校验要求变量已定义
 	for _, name := range []string{
 		"GITEA_REVIEW_TOKEN", "ZHIPU_API_KEY", "OPENCODE_API_KEY",
-		"ANTHROPIC_API_KEY", "QQ_TOKEN", "TELEGRAM_BOT_TOKEN", "SESSIONS_TOKEN",
+		"ANTHROPIC_API_KEY", "QQ_APP_ID", "QQ_TOKEN", "TELEGRAM_BOT_TOKEN", "SESSIONS_TOKEN",
 	} {
 		t.Setenv(name, "example-"+strings.ToLower(strings.ReplaceAll(name, "_", "-")))
 	}

@@ -182,17 +182,22 @@ func TestTokenNameIsDerivedAndStable(t *testing.T) {
 	}
 }
 
-func TestPathForFollowsConfig(t *testing.T) {
+// 凭据落点是平台标准配置目录（不是 config.json 同目录、不是 cwd）：从任意
+// 目录启动的 MCP/CLI 都解析到同一份。ASSISTANT_CREDENTIALS 显式覆盖。
+func TestPathFollowsPlatformConfigDir(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("ASSISTANT_CREDENTIALS", "")
-	path, err := PathFor("/etc/assistant/config.json")
+	path, err := Path()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if path != "/etc/assistant/credentials.json" {
-		t.Fatalf("PathFor = %q", path)
+	want := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "Cosmic-Developers-Union", "assistant", "credentials.json")
+	if path != want {
+		t.Fatalf("Path = %q, want %q", path, want)
 	}
+	// 与 config.json 位置无关：换任何配置路径都不影响凭据落点
 	t.Setenv("ASSISTANT_CREDENTIALS", "/tmp/custom-credentials.json")
-	if path, err := PathFor("/etc/assistant/config.json"); err != nil || path != "/tmp/custom-credentials.json" {
+	if path, err := Path(); err != nil || path != "/tmp/custom-credentials.json" {
 		t.Fatalf("ASSISTANT_CREDENTIALS 覆盖失败：%q err=%v", path, err)
 	}
 }

@@ -15,6 +15,7 @@ import (
 // （config init 的预填只看身份；令牌让随后的校验不再报缺令牌）。
 func writeCredentials(t *testing.T, dir string, hosts ...string) {
 	t.Helper()
+	t.Setenv("ASSISTANT_CREDENTIALS", filepath.Join(dir, "credentials.json"))
 	identities := make([]map[string]any, 0, len(hosts))
 	credentials := make([]map[string]any, 0, len(hosts)*4)
 	for _, host := range hosts {

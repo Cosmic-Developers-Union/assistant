@@ -1,12 +1,12 @@
 package qq
 
 import (
+	"bytes"
 	"context"
 	"encoding/json/v2"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,8 +32,10 @@ func (e *FatalError) Error() string {
 	switch {
 	case e.Status != 0:
 		fmt.Fprintf(&builder, "（HTTP %d）", e.Status)
-	case e.Code != "" || e.Message != "":
+	case e.Code != "":
 		fmt.Fprintf(&builder, "（code %s：%s）", e.Code, e.Message)
+	case e.Message != "":
+		fmt.Fprintf(&builder, "（%s）", e.Message)
 	}
 	if e.Body != "" {
 		builder.WriteString("：" + e.Body)
@@ -84,12 +86,22 @@ func (m *tokenManager) get(ctx context.Context, force bool) (string, error) {
 	if !force && m.token != "" && time.Now().Before(m.expires) {
 		return m.token, nil
 	}
-	form := url.Values{"appId": {m.appID}, "clientSecret": {m.appSecret}}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, m.tokenURL, strings.NewReader(form.Encode()))
+	// 官方端点只接受 JSON body（{"appId","clientSecret"}）；发成表单会被解析成
+	// 空 appId，平台返回 {"code":100007,"message":"appid invalid"}——凭据明明
+	// 正确也会报 invalid appid。
+	requestBody, err := json.Marshal(struct {
+		AppID        string `json:"appId"`
+		ClientSecret string `json:"clientSecret"`
+	}{AppID: strings.TrimSpace(m.appID), ClientSecret: m.appSecret})
 	if err != nil {
 		return "", err
 	}
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, m.tokenURL, bytes.NewReader(requestBody))
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", defaultUserAgent)
 	response, err := m.httpClient.Do(request)
 	if err != nil {
 		return "", fmt.Errorf("获取 access token: %w", err)

@@ -18,16 +18,16 @@ Gitea 上的例行事务与评审自动化，两块能力：
 - **仓库脚手架由 install 托管**：`AGENTS.md`、`CLAUDE.md`、`skills/`、`.mcp.json`、`.claude/settings.json`、`.gitea/workflows/assistant.yml` 的托管段落不要手改；改内容要改本仓库的 `content/`、`skills/` 源文件。
 - **评审协议随二进制走**：评审/分诊会话的协议与标签体系由内置 skill 注入（不依赖仓库是否装过脚手架）；项目自有约定放 `.assistant/review.md` 的非托管段落。
 - **会话工具面由 assistant 决定**：gitea MCP 由 `assistant mcp gitea` 提供，与仓库里的 `.mcp.json` 无关；仓库自带的其它 MCP server 会被合并保留。
-- **配置只有两个文件**：`config.json`（用户手写）与 `credentials.json`（assistant 管理），都在配置目录（缺省当前目录）。没有第三处。
+- **配置只有两个文件**：`config.json`（用户手写，配置目录）与 `credentials.json`（assistant 管理，平台标准配置目录）。没有第三处。
 
 ## 数据落点（显式模式）
 
-assistant 是工具不是常驻应用：配置按 `--config` → `ASSISTANT_CONFIG` → **当前目录 `./config.json`** 定位，不读不写用户的平台配置目录。所有文件都收在配置旁边：`credentials.json`（login/setup 令牌）、`daemon.json`（端点发现）、`data/`（运行树：repos/state/review/chat/claude，`runtime.root` 可改）。入库时排除它们——见仓库根 `.gitignore`。完整说明见 `docs/config.md`。
+assistant 是工具不是常驻应用：配置按 `--config` → `ASSISTANT_CONFIG` → **当前目录 `./config.json`** 定位。运行产物收在配置旁边：`daemon.json`（端点发现）、`data/`（运行树：repos/state/review/chat/claude，`runtime.root` 可改）。**凭据是例外**——`credentials.json` 描述「这台机器上的当前用户」，是用户级状态而非项目级：落在平台标准配置目录（Linux `~/.config/Cosmic-Developers-Union/assistant/`），从任何目录启动的 MCP/CLI 都解析同一份登录态，绝不锚定 cwd。入库时排除配置目录产物——见仓库根 `.gitignore`。完整说明见 `docs/config.md`。
 
 | 路径 | 内容 | 谁写 | 说明 |
 | --- | --- | --- | --- |
 | `<配置目录>/config.json` | 平台、仓库、provider、微信桥 | 你（`config new` 生成空骨架，`config init` 补全） | 用户配置，含 provider `api_key` |
-| `<配置目录>/credentials.json` | 登录身份 + `review`/`merge`/`admin`/`mcp` 用途令牌 | `login` / `setup` | 0600，不要手改 |
+| `~/.config/Cosmic-Developers-Union/assistant/credentials.json`（Linux；`ASSISTANT_CREDENTIALS` 可覆盖） | 登录身份 + `review`/`merge`/`admin`/`mcp` 用途令牌 | `login` / `setup` | 0600，不要手改；平台标准配置目录，与 cwd/config 位置无关 |
 | `<配置目录>/config.schema.json` | 配置的 JSON Schema | `config new` / `config init` | 编辑器补全用 |
 | `<配置目录>/claude/` | **会话文本记录 + claude 全局配置** | claude 会话 | `CLAUDE_CONFIG_DIR` 指向这里 |
 | `<配置目录>/claude/projects/<项目>/<session-id>.jsonl` | 一次会话的完整事件流（一行一事件） | claude | 保留期 `cleanupPeriodDays=3650` |
@@ -136,7 +136,7 @@ channels，**大量配置**）加 N 个 runtime（**少量运行**——每个 r
   通道不启动。
 - 旧版顶层 `qq:` / `weixin:` 单实例节点已删除：`channels` 是唯一的对话通道
   架构，出现旧节点会报迁移错误（含对照写法）。
-- **密钥不落盘**：凭据字段（`bot_token`/`app_secret`/`token`/`api_key`、
+- **凭据不落盘**：凭据字段（`bot_token`/`app_id`/`app_secret`/`token`/`api_key`、
   `providers.*.env`、`agents.*.mcp.*.env`、`sessions.remote.token`）都支持
   `$VAR` / `${VAR}` / `${VAR:-default}` 环境变量引用——`assistant` 启动时
   自动载入 config.json 同目录的 `.env`（不覆盖已有环境变量），未定义的变量

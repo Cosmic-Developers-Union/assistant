@@ -1,10 +1,13 @@
 // Package qq 是 QQ 开放平台机器人（q.qq.com，官方 Bot API v2）的最小客户端：
-// WebSocket 网关收事件、REST 发消息。协议要点：
+// WebSocket 网关收事件、REST 发消息。协议要点（对齐官方 openclaw-qqbot 插件
+// 所用的 @tencent-connect/qqbot-nodejs SDK）：
 //
-//   - 鉴权：AppID + AppSecret 换 access_token（约 2 小时过期）；REST 用
-//     Authorization: Bearer <token>，网关 Identify 用 "QQBot <token>"。
+//   - 鉴权：AppID + AppSecret 以 JSON body POST bots.qq.com/app/getAppAccessToken
+//     换 access_token（约 2 小时过期）；REST 与网关鉴权头均为
+//     "Authorization: QQBot <token>"（不是 Bearer）。
 //   - 事件：WebSocket 网关（出站连接，无需公网 IP），op 2 Identify 订阅
-//     GROUP_AND_C2C_EVENT；op 1/op 11 心跳保活；断线 op 6 Resume 续接。
+//     GROUP_AND_C2C_EVENT；op 1/op 11 心跳保活；断线 op 6 Resume 续接；
+//     op 9 会话失效按 d 布尔值决定能否续接；close 4004 鉴权失败不重试。
 //   - 回复：群 POST /v2/groups/{group_openid}/messages、私聊
 //     POST /v2/users/{user_openid}/messages，均为被动消息——必须带收到消息的
 //     msg_id（15 分钟窗口），msg_seq 区分同一条消息的多次回复（平台按
@@ -29,6 +32,12 @@ const (
 	// DefaultTokenURL 是 access token 端点（固定，不在 APIBaseURL 下）。
 	DefaultTokenURL = "https://bots.qq.com/app/getAppAccessToken"
 )
+
+// defaultUserAgent 是全部 HTTP 请求（token/REST/网关拨号）携带的 User-Agent。
+const defaultUserAgent = "assistant-qqbot"
+
+// authScheme 是平台鉴权头方案：Authorization: QQBot <token>。
+const authScheme = "QQBot "
 
 // Config 是 QQ 客户端配置。
 type Config struct {
@@ -129,8 +138,9 @@ func (c *Client) post(ctx context.Context, path string, body any) error {
 		if err != nil {
 			return err
 		}
-		request.Header.Set("Authorization", "Bearer "+token)
+		request.Header.Set("Authorization", authScheme+token)
 		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("User-Agent", defaultUserAgent)
 		status, payload, err := c.do(request)
 		if err != nil {
 			return err
@@ -159,7 +169,8 @@ func (c *Client) get(ctx context.Context, path string, out any) error {
 		if err != nil {
 			return err
 		}
-		request.Header.Set("Authorization", "Bearer "+token)
+		request.Header.Set("Authorization", authScheme+token)
+		request.Header.Set("User-Agent", defaultUserAgent)
 		status, payload, err := c.do(request)
 		if err != nil {
 			return err

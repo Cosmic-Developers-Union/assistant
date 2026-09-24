@@ -29,7 +29,7 @@ func runIdentityLogin(command *cobra.Command, prompts *promptSession, host, conf
 	if file == nil {
 		file = &instances.File{}
 	}
-	credentialPath, err := credentials.PathFor(writePath)
+	credentialPath, err := credentials.Path()
 	if err != nil {
 		return err
 	}

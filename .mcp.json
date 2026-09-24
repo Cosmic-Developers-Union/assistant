@@ -5,7 +5,10 @@
         "mcp",
         "gitea"
       ],
-      "command": "assistant"
+      "command": "assistant",
+      "env": {
+        "ASSISTANT_CONFIG": "/home/ge/Projects/assistant/config.json"
+      }
     }
   }
 }

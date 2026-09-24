@@ -385,16 +385,23 @@ func logRuntimeSummary(
 	logf("  读 config.json = %s", resolvedPath)
 	dotEnv := filepath.Join(configDir, ".env")
 	if _, err := os.Stat(dotEnv); err == nil {
-		logf("  读 .env = %s（已载入，不覆盖已有环境变量；密钥引用 $VAR 由此解析）", dotEnv)
+		logf("  读 .env = %s（已载入，不覆盖已有环境变量；凭据引用 $VAR 由此解析）", dotEnv)
 	} else {
-		logf("  读 .env = 未找到（密钥引用 $VAR 用进程环境解析）")
+		logf("  读 .env = 未找到（凭据引用 $VAR 用进程环境解析）")
 	}
 	if len(gitea) > 0 {
-		credentialsPath, err := credentials.PathFor(resolvedPath)
+		credentialsPath, err := credentials.Path()
 		if err != nil {
 			credentialsPath = "credentials.json"
 		}
-		logf("  读 credentials.json = %s（gitea 通道令牌兜底，只读）", credentialsPath)
+		logf("  读 credentials.json = %s（gitea 通道令牌兜底，只读；平台标准配置目录）", credentialsPath)
+		// 旧版本（28ca459 前）把凭据放在 config.json 同目录：发现旧落点就提示
+		// 迁移，不自动搬——凭据位置的变化必须让操作者看见。
+		if legacy := filepath.Join(configDir, "credentials.json"); legacy != credentialsPath {
+			if _, err := os.Stat(legacy); err == nil {
+				logf("  ⚠ 发现旧落点凭据 %s：请迁移到 %s（mv 后重启；凭据现按平台规范落在标准配置目录）", legacy, credentialsPath)
+			}
+		}
 	}
 	if statePath := runtime.StatePath(); statePath != "" {
 		logf("  写 状态库 = %s（SQLite WAL：内省 + 跨进程互斥）", statePath)
@@ -482,6 +489,13 @@ func startChannelEntry(
 	logf func(string, ...any),
 ) error {
 	key := entry.Key()
+	if entry.Type == instances.ChannelQQ {
+		appID, err := expandQQAppID(entry)
+		if err != nil {
+			return fmt.Errorf("通道 %s 启动失败：%w", key, err)
+		}
+		entry.AppID = appID
+	}
 	// 密钥的 $VAR/${VAR} 引用在消费点展开（File 里的原始定义不动）；未定义
 	// 变量在这里拦下，不让字面量发往平台。
 	if secretField, secretValue := entry.SecretField(); secretField != "" {

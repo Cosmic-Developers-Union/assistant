@@ -102,20 +102,27 @@ type Credential struct {
 	CreatedAt string `json:"created_at,omitempty"`
 }
 
-// PathFor 决定凭据文件落点：与 config.json 同目录（一次登录对应一份运行配置），
-// 无配置路径时退回标准配置目录。ASSISTANT_CREDENTIALS 可显式覆盖。
-func PathFor(configPath string) (string, error) {
+// 凭据库的命名空间：Cosmic-Developers-Union/assistant（组织/应用两级，与
+// configNamespace 时代一致）。
+const (
+	credentialsNamespace = "Cosmic-Developers-Union"
+	credentialsApp       = "assistant"
+)
+
+// Path 决定凭据文件落点：平台标准配置目录（Linux XDG_CONFIG_HOME、Windows
+// Known Folders、macOS Library）下的 credentials.json。凭据描述「这台机器上的
+// 当前用户是谁」，是用户级而非项目级状态——MCP/CLI 从任意项目目录启动都要能
+// 解析到同一份，绝不能锚定 cwd 或 config.json 所在目录（那会让换目录启动的
+// 凭据解析全部落空）。ASSISTANT_CREDENTIALS 可显式覆盖。
+func Path() (string, error) {
 	if override := strings.TrimSpace(os.Getenv("ASSISTANT_CREDENTIALS")); override != "" {
 		return override, nil
 	}
-	if path := strings.TrimSpace(configPath); path != "" {
-		return filepath.Join(filepath.Dir(path), "credentials.json"), nil
-	}
-	dir, err := instances.DefaultConfigDir()
+	directory, err := os.UserConfigDir()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("定位凭据目录（平台标准配置目录）: %w", err)
 	}
-	return filepath.Join(dir, "credentials.json"), nil
+	return filepath.Join(directory, credentialsNamespace, credentialsApp, "credentials.json"), nil
 }
 
 // Load 读取凭据文件；文件不存在返回空库（不是错误）。内容损坏时报错，不静默丢弃

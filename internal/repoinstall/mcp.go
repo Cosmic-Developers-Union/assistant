@@ -23,8 +23,6 @@ const (
 type MCPOptions struct {
 	// Dir 是项目目录（默认 cwd），用于从 git remote 推导站点。
 	Dir string
-	// ConfigPath 指定 assistant login 的实例配置；缺省 ASSISTANT_CONFIG / 标准目录。
-	ConfigPath string
 	// Host / Token 显式覆盖自动检测。
 	Host  string
 	Token string
@@ -89,7 +87,7 @@ func ResolveMCP(ctx context.Context, options MCPOptions) (MCPSpec, error) {
 	if options.Token != "" {
 		spec.Token, spec.TokenSource = strings.TrimSpace(options.Token), "--token"
 	} else {
-		spec.Token, spec.TokenSource, err = resolveMCPToken(spec.Host, options.ConfigPath, getenv)
+		spec.Token, spec.TokenSource, err = resolveMCPToken(spec.Host, getenv)
 		if err != nil {
 			return MCPSpec{}, err
 		}
@@ -97,7 +95,7 @@ func ResolveMCP(ctx context.Context, options MCPOptions) (MCPSpec, error) {
 	if spec.Token == "" {
 		return MCPSpec{}, fmt.Errorf("站点 %s 没有匹配的登录凭据：%s；"+
 			"CI / 评审会话也可显式注入 GITEA_ACCESS_TOKEN 或 GITEA_ACCESS_TOKEN_FILE",
-			spec.Host, missingMCPHint(spec.Host, options.ConfigPath, getenv))
+			spec.Host, missingMCPHint(spec.Host, getenv))
 	}
 	return spec, nil
 }
@@ -107,9 +105,9 @@ func ResolveMCP(ctx context.Context, options MCPOptions) (MCPSpec, error) {
 //   - 已登记身份但没有 mcp 用途令牌（登录中断、手工编辑过凭据库）：点名账号，
 //     否则「identity 有、mcp 没有」看起来像工具坏了；
 //   - 完全没有身份：直接给出登录命令。
-func missingMCPHint(host, configPath string, getenv func(string) string) string {
+func missingMCPHint(host string, getenv func(string) string) string {
 	login := "assistant login " + host + " --user <账号>"
-	credentialPath, err := mcpCredentialPath(configPath, getenv)
+	credentialPath, err := credentials.Path()
 	if err != nil {
 		return "请运行 " + login
 	}

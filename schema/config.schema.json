@@ -368,7 +368,7 @@
         },
         "app_id": {
           "type": "string",
-          "description": "（qq）开放平台机器人的 AppID。"
+          "description": "（qq）开放平台机器人的 AppID。支持 $VAR/${VAR} 环境变量引用（config.json 同目录 .env 自动载入；未定义启动即报错）。"
         },
         "app_secret": {
           "type": "string",

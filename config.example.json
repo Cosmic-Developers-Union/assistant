@@ -74,7 +74,7 @@
     },
     {
       "type": "qq",
-      "app_id": "your-app-id",
+      "app_id": "$QQ_APP_ID",
       "app_secret": "$QQ_TOKEN",
       "admin_users": [
         "*"
