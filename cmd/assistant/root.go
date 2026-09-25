@@ -89,35 +89,29 @@ func newRootCommand(stdout, stderr io.Writer, checker, labelSyncer, merger manag
 		15*time.Second,
 		"等待模式下的轮询间隔（仅在 --wait 或 --timeout > 0 时生效）",
 	)
-	labelSyncCommand := &cobra.Command{
-		Use:   "label-sync",
-		Short: "规范 Issue 标签并把 PR 原生评审状态同步为状态标签（单次执行，供 CI 事件驱动）",
-		Args:  cobra.NoArgs,
-		RunE: func(command *cobra.Command, _ []string) error {
-			if err := options.validate(); err != nil {
-				return err
-			}
-			return labelSyncer(command.Context(), stdout, stderr, options)
-		},
-	}
-	autoMergeCommand := &cobra.Command{
-		Use:   "automerge",
-		Short: "合并门禁全绿且分支未过期的已批准 PR（一次运行至多一个，squash；供 CI schedule 驱动）",
-		Args:  cobra.NoArgs,
-		RunE: func(command *cobra.Command, _ []string) error {
-			if err := options.validate(); err != nil {
-				return err
-			}
-			return merger(command.Context(), stdout, stderr, options)
-		},
-	}
 	actionCommand := &cobra.Command{
 		Use:   "action",
 		Short: "执行仓库自动化动作（标签同步与自动合并）",
 		Args:  cobra.NoArgs,
 	}
-	actionCommand.AddCommand(labelSyncCommand, autoMergeCommand)
+	actionCommand.AddCommand(
+		newAutomationCommand("label-sync",
+			"规范 Issue 标签并把 PR 原生评审状态同步为状态标签（单次执行，供 CI 事件驱动）",
+			"", labelSyncer, &options, stdout, stderr),
+		newAutomationCommand("automerge",
+			"合并门禁全绿且分支未过期的已批准 PR（一次运行至多一个，squash；供 CI schedule 驱动）",
+			"", merger, &options, stdout, stderr),
+	)
 	command.AddCommand(checkCommand, actionCommand)
+	// 旧的顶层入口：已 install 的目标仓库里 workflow 仍写着 `assistant sync` /
+	// `assistant automerge`，容器镜像更新后不能直接变成 unknown command——
+	// 那会让门禁在无人察觉的情况下停摆，直到重跑 install。
+	command.AddCommand(
+		newAutomationCommand("sync", "已弃用：请改用 assistant action label-sync",
+			"请改用 assistant action label-sync", labelSyncer, &options, stdout, stderr),
+		newAutomationCommand("automerge", "已弃用：请改用 assistant action automerge",
+			"请改用 assistant action automerge", merger, &options, stdout, stderr),
+	)
 	command.AddCommand(newDispatcherCommands(&options.Repository, &options.ConfigPath)...)
 	command.AddCommand(newLoginCommand(&options.ConfigPath))
 	command.AddCommand(newWeixinCommand(&options.ConfigPath))
@@ -130,6 +124,30 @@ func newRootCommand(stdout, stderr io.Writer, checker, labelSyncer, merger manag
 	command.AddCommand(newConfigCommand(&options.ConfigPath))
 	command.AddCommand(newServeCommand(&options.ConfigPath), newSessionCommand(&options.ConfigPath))
 	return command
+}
+
+// newAutomationCommand 构造执行仓库自动化动作的叶子命令：--repo / --config /
+// --verbose 等来自 root 的持久旗标，动作实现由 action 决定。deprecated 非空时
+// 兼作旧入口的兼容层——cobra 会把带 Deprecated 的命令从帮助列表里隐藏，只在
+// 实际使用到它时打印弃用提示。
+func newAutomationCommand(
+	use, short, deprecated string,
+	action managerRunner,
+	options *commandOptions,
+	stdout, stderr io.Writer,
+) *cobra.Command {
+	return &cobra.Command{
+		Use:        use,
+		Short:      short,
+		Args:       cobra.NoArgs,
+		Deprecated: deprecated,
+		RunE: func(command *cobra.Command, _ []string) error {
+			if err := options.validate(); err != nil {
+				return err
+			}
+			return action(command.Context(), stdout, stderr, *options)
+		},
+	}
 }
 
 func (options commandOptions) validate() error {

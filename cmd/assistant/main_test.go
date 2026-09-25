@@ -38,7 +38,9 @@ func TestRootCommandShowsHelpWithoutArguments(t *testing.T) {
 	output := stdout.String()
 	if !strings.Contains(output, "Available Commands:") ||
 		!strings.Contains(output, "check") ||
-		!strings.Contains(output, "action") ||
+		// 不能用字面量 "action" 断言：root 的 Example 里就含
+		// `assistant action label-sync`，cobra 会把 Example 一并打印进 help。
+		!strings.Contains(output, "执行仓库自动化动作") ||
 		!strings.Contains(output, "setup") ||
 		!strings.Contains(output, "install") ||
 		!strings.Contains(output, "uninstall") ||
@@ -51,6 +53,80 @@ func TestRootCommandShowsHelpWithoutArguments(t *testing.T) {
 		!strings.Contains(output, "review") ||
 		!strings.Contains(output, "triage") {
 		t.Errorf("help output = %q", output)
+	}
+	// 上面只能证明 help 文案出现，这里直接确认 action 及其子命令挂在命令树上。
+	if _, _, err := command.Find([]string{"action", "label-sync"}); err != nil {
+		t.Errorf("Find(action label-sync) error = %v", err)
+	}
+}
+
+// TestDeprecatedAutomationCommandsStillDispatch 保证旧的顶层 `assistant sync` /
+// `assistant automerge` 仍转发到对应 runner：已 install 的目标仓库其 workflow
+// 调用的还是旧命令，镜像更新后不能让它们变成 unknown command。
+func TestDeprecatedAutomationCommandsStillDispatch(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"sync", []string{"sync"}, "label-sync"},
+		{"automerge", []string{"automerge"}, "automerge"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			var called []string
+			command := newRootCommand(
+				&bytes.Buffer{},
+				&bytes.Buffer{},
+				func(context.Context, io.Writer, io.Writer, commandOptions) error {
+					called = append(called, "check")
+					return nil
+				},
+				func(context.Context, io.Writer, io.Writer, commandOptions) error {
+					called = append(called, "label-sync")
+					return nil
+				},
+				func(context.Context, io.Writer, io.Writer, commandOptions) error {
+					called = append(called, "automerge")
+					return nil
+				},
+			)
+			command.SetArgs(testCase.args)
+
+			if err := command.ExecuteContext(t.Context()); err != nil {
+				t.Fatalf("ExecuteContext() error = %v", err)
+			}
+			if len(called) != 1 || called[0] != testCase.want {
+				t.Errorf("called = %v, want [%s]", called, testCase.want)
+			}
+		})
+	}
+}
+
+// TestDeprecatedAutomationCommandsHiddenFromHelp 确认旧入口不出现在帮助列表里，
+// 但带着弃用提示保留可达（cobra 对 Deprecated 命令的约定）。
+func TestDeprecatedAutomationCommandsHiddenFromHelp(t *testing.T) {
+	var stdout bytes.Buffer
+	runner := func(context.Context, io.Writer, io.Writer, commandOptions) error {
+		t.Fatal("runner was called")
+		return nil
+	}
+	command := newRootCommand(&stdout, &bytes.Buffer{}, runner, runner, runner)
+	command.SetArgs(nil)
+
+	if err := command.ExecuteContext(t.Context()); err != nil {
+		t.Fatalf("ExecuteContext() error = %v", err)
+	}
+	if strings.Contains(stdout.String(), "已弃用：请改用") {
+		t.Errorf("弃用的顶层入口不应出现在帮助列表里: %q", stdout.String())
+	}
+	for _, name := range []string{"sync", "automerge"} {
+		legacy, _, err := command.Find([]string{name})
+		if err != nil {
+			t.Fatalf("Find(%q) error = %v", name, err)
+		}
+		if legacy.Deprecated == "" {
+			t.Errorf("%s 应为带弃用提示的兼容入口", name)
+		}
 	}
 }
 

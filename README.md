@@ -14,7 +14,7 @@ Gitea 上的例行事务与评审自动化，两块能力：
 - **身份固定**：内容评审 `ai`（别名 `reviewer`）、状态评审/合并 `merge`；合并白名单只含 `merge`，管理员也走分支保护。
 - **双批准**：内容批准（`ai` 的 APPROVED）+ 状态会签（`merge` 对 head 盖章），缺一不可。
 - **完成判定看 Gitea 原生 review**：调度引擎不解析会话输出来判成败——reviewer 名下出现新 review、或 triage 标签被移除，才算完成。
-- **标签体系与 PR 流程**：`AGENTS.md`（`assistant install` 写进目标仓库）是唯一权威；reviewer 只评内容、不改标签，标签由 `sync` 收敛。
+- **标签体系与 PR 流程**：`AGENTS.md`（`assistant install` 写进目标仓库）是唯一权威；reviewer 只评内容、不改标签，标签由 `assistant action label-sync` 收敛。
 - **仓库脚手架由 install 托管**：`AGENTS.md`、`CLAUDE.md`、`skills/`、`.mcp.json`、`.claude/settings.json`、`.gitea/workflows/assistant.yml` 的托管段落不要手改；改内容要改本仓库的 `content/`、`skills/` 源文件。
 - **评审协议随二进制走**：评审/分诊会话的协议与标签体系由内置 skill 注入（不依赖仓库是否装过脚手架）；项目自有约定放 `.assistant/review.md` 的非托管段落。
 - **会话工具面由 assistant 决定**：gitea MCP 由 `assistant mcp gitea` 提供，与仓库里的 `.mcp.json` 无关；仓库自带的其它 MCP server 会被合并保留。

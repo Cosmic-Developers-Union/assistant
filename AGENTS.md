@@ -73,7 +73,7 @@ make review-image  # 评审会话镜像（images/review/Dockerfile，target revi
 - **完成判定看 Gitea 原生 review**：调度引擎不解析会话输出来判成败——reviewer 名下
   出现新 review、或 triage 标签被移除，才算完成。
 - **标签体系与 PR 流程**：写进目标仓库的 `AGENTS.md` / `content/agents.md` 是唯一
-  权威；reviewer 只评内容、不改标签，标签由 `sync` 收敛。
+  权威；reviewer 只评内容、不改标签，标签由 `assistant action label-sync` 收敛。
 - **评审协议随二进制走**：评审 / 分诊会话的协议与标签体系由内置 skill 注入（提示词
   事实源是 `skills/review/SKILL.md`），不依赖目标仓库是否装过脚手架；项目自有约定放
   `.assistant/review.md` 的非托管段落。

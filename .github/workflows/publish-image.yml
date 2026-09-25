@@ -2,7 +2,7 @@ name: publish-image
 
 # 构建并发布容器镜像到 GitHub Container Registry（ghcr.io）。
 # 仓库级 Actions workflow 用 `container: ghcr.io/<owner>/assistant:latest`
-# 运行 assistant sync / automerge，无需在步骤里下载二进制。
+# 运行 assistant action label-sync / automerge，无需在步骤里下载二进制。
 on:
   push:
     branches: [main]
