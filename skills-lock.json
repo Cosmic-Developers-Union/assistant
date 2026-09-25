@@ -7,6 +7,12 @@
       "skillPath": "skills/review/SKILL.md",
       "computedHash": "a4c539b53230031ad2e06b9b2763c8050ce0ccdb076b58da83a1d0577bae0127"
     },
+    "tdd": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/tdd/SKILL.md",
+      "computedHash": "e753a5da75292bbe59d302d89566bc2c53d0e73944da2f0e944a7578883c07d0"
+    },
     "use-modern-go": {
       "source": "JetBrains/go-modern-guidelines",
       "sourceType": "github",
