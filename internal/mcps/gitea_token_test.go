@@ -1,7 +1,6 @@
-package repoinstall
+package mcps
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,7 +27,7 @@ func TestMissingMCPHintExplainsIdentityOnlyState(t *testing.T) {
 		t.Fatal(err)
 	}
 	getenv := func(string) string { return "" }
-	_, err := ResolveMCP(context.Background(), MCPOptions{Host: "https://a.example.com", Getenv: getenv})
+	_, err := ResolveGitea(t.Context(), GiteaOptions{Host: "https://a.example.com", Getenv: getenv})
 	if err == nil {
 		t.Fatal("缺少 mcp 令牌时应报错")
 	}
@@ -56,12 +55,12 @@ func TestMCPTokenFromCredentialsStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	getenv := func(string) string { return "" }
-	token, source, err := resolveMCPToken("https://a.example.com", getenv)
+	token, source, err := resolveGiteaToken("https://a.example.com", getenv)
 	if err != nil || token != "store-a" || !strings.Contains(source, "@alice") {
 		t.Fatalf("应从凭据库取令牌：token=%q source=%q err=%v", token, source, err)
 	}
 	// 库中没有的站点不借用其他站点的令牌
-	if token, _, err := resolveMCPToken("https://b.example.com", getenv); err != nil || token != "" {
+	if token, _, err := resolveGiteaToken("https://b.example.com", getenv); err != nil || token != "" {
 		t.Fatalf("未知站点应无令牌：token=%q err=%v", token, err)
 	}
 	// ASSISTANT_CREDENTIALS 显式指定凭据库位置
@@ -75,7 +74,7 @@ func TestMCPTokenFromCredentialsStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("ASSISTANT_CREDENTIALS", overridePath)
-	if token, source, err := resolveMCPToken("https://a.example.com", getenv); err != nil || token != "store-b" || !strings.Contains(source, "@carol") {
+	if token, source, err := resolveGiteaToken("https://a.example.com", getenv); err != nil || token != "store-b" || !strings.Contains(source, "@carol") {
 		t.Fatalf("ASSISTANT_CREDENTIALS 覆盖失败：token=%q source=%q err=%v", token, source, err)
 	}
 }
@@ -107,12 +106,12 @@ func TestMCPTokenIsolation(t *testing.T) {
 		{"https://admin.example.com", ""},
 	} {
 		t.Run(tc.host, func(t *testing.T) {
-			token, _, err := resolveMCPToken(tc.host, getenv)
+			token, _, err := resolveGiteaToken(tc.host, getenv)
 			if err != nil || token != tc.want {
 				t.Fatalf("token = %q, err = %v; want %q", token, err, tc.want)
 			}
 			if tc.want == "" {
-				_, err := ResolveMCP(context.Background(), MCPOptions{Host: tc.host, Getenv: getenv})
+				_, err := ResolveGitea(t.Context(), GiteaOptions{Host: tc.host, Getenv: getenv})
 				if err == nil || !strings.Contains(err.Error(), "assistant login add "+tc.host) {
 					t.Fatalf("expected host-specific login guidance, got %v", err)
 				}
@@ -138,7 +137,7 @@ func TestMCPTokenExplicitOverrides(t *testing.T) {
 			getenv := func(key string) string {
 				return map[string]string{"GITEA_ACCESS_TOKEN": tc.envToken, "GITEA_ACCESS_TOKEN_FILE": tc.file}[key]
 			}
-			token, _, err := resolveMCPToken("https://a.example.com", getenv)
+			token, _, err := resolveGiteaToken("https://a.example.com", getenv)
 			if (err != nil) != tc.wantErr || token != tc.want {
 				t.Fatalf("token = %q, err = %v", token, err)
 			}

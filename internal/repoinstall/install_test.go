@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -362,74 +361,6 @@ func TestInstallSkipsSkillsWithNoneSource(t *testing.T) {
 	}
 	if called {
 		t.Error("--skills-source none 时不应调用 skills CLI")
-	}
-}
-
-func TestResolveMCPFromGitRemote(t *testing.T) {
-	dir := t.TempDir()
-	if output, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v %s", err, output)
-	}
-	if output, err := exec.Command("git", "-C", dir, "remote", "add", "origin",
-		"http://gitea.example.com:3000/owner/repo.git").CombinedOutput(); err != nil {
-		t.Fatalf("git remote: %v %s", err, output)
-	}
-	t.Setenv("GITEA_ACCESS_TOKEN", "dev-token")
-	spec, err := ResolveMCP(context.Background(), MCPOptions{
-		Dir:   dir,
-		Probe: func(host string) bool { return host == "http://gitea.example.com:3000" },
-	})
-	if err != nil {
-		t.Fatalf("ResolveMCP() error = %v", err)
-	}
-	if spec.Host != "http://gitea.example.com:3000" || spec.HostSource != "remote origin" {
-		t.Errorf("host = %q (%s)", spec.Host, spec.HostSource)
-	}
-	if spec.Token != "dev-token" || spec.TokenSource != "GITEA_ACCESS_TOKEN" {
-		t.Errorf("token source = %q", spec.TokenSource)
-	}
-}
-
-// 多个 remote：origin 指向 GitHub 时探测并选中 Gitea remote。
-func TestResolveMCPPicksGiteaRemote(t *testing.T) {
-	dir := t.TempDir()
-	if output, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v %s", err, output)
-	}
-	for name, url := range map[string]string{
-		"origin": "git@github.com:owner/repo.git",
-		"gitea":  "http://gitea.example.com:3000/owner/repo.git",
-	} {
-		if output, err := exec.Command("git", "-C", dir, "remote", "add", name, url).CombinedOutput(); err != nil {
-			t.Fatalf("git remote add %s: %v %s", name, err, output)
-		}
-	}
-	t.Setenv("GITEA_ACCESS_TOKEN", "dev-token")
-	spec, err := ResolveMCP(context.Background(), MCPOptions{
-		Dir:   dir,
-		Probe: func(host string) bool { return host == "http://gitea.example.com:3000" },
-	})
-	if err != nil {
-		t.Fatalf("ResolveMCP() error = %v", err)
-	}
-	if spec.Host != "http://gitea.example.com:3000" || spec.HostSource != "remote gitea" {
-		t.Errorf("host = %q (%s), want gitea remote", spec.Host, spec.HostSource)
-	}
-}
-
-func TestMCPCommandDefaults(t *testing.T) {
-	command, args := mcpCommand(func(string) string { return "" })
-	if command != "go" || args[0] != "run" || !strings.Contains(args[1], "gitea-mcp") {
-		t.Errorf("mcpCommand() = %q %v", command, args)
-	}
-	command, args = mcpCommand(func(name string) string {
-		if name == "GITEA_MCP_BIN" {
-			return "/usr/local/bin/gitea-mcp"
-		}
-		return ""
-	})
-	if command != "/usr/local/bin/gitea-mcp" || args[0] != "-t" {
-		t.Errorf("mcpCommand(bin) = %q %v", command, args)
 	}
 }
 

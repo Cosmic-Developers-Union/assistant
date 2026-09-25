@@ -9,7 +9,7 @@ import (
 
 	"assistant/internal/credentials"
 	"assistant/internal/instances"
-	"assistant/internal/repoinstall"
+	"assistant/internal/mcps"
 )
 
 // 登录只影响目标 (host, user) 的凭据：其他站点的凭据不动，MCP 解析用登录写入的
@@ -60,7 +60,7 @@ func TestLoginCredentialIsolation(t *testing.T) {
 	if strings.Contains(out.String(), credential.Token) {
 		t.Fatal("登录输出泄露令牌")
 	}
-	spec, err := repoinstall.ResolveMCP(command.Context(), repoinstall.MCPOptions{
+	spec, err := mcps.ResolveGitea(command.Context(), mcps.GiteaOptions{
 		Host: server.URL, Getenv: func(string) string { return "" },
 	})
 	if err != nil || spec.Token != credential.Token {

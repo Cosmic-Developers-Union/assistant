@@ -1,4 +1,4 @@
-package repoinstall
+package mcps
 
 import (
 	"fmt"
@@ -8,7 +8,7 @@ import (
 	"assistant/internal/credentials"
 )
 
-// resolveMCPToken 选择与目标站点绑定的 MCP 令牌，按优先级：
+// resolveGiteaToken 选择与目标站点绑定的 MCP 令牌，按优先级：
 //
 //	GITEA_ACCESS_TOKEN > GITEA_ACCESS_TOKEN_FILE >
 //	credentials.json 里 (host, purpose=mcp) 的登录令牌
@@ -16,7 +16,7 @@ import (
 // 环境变量优先是为了让评审会话的显式注入（dispatcher 以 reviewer 身份启动会话）
 // 能覆盖本地登录；其余情况一律以凭据库为准。显式覆盖出错时不降级，避免配置错误
 // 意外切换调用身份。
-func resolveMCPToken(host string, getenv func(string) string) (string, string, error) {
+func resolveGiteaToken(host string, getenv func(string) string) (string, string, error) {
 	if token := strings.TrimSpace(getenv("GITEA_ACCESS_TOKEN")); token != "" {
 		return token, "GITEA_ACCESS_TOKEN", nil
 	}
@@ -48,4 +48,3 @@ func resolveMCPToken(host string, getenv func(string) string) (string, string, e
 	}
 	return credential.Token, "assistant login add (" + credentialPath + "，@" + credential.User + ")", nil
 }
-

@@ -1,7 +1,6 @@
-package repoinstall
+package mcps
 
 import (
-	"context"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -13,7 +12,7 @@ import (
 
 // 检出内没有 Gitea remote（乃至不是 git 检出）时：回退 config.json 里唯一启用
 // 的 gitea 通道。MCP 随任意目录启动，无上游不该让它起不来。
-func TestResolveMCPFallsBackToRegisteredConfig(t *testing.T) {
+func TestResolveGiteaFallsBackToRegisteredConfig(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	enabled, disabled := true, false
@@ -27,12 +26,12 @@ func TestResolveMCPFallsBackToRegisteredConfig(t *testing.T) {
 	t.Setenv("GITEA_ACCESS_TOKEN", "dev-token")
 	t.Setenv("ASSISTANT_CREDENTIALS", filepath.Join(t.TempDir(), "credentials.json"))
 
-	spec, err := ResolveMCP(context.Background(), MCPOptions{
+	spec, err := ResolveGitea(t.Context(), GiteaOptions{
 		Dir:   dir,
 		Probe: func(string) bool { return false }, // 探测全不中：等同无可用 remote
 	})
 	if err != nil {
-		t.Fatalf("ResolveMCP() error = %v", err)
+		t.Fatalf("ResolveGitea() error = %v", err)
 	}
 	if spec.Host != "https://gitea.example.com" || spec.HostSource != "config.json" {
 		t.Errorf("host = %q (%s), want config.json 里唯一启用通道", spec.Host, spec.HostSource)
@@ -40,7 +39,7 @@ func TestResolveMCPFallsBackToRegisteredConfig(t *testing.T) {
 }
 
 // config.json 登记了多个平台：无上游时不猜，显式报错点名 GITEA_HOST。
-func TestResolveMCPAmbiguousConfigHosts(t *testing.T) {
+func TestResolveGiteaAmbiguousConfigHosts(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	if err := instances.Save(configPath, &instances.File{Channels: []instances.Channel{
@@ -53,7 +52,7 @@ func TestResolveMCPAmbiguousConfigHosts(t *testing.T) {
 	t.Setenv("GITEA_ACCESS_TOKEN", "dev-token")
 	t.Setenv("ASSISTANT_CREDENTIALS", filepath.Join(t.TempDir(), "credentials.json"))
 
-	_, err := ResolveMCP(context.Background(), MCPOptions{
+	_, err := ResolveGitea(t.Context(), GiteaOptions{
 		Dir:   dir,
 		Probe: func(string) bool { return false },
 	})
@@ -64,7 +63,7 @@ func TestResolveMCPAmbiguousConfigHosts(t *testing.T) {
 }
 
 // 没有配置文件：回退凭据库里唯一登记过的站点。
-func TestResolveMCPFallsBackToCredentialHost(t *testing.T) {
+func TestResolveGiteaFallsBackToCredentialHost(t *testing.T) {
 	dir := t.TempDir()
 	credentialPath := filepath.Join(t.TempDir(), "credentials.json")
 	store := &credentials.File{}
@@ -77,12 +76,12 @@ func TestResolveMCPFallsBackToCredentialHost(t *testing.T) {
 	t.Setenv("ASSISTANT_CREDENTIALS", credentialPath)
 	t.Setenv("GITEA_ACCESS_TOKEN", "")
 
-	spec, err := ResolveMCP(context.Background(), MCPOptions{
+	spec, err := ResolveGitea(t.Context(), GiteaOptions{
 		Dir:   dir,
 		Probe: func(string) bool { return false },
 	})
 	if err != nil {
-		t.Fatalf("ResolveMCP() error = %v", err)
+		t.Fatalf("ResolveGitea() error = %v", err)
 	}
 	if spec.Host != "https://cred.example.com" || spec.HostSource != "credentials.json" {
 		t.Errorf("host = %q (%s), want credentials.json 里唯一站点", spec.Host, spec.HostSource)
@@ -93,12 +92,12 @@ func TestResolveMCPFallsBackToCredentialHost(t *testing.T) {
 }
 
 // 什么都不登记：报可行动错误，不猜。
-func TestResolveMCPNoHostAnywhere(t *testing.T) {
+func TestResolveGiteaNoHostAnywhere(t *testing.T) {
 	t.Setenv("ASSISTANT_CONFIG", filepath.Join(t.TempDir(), "config.json"))
 	t.Setenv("ASSISTANT_CREDENTIALS", filepath.Join(t.TempDir(), "credentials.json"))
 	t.Setenv("GITEA_ACCESS_TOKEN", "")
 
-	_, err := ResolveMCP(context.Background(), MCPOptions{
+	_, err := ResolveGitea(t.Context(), GiteaOptions{
 		Dir:   t.TempDir(),
 		Probe: func(string) bool { return false },
 	})
@@ -108,7 +107,7 @@ func TestResolveMCPNoHostAnywhere(t *testing.T) {
 }
 
 // remote 探测仍优先于登记状态：多上游检出里，命中探测的 remote 说了算。
-func TestResolveMCPRemoteBeatsRegisteredConfig(t *testing.T) {
+func TestResolveGiteaRemoteBeatsRegisteredConfig(t *testing.T) {
 	dir := t.TempDir()
 	if output, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v %s", err, output)
@@ -127,14 +126,82 @@ func TestResolveMCPRemoteBeatsRegisteredConfig(t *testing.T) {
 	t.Setenv("ASSISTANT_CREDENTIALS", filepath.Join(t.TempDir(), "credentials.json"))
 	t.Setenv("GITEA_ACCESS_TOKEN", "dev-token")
 
-	spec, err := ResolveMCP(context.Background(), MCPOptions{
+	spec, err := ResolveGitea(t.Context(), GiteaOptions{
 		Dir:   dir,
 		Probe: func(host string) bool { return host == "https://remote.example.com" },
 	})
 	if err != nil {
-		t.Fatalf("ResolveMCP() error = %v", err)
+		t.Fatalf("ResolveGitea() error = %v", err)
 	}
 	if spec.Host != "https://remote.example.com" || !strings.HasPrefix(spec.HostSource, "remote ") {
 		t.Errorf("host = %q (%s), want remote 探测优先", spec.Host, spec.HostSource)
+	}
+}
+
+func TestResolveGiteaFromGitRemote(t *testing.T) {
+	dir := t.TempDir()
+	if output, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v %s", err, output)
+	}
+	if output, err := exec.Command("git", "-C", dir, "remote", "add", "origin",
+		"http://gitea.example.com:3000/owner/repo.git").CombinedOutput(); err != nil {
+		t.Fatalf("git remote: %v %s", err, output)
+	}
+	t.Setenv("GITEA_ACCESS_TOKEN", "dev-token")
+	spec, err := ResolveGitea(t.Context(), GiteaOptions{
+		Dir:   dir,
+		Probe: func(host string) bool { return host == "http://gitea.example.com:3000" },
+	})
+	if err != nil {
+		t.Fatalf("ResolveGitea() error = %v", err)
+	}
+	if spec.Host != "http://gitea.example.com:3000" || spec.HostSource != "remote origin" {
+		t.Errorf("host = %q (%s)", spec.Host, spec.HostSource)
+	}
+	if spec.Token != "dev-token" || spec.TokenSource != "GITEA_ACCESS_TOKEN" {
+		t.Errorf("token source = %q", spec.TokenSource)
+	}
+}
+
+// 多个 remote：origin 指向 GitHub 时探测并选中 Gitea remote。
+func TestResolveGiteaPicksGiteaRemote(t *testing.T) {
+	dir := t.TempDir()
+	if output, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v %s", err, output)
+	}
+	for name, url := range map[string]string{
+		"origin": "git@github.com:owner/repo.git",
+		"gitea":  "http://gitea.example.com:3000/owner/repo.git",
+	} {
+		if output, err := exec.Command("git", "-C", dir, "remote", "add", name, url).CombinedOutput(); err != nil {
+			t.Fatalf("git remote add %s: %v %s", name, err, output)
+		}
+	}
+	t.Setenv("GITEA_ACCESS_TOKEN", "dev-token")
+	spec, err := ResolveGitea(t.Context(), GiteaOptions{
+		Dir:   dir,
+		Probe: func(host string) bool { return host == "http://gitea.example.com:3000" },
+	})
+	if err != nil {
+		t.Fatalf("ResolveGitea() error = %v", err)
+	}
+	if spec.Host != "http://gitea.example.com:3000" || spec.HostSource != "remote gitea" {
+		t.Errorf("host = %q (%s), want gitea remote", spec.Host, spec.HostSource)
+	}
+}
+
+func TestGiteaCommandDefaults(t *testing.T) {
+	command, args := giteaCommand(func(string) string { return "" })
+	if command != "go" || args[0] != "run" || !strings.Contains(args[1], "gitea-mcp") {
+		t.Errorf("giteaCommand() = %q %v", command, args)
+	}
+	command, args = giteaCommand(func(name string) string {
+		if name == "GITEA_MCP_BIN" {
+			return "/usr/local/bin/gitea-mcp"
+		}
+		return ""
+	})
+	if command != "/usr/local/bin/gitea-mcp" || args[0] != "-t" {
+		t.Errorf("giteaCommand(bin) = %q %v", command, args)
 	}
 }

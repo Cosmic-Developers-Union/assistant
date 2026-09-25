@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	"assistant/internal/repoinstall"
+	"assistant/internal/mcps"
 
 	"github.com/spf13/cobra"
 )
@@ -35,7 +35,7 @@ const mcpGiteaHelp = "自动检测当前项目的 Gitea 实例与当前开发者
 	"目录无关——从任何项目启动都解析同一份登录状态。"
 
 // newMCPGiteaCommand 拉起 gitea MCP：host 从 origin remote 推导，token 取当前
-// 开发者凭据。实现委托给 repoinstall.RunMCPGitea。
+// 开发者凭据。实现委托给 mcps.RunGitea。
 func newMCPGiteaCommand() *cobra.Command {
 	options := struct {
 		Host  string
@@ -48,7 +48,7 @@ func newMCPGiteaCommand() *cobra.Command {
 		Long:  mcpGiteaHelp,
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			return repoinstall.RunMCPGitea(command.Context(), repoinstall.MCPOptions{
+			return mcps.RunGitea(command.Context(), mcps.GiteaOptions{
 				Dir:   options.Dir,
 				Host:  options.Host,
 				Token: options.Token,
