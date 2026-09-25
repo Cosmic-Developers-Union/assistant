@@ -114,7 +114,6 @@ func newRootCommand(stdout, stderr io.Writer, checker, syncer, merger managerRun
 	command.AddCommand(checkCommand, syncCommand, autoMergeCommand)
 	command.AddCommand(newDispatcherCommands(&options.Repository, &options.ConfigPath)...)
 	command.AddCommand(newLoginCommand(&options.ConfigPath))
-	command.AddCommand(newReposCommand(&options.ConfigPath))
 	command.AddCommand(newWeixinCommand(&options.ConfigPath))
 	command.AddCommand(newQQCommand(&options.ConfigPath))
 	command.AddCommand(newTelegramCommand(&options.ConfigPath))
