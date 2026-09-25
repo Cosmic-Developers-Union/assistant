@@ -8,8 +8,8 @@ import (
 	"slices"
 	"strings"
 
-	"assistant/content"
-	"assistant/internal/claudecfg"
+	"github.com/Cosmic-Developers-Union/assistant/content"
+	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
 )
 
 // Finding 状态：doctor 按这些状态报告每一处 install 管理产物的现状。

@@ -25,7 +25,7 @@ import (
 	"sync"
 	"time"
 
-	"assistant/internal/status"
+	"github.com/Cosmic-Developers-Union/assistant/internal/status"
 )
 
 // 待办类型

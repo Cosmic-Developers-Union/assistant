@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"assistant/internal/claudecfg"
+	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
 )
 
 // 对话会话与评审会话共用 provider 体系：env/settings 注入 --settings，原生

@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"assistant/internal/claudecfg"
+	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
 )
 
 // createSessionConfigDir 创建会话临时配置目录（settings 与合并后的 MCP 配置

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"assistant/internal/claudecfg"
+	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
 )
 
 // 注册的 handler 在配置覆盖之上生效，并且不修改原始覆盖（会话间隔离）。

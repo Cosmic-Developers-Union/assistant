@@ -16,7 +16,7 @@ import (
 	"sort"
 	"strings"
 
-	"assistant/internal/claudecfg"
+	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
 )
 
 // Session 是一次会话的上下文：handler 可读元信息并就地修改三层覆盖。

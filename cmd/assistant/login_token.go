@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"assistant/internal/credentials"
-	"assistant/internal/setup"
+	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
+	"github.com/Cosmic-Developers-Union/assistant/internal/setup"
 
 	"github.com/spf13/cobra"
 )

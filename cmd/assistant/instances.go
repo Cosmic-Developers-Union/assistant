@@ -9,10 +9,10 @@ import (
 	"slices"
 	"strings"
 
-	"assistant/internal/config"
-	"assistant/internal/credentials"
-	"assistant/internal/instances"
-	"assistant/internal/status"
+	"github.com/Cosmic-Developers-Union/assistant/internal/config"
+	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/status"
 )
 
 // resolveInstanceFile 解析配置文件，显式模式，按优先级查找：

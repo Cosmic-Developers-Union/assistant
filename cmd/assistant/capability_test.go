@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"assistant/internal/credentials"
-	"assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
 )
 
 // 门禁只看记录在案的身份：非管理员立即拒绝，管理员或没有身份记录时不拦截。

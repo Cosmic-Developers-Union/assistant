@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	"assistant/internal/credentials"
+	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
 )
 
 // 凭据库是唯一的令牌来源：所有命令都通过这里按 (host, purpose) 取令牌。

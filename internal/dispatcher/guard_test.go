@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"assistant/internal/status"
+	"github.com/Cosmic-Developers-Union/assistant/internal/status"
 )
 
 // guardHarness 聚合守卫测试的桩：FollowUpMessages 可注入返回，调用留痕。

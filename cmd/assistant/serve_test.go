@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"assistant/internal/sessionstore"
+	"github.com/Cosmic-Developers-Union/assistant/internal/sessionstore"
 )
 
 // 服务端：令牌鉴权、push/list/read/search/conversations 全链路（借 sessionstore 客户端）。

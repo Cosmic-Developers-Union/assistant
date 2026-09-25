@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"assistant/internal/status"
+	"github.com/Cosmic-Developers-Union/assistant/internal/status"
 )
 
 func testConfig(overrides ...func(*Config)) Config {

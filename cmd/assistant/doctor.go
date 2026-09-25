@@ -8,13 +8,13 @@ import (
 	"os/exec"
 	"strings"
 
-	"assistant/internal/claudecfg"
-	"assistant/internal/config"
-	"assistant/internal/credentials"
-	"assistant/internal/dispatcher"
-	"assistant/internal/instances"
-	"assistant/internal/repoinstall"
-	"assistant/internal/status"
+	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
+	"github.com/Cosmic-Developers-Union/assistant/internal/config"
+	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
+	"github.com/Cosmic-Developers-Union/assistant/internal/dispatcher"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/repoinstall"
+	"github.com/Cosmic-Developers-Union/assistant/internal/status"
 
 	"github.com/spf13/cobra"
 )

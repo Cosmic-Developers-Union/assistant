@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"assistant/internal/claudecfg"
+	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
 )
 
 // 稳定会话 ID：同待办同锚点确定、head 变化换新、格式为合法 UUID。

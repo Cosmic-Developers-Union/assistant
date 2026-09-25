@@ -1,10 +1,6 @@
 package main
 
 import (
-	"assistant/internal/config"
-	"assistant/internal/credentials"
-	"assistant/internal/instances"
-	"assistant/schema"
 	"bufio"
 	"encoding/json"
 	"fmt"
@@ -12,6 +8,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/Cosmic-Developers-Union/assistant/internal/config"
+	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/schema"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"

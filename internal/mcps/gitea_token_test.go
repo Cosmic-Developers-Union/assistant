@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"assistant/internal/credentials"
+	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
 )
 
 // xdgCredentialPath 返回给定 XDG_CONFIG_HOME 下的凭据库标准落点。

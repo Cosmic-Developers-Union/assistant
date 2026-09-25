@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"assistant/internal/claudecfg"
+	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
 )
 
 // 自检只发一个 max_tokens=1 的最小请求：够区分「凭据/端点对得上」与「被拒绝」，

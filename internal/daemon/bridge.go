@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"assistant/internal/weixin"
+	"github.com/Cosmic-Developers-Union/assistant/internal/weixin"
 )
 
 // messageTypeUser 是 WeixinMessage.message_type 中「用户」的取值（2 是 Bot）。

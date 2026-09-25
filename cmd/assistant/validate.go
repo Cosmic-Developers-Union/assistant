@@ -8,11 +8,11 @@ import (
 	"sort"
 	"strings"
 
-	builtinagents "assistant/internal/agents"
-	"assistant/internal/claudecfg"
-	"assistant/internal/credentials"
-	"assistant/internal/instances"
-	"assistant/internal/provider"
+	builtinagents "github.com/Cosmic-Developers-Union/assistant/internal/agents"
+	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
+	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/provider"
 
 	"github.com/spf13/cobra"
 )

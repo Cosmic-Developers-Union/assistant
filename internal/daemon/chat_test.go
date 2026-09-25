@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"assistant/internal/claudecfg"
-	"assistant/internal/sessionstore"
+	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
+	"github.com/Cosmic-Developers-Union/assistant/internal/sessionstore"
 )
 
 // 对话会话按配置走 --bare（最小模式），并把自举 MCP 之外的上下文钉死为显式参数。

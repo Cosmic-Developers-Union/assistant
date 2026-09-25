@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"assistant/internal/claudecfg"
+	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
 )
 
 // 令牌简写按预设落到正确的环境变量，预设默认（端点/超时/模型映射）自动打底。

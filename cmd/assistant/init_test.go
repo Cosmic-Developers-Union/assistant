@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
 
 	"github.com/spf13/cobra"
 )

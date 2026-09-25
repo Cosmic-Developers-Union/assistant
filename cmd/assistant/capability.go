@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	"assistant/internal/credentials"
+	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
 )
 
 // requireAdminIdentity 是管理操作的前置门禁：本地凭据库里记录了该站点的登录身份

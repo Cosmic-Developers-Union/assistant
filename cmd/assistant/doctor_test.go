@@ -4,7 +4,7 @@ import (
 	"os/exec"
 	"testing"
 
-	"assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
 )
 
 func gitRemoteFixture(t *testing.T) string {

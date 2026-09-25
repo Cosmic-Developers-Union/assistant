@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"assistant/internal/claudecfg"
-	"assistant/internal/dispatcher"
-	"assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
+	"github.com/Cosmic-Developers-Union/assistant/internal/dispatcher"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
 
 	"github.com/spf13/cobra"
 )

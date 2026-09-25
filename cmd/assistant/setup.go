@@ -1,13 +1,14 @@
 package main
 
 import (
-	"assistant/internal/config"
-	"assistant/internal/credentials"
-	"assistant/internal/instances"
-	"assistant/internal/setup"
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/Cosmic-Developers-Union/assistant/internal/config"
+	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/setup"
 
 	"github.com/spf13/cobra"
 )

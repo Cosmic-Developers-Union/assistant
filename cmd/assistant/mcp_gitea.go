@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	"assistant/internal/mcps"
+	"github.com/Cosmic-Developers-Union/assistant/internal/mcps"
 
 	"github.com/spf13/cobra"
 )

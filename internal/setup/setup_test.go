@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"assistant/internal/credentials"
-	"assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
 )
 
 type fakeAdmin struct {

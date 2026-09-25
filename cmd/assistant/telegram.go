@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"assistant/internal/instances"
-	"assistant/internal/telegram"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/telegram"
 
 	"github.com/spf13/cobra"
 )

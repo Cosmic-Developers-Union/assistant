@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"assistant/internal/envref"
-	"assistant/internal/instances"
-	"assistant/internal/sessionstore"
+	"github.com/Cosmic-Developers-Union/assistant/internal/envref"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/sessionstore"
 
 	"github.com/spf13/cobra"
 )

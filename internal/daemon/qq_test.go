@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"assistant/internal/qq"
+	"github.com/Cosmic-Developers-Union/assistant/internal/qq"
 	"github.com/coder/websocket"
 )
 

@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"assistant/internal/sessionstore"
+	"github.com/Cosmic-Developers-Union/assistant/internal/sessionstore"
 
 	"github.com/spf13/cobra"
 )

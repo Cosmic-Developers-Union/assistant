@@ -23,8 +23,8 @@ import (
 	"regexp"
 	"strings"
 
-	"assistant/internal/credentials"
-	"assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
 )
 
 // Options 是 setup 的输入。

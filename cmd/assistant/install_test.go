@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"assistant/internal/repoinstall"
+	"github.com/Cosmic-Developers-Union/assistant/internal/repoinstall"
 )
 
 // TestInstallGiteaActionsWritesWorkflow 确认 --dir / --image 透传到

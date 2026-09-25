@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
 )
 
 // 协议常量。

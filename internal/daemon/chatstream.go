@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"assistant/internal/claudecfg"
+	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
 )
 
 // chatOutcome 是对话会话一轮的归集结果：从 claude 的 stream-json 里累积出来。

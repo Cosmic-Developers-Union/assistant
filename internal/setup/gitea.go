@@ -14,9 +14,9 @@ import (
 
 	gitea "gitea.dev/sdk"
 
-	"assistant/internal/credentials"
-	"assistant/internal/instances"
-	"assistant/internal/status"
+	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/status"
 )
 
 const (

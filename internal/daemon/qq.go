@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"assistant/internal/qq"
+	"github.com/Cosmic-Developers-Union/assistant/internal/qq"
 )
 
 // DefaultQQSplitLimit 是 QQ 回复切块的缺省上限（平台对 content 长度有限制）。

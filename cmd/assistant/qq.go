@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"assistant/internal/envref"
-	"assistant/internal/instances"
-	"assistant/internal/qq"
+	"github.com/Cosmic-Developers-Union/assistant/internal/envref"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/qq"
 
 	"github.com/spf13/cobra"
 )

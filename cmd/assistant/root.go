@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"assistant/internal/config"
-	"assistant/internal/status"
+	"github.com/Cosmic-Developers-Union/assistant/internal/config"
+	"github.com/Cosmic-Developers-Union/assistant/internal/status"
 
 	"github.com/spf13/cobra"
 )

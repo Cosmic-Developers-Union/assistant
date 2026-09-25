@@ -1,4 +1,4 @@
-module assistant
+module github.com/Cosmic-Developers-Union/assistant
 
 go 1.27.0
 

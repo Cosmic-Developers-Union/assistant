@@ -19,10 +19,10 @@ import (
 	"strconv"
 	"strings"
 
-	builtinagents "assistant/internal/agents"
-	"assistant/internal/claudecfg"
-	"assistant/internal/envref"
-	"assistant/internal/provider"
+	builtinagents "github.com/Cosmic-Developers-Union/assistant/internal/agents"
+	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
+	"github.com/Cosmic-Developers-Union/assistant/internal/envref"
+	"github.com/Cosmic-Developers-Union/assistant/internal/provider"
 )
 
 // 默认机器人账号名：reviewer 是内容评审者，merger 是状态评审者（会签/合并）。

@@ -12,10 +12,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"assistant/internal/credentials"
-	"assistant/internal/dispatcher"
-	"assistant/internal/instances"
-	"assistant/internal/status"
+	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
+	"github.com/Cosmic-Developers-Union/assistant/internal/dispatcher"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/status"
 )
 
 // DefaultGiteaModule 指定未配置二进制覆盖时使用的官方 Gitea MCP 模块。

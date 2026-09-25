@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	"assistant/internal/credentials"
+	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
 )
 
 // resolveGiteaToken 选择与目标站点绑定的 MCP 令牌，按优先级：

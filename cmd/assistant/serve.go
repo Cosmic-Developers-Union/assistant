@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"assistant/internal/sessionstore"
+	"github.com/Cosmic-Developers-Union/assistant/internal/sessionstore"
 
 	"github.com/spf13/cobra"
 )

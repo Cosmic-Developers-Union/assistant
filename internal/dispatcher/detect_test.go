@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"assistant/internal/status"
+	"github.com/Cosmic-Developers-Union/assistant/internal/status"
 )
 
 var testRepo = status.Repository{Owner: "owner", Name: "repo"}

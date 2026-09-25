@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"assistant/internal/envref"
+	"github.com/Cosmic-Developers-Union/assistant/internal/envref"
 )
 
 // 载入即规范化：instances 迁移为 gitea 通道（host 去尾斜杠、账号缺省、repo

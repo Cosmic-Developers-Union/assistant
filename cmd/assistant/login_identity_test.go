@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"assistant/internal/credentials"
-	"assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
 )
 
 // loginServer 模拟登录用到的最小 API 面：

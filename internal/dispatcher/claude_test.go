@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"assistant/internal/claudecfg"
+	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
 )
 
 // writeSessionMCPConfig：assistant 指定的 gitea server 恒注入（覆盖仓库里的同名

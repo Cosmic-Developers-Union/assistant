@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"assistant/content"
-	"assistant/internal/claudecfg"
+	"github.com/Cosmic-Developers-Union/assistant/content"
+	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
 )
 
 // Options 控制 install/uninstall 的行为。

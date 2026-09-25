@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"time"
 
-	"assistant/internal/status"
+	"github.com/Cosmic-Developers-Union/assistant/internal/status"
 )
 
 // PullVerdict 是 PR 完成判定结论：completed 之外给出依据；HeadMoved=true 时

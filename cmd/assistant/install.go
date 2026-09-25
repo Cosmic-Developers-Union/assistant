@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	"assistant/internal/repoinstall"
+	"github.com/Cosmic-Developers-Union/assistant/internal/repoinstall"
 
 	"github.com/spf13/cobra"
 )

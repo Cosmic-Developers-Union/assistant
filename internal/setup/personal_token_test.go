@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"assistant/internal/credentials"
+	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
 )
 
 // personalTokenServer 模拟 Gitea 的个人令牌端点（Basic Auth + X-Gitea-OTP）。

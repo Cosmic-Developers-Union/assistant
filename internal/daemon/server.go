@@ -16,8 +16,8 @@ import (
 	"strings"
 	"time"
 
-	"assistant/internal/instances"
-	"assistant/internal/statestore"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/statestore"
 )
 
 // Endpoint 是 daemon 的 API 端点凭据，写入 <配置目录>/daemon.json 供 MCP 自举发现。

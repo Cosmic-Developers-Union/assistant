@@ -30,10 +30,10 @@ import (
 	"syscall"
 	"time"
 
-	builtinagents "assistant/internal/agents"
-	"assistant/internal/claudecfg"
-	"assistant/internal/provider"
-	"assistant/skills"
+	builtinagents "github.com/Cosmic-Developers-Union/assistant/internal/agents"
+	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
+	"github.com/Cosmic-Developers-Union/assistant/internal/provider"
+	"github.com/Cosmic-Developers-Union/assistant/skills"
 )
 
 // SessionOutcome 是一次 claude 会话的归集结果。

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"assistant/schema"
+	"github.com/Cosmic-Developers-Union/assistant/schema"
 )
 
 // schemaDefinition 是 schema 里的一段定义（只取校验需要的部分）。

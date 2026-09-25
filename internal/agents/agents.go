@@ -11,7 +11,7 @@ import (
 	"strings"
 	"sync"
 
-	"assistant/skills"
+	"github.com/Cosmic-Developers-Union/assistant/skills"
 )
 
 // MainAgentName 是内置主 agent 的名字（runtime.main_agent 的缺省值）。

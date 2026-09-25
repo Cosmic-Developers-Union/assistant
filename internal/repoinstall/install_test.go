@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"assistant/content"
-	"assistant/internal/claudecfg"
-	"assistant/skills"
+	"github.com/Cosmic-Developers-Union/assistant/content"
+	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
+	"github.com/Cosmic-Developers-Union/assistant/skills"
 )
 
 func testOptions(t *testing.T) Options {

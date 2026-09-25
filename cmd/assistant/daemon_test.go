@@ -9,8 +9,8 @@ import (
 	"sync"
 	"testing"
 
-	"assistant/internal/daemon"
-	"assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/daemon"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
 
 	"github.com/spf13/cobra"
 )

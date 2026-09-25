@@ -5,7 +5,7 @@ import (
 	"slices"
 	"strings"
 
-	"assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
 )
 
 // gitea 通道视图 helpers：登记命令族（login/repos/setup/init/doctor）统一在

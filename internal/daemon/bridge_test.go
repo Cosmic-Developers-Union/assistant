@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"assistant/internal/weixin"
+	"github.com/Cosmic-Developers-Union/assistant/internal/weixin"
 )
 
 // sentRecorder 是并发安全的发送记录（服务端协程写、测试协程读）。

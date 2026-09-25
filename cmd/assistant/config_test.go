@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"assistant/schema"
+	"github.com/Cosmic-Developers-Union/assistant/schema"
 )
 
 // writeCredentials 写一份 credentials.json：每个 host 一条登录身份 + 四种用途令牌

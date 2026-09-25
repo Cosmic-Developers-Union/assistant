@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"assistant/internal/credentials"
-	"assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
 )
 
 // 检出内没有 Gitea remote（乃至不是 git 检出）时：回退 config.json 里唯一启用

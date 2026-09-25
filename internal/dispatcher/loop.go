@@ -23,8 +23,8 @@ import (
 	"sync"
 	"time"
 
-	"assistant/internal/claudecfg"
-	"assistant/internal/status"
+	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
+	"github.com/Cosmic-Developers-Union/assistant/internal/status"
 )
 
 // Deps 是主循环的依赖：CLI 注入真实实现，测试注入桩。

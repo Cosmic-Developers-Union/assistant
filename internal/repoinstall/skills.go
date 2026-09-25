@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"assistant/skills"
+	"github.com/Cosmic-Developers-Union/assistant/skills"
 )
 
 // skillsAgents 把内部工具名映射为 skills CLI 的 agent 名（去重）。

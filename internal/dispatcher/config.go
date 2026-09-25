@@ -15,9 +15,9 @@ import (
 	"strings"
 	"time"
 
-	"assistant/internal/claudecfg"
-	"assistant/internal/instances"
-	"assistant/internal/status"
+	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/status"
 )
 
 // DefaultConcurrency 是每轮待办处理的会话并发数缺省值（--concurrency /

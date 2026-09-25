@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
 )
 
 func TestStoreLifecycle(t *testing.T) {

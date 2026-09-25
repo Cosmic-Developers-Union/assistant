@@ -7,7 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"assistant/internal/status"
+	"github.com/Cosmic-Developers-Union/assistant/internal/status"
 )
 
 var version = "dev"

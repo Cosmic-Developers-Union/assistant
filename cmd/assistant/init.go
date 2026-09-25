@@ -9,12 +9,12 @@ import (
 	"os"
 	"strings"
 
-	"assistant/internal/credentials"
-	"assistant/internal/dispatcher"
-	"assistant/internal/instances"
-	"assistant/internal/repoinstall"
-	"assistant/internal/setup"
-	"assistant/internal/status"
+	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
+	"github.com/Cosmic-Developers-Union/assistant/internal/dispatcher"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/repoinstall"
+	"github.com/Cosmic-Developers-Union/assistant/internal/setup"
+	"github.com/Cosmic-Developers-Union/assistant/internal/status"
 
 	"github.com/spf13/cobra"
 )

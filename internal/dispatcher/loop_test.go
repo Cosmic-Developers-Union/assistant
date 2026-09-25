@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"assistant/internal/status"
+	"github.com/Cosmic-Developers-Union/assistant/internal/status"
 )
 
 // planDeps 构造 dry-run 用依赖：副作用函数一律「即失败」桩。

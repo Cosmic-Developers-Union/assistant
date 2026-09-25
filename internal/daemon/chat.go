@@ -15,12 +15,12 @@ import (
 	"sync"
 	"time"
 
-	builtinagents "assistant/internal/agents"
-	"assistant/internal/claudecfg"
-	"assistant/internal/conversations"
-	"assistant/internal/instances"
-	"assistant/internal/provider"
-	"assistant/internal/sessionstore"
+	builtinagents "github.com/Cosmic-Developers-Union/assistant/internal/agents"
+	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
+	"github.com/Cosmic-Developers-Union/assistant/internal/conversations"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/provider"
+	"github.com/Cosmic-Developers-Union/assistant/internal/sessionstore"
 
 	jsonv2 "encoding/json/v2"
 )

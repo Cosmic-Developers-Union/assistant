@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
 )
 
 // 旧 run.yaml 导入：运行参数进 runtime、monitor 并入 gitea 通道（token/repos）、

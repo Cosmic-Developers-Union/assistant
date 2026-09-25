@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"assistant/internal/status"
+	"github.com/Cosmic-Developers-Union/assistant/internal/status"
 )
 
 var since = time.Date(2026, 9, 6, 5, 0, 0, 0, time.UTC)

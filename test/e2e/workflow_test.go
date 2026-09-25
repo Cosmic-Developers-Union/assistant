@@ -19,11 +19,11 @@ import (
 	"testing"
 	"time"
 
-	"assistant/internal/credentials"
-	"assistant/internal/repoinstall"
-	"assistant/internal/setup"
-	"assistant/internal/status"
-	"assistant/skills"
+	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
+	"github.com/Cosmic-Developers-Union/assistant/internal/repoinstall"
+	"github.com/Cosmic-Developers-Union/assistant/internal/setup"
+	"github.com/Cosmic-Developers-Union/assistant/internal/status"
+	"github.com/Cosmic-Developers-Union/assistant/skills"
 )
 
 const (

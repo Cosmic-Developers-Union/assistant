@@ -1,8 +1,6 @@
 package main
 
 import (
-	"assistant/internal/credentials"
-	"assistant/internal/status"
 	"bytes"
 	"context"
 	"fmt"
@@ -10,6 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
+	"github.com/Cosmic-Developers-Union/assistant/internal/status"
 )
 
 func TestRootCommandShowsHelpWithoutArguments(t *testing.T) {

@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"assistant/internal/instances"
-	"assistant/internal/runcfg"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/runcfg"
 
 	"github.com/spf13/cobra"
 )

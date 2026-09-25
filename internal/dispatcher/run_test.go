@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"assistant/internal/claudecfg"
+	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
 )
 
 func TestBuildPromptPull(t *testing.T) {

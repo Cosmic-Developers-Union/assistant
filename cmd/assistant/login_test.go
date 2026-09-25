@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"assistant/internal/credentials"
-	"assistant/internal/instances"
-	"assistant/internal/mcps"
+	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/mcps"
 )
 
 // 登录只影响目标 (host, user) 的凭据：其他站点的凭据不动，MCP 解析用登录写入的

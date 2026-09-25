@@ -17,8 +17,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"assistant/internal/instances"
-	"assistant/internal/provider"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/provider"
 
 	"gopkg.in/yaml.v3"
 )

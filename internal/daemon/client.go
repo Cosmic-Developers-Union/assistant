@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
 )
 
 // EndpointEnv / EndpointPathEnv 是自举发现的覆盖点（mcp daemon 与测试用）。

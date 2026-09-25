@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"assistant/internal/credentials"
+	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
 )
 
 // seedTokenStore 写一份多站点/多账号/多用途的凭据库，供 token 命令族测试共用。

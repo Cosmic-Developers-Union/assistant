@@ -6,7 +6,7 @@ import (
 	"slices"
 	"strings"
 
-	"assistant/internal/telegram"
+	"github.com/Cosmic-Developers-Union/assistant/internal/telegram"
 )
 
 // DefaultTelegramSplitLimit 是 Telegram 回复切块的缺省上限（平台文本上限 4096）。

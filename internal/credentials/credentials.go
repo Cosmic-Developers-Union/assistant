@@ -22,7 +22,7 @@ import (
 	"strings"
 	"time"
 
-	"assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
 )
 
 // 用途常量。新用途必须在这里登记，避免拼写漂移。
