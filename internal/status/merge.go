@@ -26,7 +26,7 @@ import (
 //
 // 新规范：合并不再依赖标签——门禁是内容评审者（默认 ai）对当前 head 的官方
 // 批准（approved、未 dismiss、CommitID==head）。标签（status/approved、
-// awaiting/merge 等）由 sync 继续维护，但只是观测产物。
+// awaiting/merge 等）由 action label-sync 继续维护，但只是观测产物。
 func (m *Manager) AutoMerge(ctx context.Context) error {
 	if err := m.ReconcileReviewRequests(ctx); err != nil {
 		return err

@@ -1,6 +1,6 @@
 //go:build e2e
 
-// 工作流级 e2e：真实 act_runner 执行仓库内 workflow（sync + automerge），覆盖
+// 工作流级 e2e：真实 act_runner 执行仓库内 workflow（action label-sync + action automerge），覆盖
 // 三种身份：admin（仓库 owner）、writer（写权限协作者）、reader（只读协作者），
 // 以及唯一需要配置的仓库 secret（merge 令牌）。身份名是约定：内容评审 ai、
 // 状态评审/合并 merge。

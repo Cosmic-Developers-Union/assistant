@@ -1,6 +1,6 @@
 ## Labels
 
-当前标签体系服务于 Issue 和 PR。带 `/` 前缀的标签是 Gitea scoped label，同一前缀下互斥。体系由 `assistant sync`
+当前标签体系服务于 Issue 和 PR。带 `/` 前缀的标签是 Gitea scoped label，同一前缀下互斥。体系由 `assistant action label-sync`
 强制收敛（补齐缺失、scoped 设为互斥、删除不在体系内的标签），不要创建或手改体系外标签：
 
 - 类型：`type/bug`、`type/feature`、`type/refactor`、`type/task`

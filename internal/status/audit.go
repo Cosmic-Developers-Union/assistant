@@ -135,7 +135,7 @@ func (c *Client) AuditRepository(ctx context.Context, repository Repository, opt
 		}
 		for _, label := range labels {
 			if !expected[label.Name] {
-				add("label "+label.Name, AuditStatusOutdated, "不在规范标签体系中（sync 会删除）")
+				add("label "+label.Name, AuditStatusOutdated, "不在规范标签体系中（action label-sync 会删除）")
 			}
 		}
 	}

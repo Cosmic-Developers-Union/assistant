@@ -27,7 +27,7 @@ type commandOptions struct {
 	ConfigPath string
 }
 
-func newRootCommand(stdout, stderr io.Writer, checker, syncer, merger managerRunner) *cobra.Command {
+func newRootCommand(stdout, stderr io.Writer, checker, labelSyncer, merger managerRunner) *cobra.Command {
 	options := commandOptions{}
 	command := &cobra.Command{
 		Use:           "assistant",
@@ -41,8 +41,8 @@ func newRootCommand(stdout, stderr io.Writer, checker, syncer, merger managerRun
 			return command.Help()
 		},
 		Example: "  assistant check\n" +
-			"  assistant sync --verbose\n" +
-			"  assistant automerge --verbose\n" +
+			"  assistant action label-sync --verbose\n" +
+			"  assistant action automerge --verbose\n" +
 			"  assistant run --dry-run\n" +
 			"  assistant review 58",
 	}
@@ -89,15 +89,15 @@ func newRootCommand(stdout, stderr io.Writer, checker, syncer, merger managerRun
 		15*time.Second,
 		"等待模式下的轮询间隔（仅在 --wait 或 --timeout > 0 时生效）",
 	)
-	syncCommand := &cobra.Command{
-		Use:   "sync",
+	labelSyncCommand := &cobra.Command{
+		Use:   "label-sync",
 		Short: "规范 Issue 标签并把 PR 原生评审状态同步为状态标签（单次执行，供 CI 事件驱动）",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			if err := options.validate(); err != nil {
 				return err
 			}
-			return syncer(command.Context(), stdout, stderr, options)
+			return labelSyncer(command.Context(), stdout, stderr, options)
 		},
 	}
 	autoMergeCommand := &cobra.Command{
@@ -111,7 +111,13 @@ func newRootCommand(stdout, stderr io.Writer, checker, syncer, merger managerRun
 			return merger(command.Context(), stdout, stderr, options)
 		},
 	}
-	command.AddCommand(checkCommand, syncCommand, autoMergeCommand)
+	actionCommand := &cobra.Command{
+		Use:   "action",
+		Short: "执行仓库自动化动作（标签同步与自动合并）",
+		Args:  cobra.NoArgs,
+	}
+	actionCommand.AddCommand(labelSyncCommand, autoMergeCommand)
+	command.AddCommand(checkCommand, actionCommand)
 	command.AddCommand(newDispatcherCommands(&options.Repository, &options.ConfigPath)...)
 	command.AddCommand(newLoginCommand(&options.ConfigPath))
 	command.AddCommand(newWeixinCommand(&options.ConfigPath))
@@ -212,7 +218,7 @@ func waitForReport(
 	}
 }
 
-func runSync(ctx context.Context, _, stderr io.Writer, options commandOptions) error {
+func runLabelSync(ctx context.Context, _, stderr io.Writer, options commandOptions) error {
 	_, file, err := resolveInstanceFile(options)
 	if err != nil {
 		return err

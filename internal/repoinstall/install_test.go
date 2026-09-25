@@ -114,8 +114,8 @@ func TestInstallCreatesArtifactsAndIsIdempotent(t *testing.T) {
 		"image: " + DefaultImage,
 		"GITEA_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
 		"GITEA_ACCESS_TOKEN: ${{ secrets.MERGE_TOKEN }}",
-		"assistant sync --verbose",
-		"assistant automerge --verbose",
+		"assistant action label-sync --verbose",
+		"assistant action automerge --verbose",
 		// Gitea/GitHub 只有 types 映射形式才注册事件；列表简写会被静默忽略
 		"types: [opened, edited, closed, reopened, labeled, unlabeled]",
 	} {

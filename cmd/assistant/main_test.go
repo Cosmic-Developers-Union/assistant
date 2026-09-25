@@ -38,10 +38,8 @@ func TestRootCommandShowsHelpWithoutArguments(t *testing.T) {
 	output := stdout.String()
 	if !strings.Contains(output, "Available Commands:") ||
 		!strings.Contains(output, "check") ||
-		!strings.Contains(output, "sync") ||
-		!strings.Contains(output, "automerge") ||
+		!strings.Contains(output, "action") ||
 		!strings.Contains(output, "setup") ||
-		!strings.Contains(output, "actions") ||
 		!strings.Contains(output, "install") ||
 		!strings.Contains(output, "uninstall") ||
 		!strings.Contains(output, "mcp") ||
@@ -85,15 +83,23 @@ func TestUnknownCommandFails(t *testing.T) {
 }
 
 func TestCommandsAcceptVerboseAndRepoFlags(t *testing.T) {
-	for _, subcommand := range []string{"check", "sync", "automerge"} {
-		t.Run(subcommand, func(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		args []string
+	}{
+		{"check", []string{"check"}},
+		{"action label-sync", []string{"action", "label-sync"}},
+		{"action automerge", []string{"action", "automerge"}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
 			var got commandOptions
 			runner := func(_ context.Context, _, _ io.Writer, options commandOptions) error {
 				got = options
 				return nil
 			}
 			command := newRootCommand(&bytes.Buffer{}, &bytes.Buffer{}, runner, runner, runner)
-			command.SetArgs([]string{"--repo", "acme/video", subcommand, "-v"})
+			args := append([]string{"--repo", "acme/video"}, testCase.args...)
+			command.SetArgs(append(args, "-v"))
 
 			if err := command.ExecuteContext(t.Context()); err != nil {
 				t.Fatalf("ExecuteContext() error = %v", err)
@@ -106,8 +112,16 @@ func TestCommandsAcceptVerboseAndRepoFlags(t *testing.T) {
 }
 
 func TestCommandsDispatchToMatchingRunner(t *testing.T) {
-	for _, subcommand := range []string{"check", "sync", "automerge"} {
-		t.Run(subcommand, func(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"check", []string{"check"}, "check"},
+		{"action label-sync", []string{"action", "label-sync"}, "label-sync"},
+		{"action automerge", []string{"action", "automerge"}, "automerge"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
 			var called []string
 			command := newRootCommand(
 				&bytes.Buffer{},
@@ -117,7 +131,7 @@ func TestCommandsDispatchToMatchingRunner(t *testing.T) {
 					return nil
 				},
 				func(context.Context, io.Writer, io.Writer, commandOptions) error {
-					called = append(called, "sync")
+					called = append(called, "label-sync")
 					return nil
 				},
 				func(context.Context, io.Writer, io.Writer, commandOptions) error {
@@ -125,27 +139,34 @@ func TestCommandsDispatchToMatchingRunner(t *testing.T) {
 					return nil
 				},
 			)
-			command.SetArgs([]string{subcommand})
+			command.SetArgs(testCase.args)
 
 			if err := command.ExecuteContext(t.Context()); err != nil {
 				t.Fatalf("ExecuteContext() error = %v", err)
 			}
-			if len(called) != 1 || called[0] != subcommand {
-				t.Errorf("called = %v, want [%s]", called, subcommand)
+			if len(called) != 1 || called[0] != testCase.want {
+				t.Errorf("called = %v, want [%s]", called, testCase.want)
 			}
 		})
 	}
 }
 
 func TestCommandsRejectInvalidRepository(t *testing.T) {
-	for _, subcommand := range []string{"check", "sync", "automerge"} {
-		t.Run(subcommand, func(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		args []string
+	}{
+		{"check", []string{"check"}},
+		{"action label-sync", []string{"action", "label-sync"}},
+		{"action automerge", []string{"action", "automerge"}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
 			runner := func(context.Context, io.Writer, io.Writer, commandOptions) error {
 				t.Fatal("runner was called")
 				return nil
 			}
 			command := newRootCommand(&bytes.Buffer{}, &bytes.Buffer{}, runner, runner, runner)
-			command.SetArgs([]string{"--repo", "video", subcommand})
+			command.SetArgs(append([]string{"--repo", "video"}, testCase.args...))
 			if err := command.ExecuteContext(t.Context()); err == nil {
 				t.Fatal("ExecuteContext() error = nil")
 			}

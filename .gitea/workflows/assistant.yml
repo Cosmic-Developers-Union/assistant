@@ -16,7 +16,7 @@ on:
     - cron: "*/30 * * * *"
   workflow_dispatch:
 # 防堆积（latest-wins）：同一时刻组内至多一个 run 在跑/排队，新 run 开始时
-# 自动取消组内其余 run。sync/automerge 幂等且便宜，被取消后由下一个事件或
+# 自动取消组内其余 run。action 下的两个命令幂等且便宜，被取消后由下一个事件或
 # 下一个 schedule 重来即可；没有这一节，runner 掉线再恢复会先清几十上百个
 # 陈年 run 的队列。需要 Gitea 1.26+（GitHub 风格 concurrency）。
 concurrency:
@@ -28,7 +28,7 @@ jobs:
     container:
       image: ghcr.io/cosmic-developers-union/assistant:latest
     steps:
-      - run: assistant sync --verbose
+      - run: assistant action label-sync --verbose
         env:
           GITEA_HOST: ${{ github.server_url }}
           GITEA_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -39,7 +39,7 @@ jobs:
     container:
       image: ghcr.io/cosmic-developers-union/assistant:latest
     steps:
-      - run: assistant automerge --verbose
+      - run: assistant action automerge --verbose
         env:
           GITEA_HOST: ${{ github.server_url }}
           GITEA_ACCESS_TOKEN: ${{ secrets.MERGE_TOKEN }}

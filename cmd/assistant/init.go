@@ -37,24 +37,23 @@ type repoSetupTarget struct {
 	File     *instances.File
 }
 
-// newInitCommand 初始化当前仓库的 assistant 集成，三个子命令各管一件事：
+// newInitCommand 初始化当前仓库的 assistant 集成，子命令按职责分工：
 //
-//   - init actions：写本地 Actions workflow（.gitea/workflows/assistant.yml）；
+//   - init actions：已弃用，兼容旧用法；新入口是 install gitea-actions；
 //   - init merge：把 merge 账号加为仓库协作者（admin 权限）；
 //   - init branch-protection：按当前协作者自动生成分支保护规则。
 func newInitCommand(configFlag *string) *cobra.Command {
 	options := &initOptions{}
 	command := &cobra.Command{
 		Use:   "init",
-		Short: "初始化当前仓库（dev 专用）：actions workflow / merge 协作者 / branch-protection",
+		Short: "初始化当前仓库（dev 专用）：merge/ai 协作者 / 标签 / branch-protection",
 		Long: "只处理当前仓库的 dev 侧初始化，需要**目标仓库的管理员权限**（用开发者\n" +
 			"自己的 purpose=mcp 令牌，先 assistant login add）。与站点管理员的 assistant\n" +
 			"setup（admin 令牌：建号、令牌、MERGE_TOKEN 密钥分发）严格区分。\n\n" +
 			"子命令：\n" +
-			"  actions             写本地 Actions workflow（.gitea/workflows/assistant.yml）；\n" +
 			"  merge               把 merge 账号加为仓库协作者（admin 权限）；\n" +
 			"  ai                  邀请 ai 账号加入协作者（write 权限，内容评审）；\n" +
-			"  labels              把标签收敛为规范体系（与 setup/sync 同一口径）；\n" +
+			"  labels              把标签收敛为规范体系（与 setup/action label-sync 同一口径）；\n" +
 			"  branch-protection   读取当前协作者，自动生成分支保护规则。\n\n" +
 			"MERGE_TOKEN secret 由 setup 扫描「merge 为管理员协作者」的仓库自动分发。",
 		Args: cobra.NoArgs,
@@ -76,10 +75,12 @@ func newInitActionsCommand(options *initOptions) *cobra.Command {
 	command := &cobra.Command{
 		Use:   "actions",
 		Short: "写本地 Actions workflow（.gitea/workflows/assistant.yml）",
-		Long: "在当前目录写/更新 assistant 托管的 Actions workflow（sync 与 automerge\n" +
-			"两个 job）。带 marker 防覆盖用户手写文件；MERGE_TOKEN secret 不在这里配——\n" +
-			"由站点管理员运行 assistant setup 自动分发到 merge 为管理员协作者的仓库。",
-		Args: cobra.NoArgs,
+		Long: "兼容旧用法。在当前目录写/更新 assistant 托管的 Actions workflow（action label-sync 与\n" +
+			"action automerge 两个 job）；请改用 assistant install gitea-actions。\n" +
+			"带 marker 防覆盖用户手写文件；MERGE_TOKEN secret 不在这里配——由站点管理员\n" +
+			"运行 assistant setup 自动分发到 merge 为管理员协作者的仓库。",
+		Args:       cobra.NoArgs,
+		Deprecated: "请改用 assistant install gitea-actions",
 		RunE: func(command *cobra.Command, _ []string) error {
 			logf := commandLogger(command, "init actions")
 			dir, err := os.Getwd()
@@ -182,14 +183,14 @@ func runInitReviewer(command *cobra.Command, configPath string, options *initOpt
 }
 
 // newInitLabelsCommand 把当前仓库的标签收敛为规范体系：补齐缺失标签、scoped
-// 组内互斥、删除不在体系内的标签（与 setup / sync 同一口径）。
+// 组内互斥、删除不在体系内的标签（与 setup / action label-sync 同一口径）。
 func newInitLabelsCommand(configFlag *string, options *initOptions) *cobra.Command {
 	command := &cobra.Command{
 		Use:   "labels",
 		Short: "把当前仓库的标签收敛为规范体系（补齐/互斥/删除体系外）",
 		Long: "把当前仓库的标签收敛为 assistant 规范体系：补齐缺失标签、scoped 组内\n" +
-			"互斥、删除不在体系内的标签。口径与 assistant setup / sync 一致，收敛后\n" +
-			"标签完全合规，sync 无需再作修正。需要你是目标仓库的管理员（或 owner）。",
+			"互斥、删除不在体系内的标签。口径与 assistant setup / action label-sync 一致，收敛后\n" +
+			"标签完全合规，label-sync 无需再作修正。需要你是目标仓库的管理员（或 owner）。",
 		Args: cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			return runInitLabels(command, *configFlag, options)

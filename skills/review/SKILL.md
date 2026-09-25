@@ -25,7 +25,7 @@ description: 按本仓库的 assistant 流程评审 Pull Request（Gitea 原生 
 5. 以 Gitea 原生 Pull Request Review 提交结论：
    - 通过 → APPROVED；需要修改 → REQUEST_CHANGES（逐条列出）；仅讨论 → COMMENT。
    - 正文首行注明所评审的 head（短 sha）。
-6. 不要合并、不要改标签——标签由 assistant sync 维护。
+6. 不要合并、不要改标签——标签由 assistant action label-sync 维护。
 
 ## Issue 分诊协议
 
@@ -37,7 +37,7 @@ description: 按本仓库的 assistant 流程评审 Pull Request（Gitea 原生 
    status/in-process，并评论分诊结论（类型、优先级、下一步）。
 4. 只处理被点名的 Issue。
 
-## 标签体系（由 assistant sync 强制维护）
+## 标签体系（由 assistant action label-sync 强制维护）
 
 - 类型：type/bug、type/feature、type/refactor、type/task
 - 优先级：priority/high、priority/low

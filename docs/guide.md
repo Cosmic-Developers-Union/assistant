@@ -12,7 +12,7 @@ use `assistant login add`（查看与轮换令牌：`assistant login token list|
 ```shell
 assistant init merge # 将 merge 加入协作者, 并赋予 admin 权限, 要求仓库管理员
 assistant init labels # 将标签收敛为规范体系: 补齐缺失, scoped 互斥, 删除体系外
-assistant init actions # 初始化 merge action, commit and push
+assistant install gitea-actions # 安装 Gitea Actions workflow
 ```
 
 完成后, 开启分支保护
@@ -48,10 +48,9 @@ assistant init branch-protection --extra-approvals 1 # merge+ai 之外再要求 
 
 workflow（`.gitea/workflows/assistant.yml`）包含两个 job:
 
-- sync: 收敛标签, 并把 PR 原生评审状态同步为状态标签（标签已由 `init labels`
-  收敛为规范体系, sync 只做维持）
-- automerge: 对满足门禁的 PR 执行会签与合并；必要检查运行中且分支保护配置了
+- `sync` job 运行 `assistant action label-sync`: 收敛标签, 并把 PR 原生评审状态同步为状态标签（标签已由 `init labels`
+  收敛为规范体系, label-sync 只做维持）
+- `automerge` job 运行 `assistant action automerge`: 对满足门禁的 PR 执行会签与合并；必要检查运行中且分支保护配置了
   必要检查 context（`--status-check-contexts`）时, 先会签再武装 Gitea 原生
   auto-merge, 检查变绿由服务端即时合并——「检查完成」没有任何 Actions 触发
   事件, 不武装就只能等 schedule 兜底
-

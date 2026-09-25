@@ -2,7 +2,7 @@
 
 Gitea 上的例行事务与评审自动化，两块能力：
 
-- **仓库机器人**：`assistant sync` / `automerge` / `check` 在 Gitea Actions 里按事件与定时运行（标签收敛、评审状态同步、机械合并、待办查询）；
+- **仓库机器人**：`assistant action label-sync` / `assistant action automerge` / `assistant check` 在 Gitea Actions 里按事件与定时运行（标签收敛、评审状态同步、机械合并、待办查询）；
 - **评审调度引擎**：`assistant run` 常驻宿主机，检测待办 → 为每个待办拉起 headless `claude` 会话 → 验证结论 → 清理，另带只读状态 API 与可选的对话服务端（multi-user / multi-session，main agent + subagents，通道可插拔：微信、QQ、Telegram、Gitea）。
 
 `claude` CLI 是外部运行时依赖（会话在容器或宿主机里跑），其余能力都在本二进制里。

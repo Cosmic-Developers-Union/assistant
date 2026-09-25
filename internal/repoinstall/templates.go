@@ -60,7 +60,7 @@ func ManagedReviewPath() string { return ".assistant/review.md" }
 const ClaudeTemplate = "@AGENTS.md\n"
 
 // ManagedWorkflowPaths 返回仓库级 workflow 相对路径（单一 workflow，内含
-// sync 与 automerge 两个 job）。
+// 标签同步与自动合并两个 job）。
 func ManagedWorkflowPaths() []string {
 	return []string{".gitea/workflows/assistant.yml"}
 }

@@ -5,7 +5,7 @@
       "source": "Cosmic-Developers-Union/assistant",
       "sourceType": "github",
       "skillPath": "skills/review/SKILL.md",
-      "computedHash": "55af6e0c94e09c1f924a5b568b901e5a22cf36fd01d10df66a86fb01425637a0"
+      "computedHash": "a4c539b53230031ad2e06b9b2763c8050ce0ccdb076b58da83a1d0577bae0127"
     },
     "use-modern-go": {
       "source": "JetBrains/go-modern-guidelines",

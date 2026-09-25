@@ -36,7 +36,7 @@ func main() {
 		}
 	}()
 
-	command := newRootCommand(os.Stdout, os.Stderr, runCheck, runSync, runAutoMerge)
+	command := newRootCommand(os.Stdout, os.Stderr, runCheck, runLabelSync, runAutoMerge)
 	if err := command.ExecuteContext(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
 		if status.IsFatalError(err) {

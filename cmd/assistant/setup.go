@@ -33,7 +33,7 @@ func newSetupCommand(configFlag *string) *cobra.Command {
 		Long: "初始化 Gitea 实例与仓库，使「评审 → 批准 → 会签 → 自动合并」闭环成立：\n" +
 			"  1. 复用/创建 reviewer（默认 ai）与 merger（默认 merge）账号；\n" +
 			"  2. 为它们生成令牌（有效则复用），写入凭据库 purpose=review / merge；\n" +
-			"  3. 把两个账号加为仓库协作者（write/admin），并补齐与 sync 相同口径的标签体系；\n" +
+			"  3. 把两个账号加为仓库协作者（write/admin），并补齐与 action label-sync 相同口径的标签体系；\n" +
 			"  4. 在默认分支配置分支保护（required approvals、驳回阻塞、过期批准作废、落后分支阻塞）；\n" +
 			"  5. 扫描 merge 为管理员协作者的仓库，自动写入 MERGE_TOKEN secret；\n" +
 			"  6. 把实例与仓库写回 config.json（0600）。\n\n" +

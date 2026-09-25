@@ -17,6 +17,12 @@ type repoToolOptions struct {
 	DryRun       bool
 }
 
+type giteaActionsOptions struct {
+	Dir    string
+	Image  string
+	DryRun bool
+}
+
 func (o *repoToolOptions) repoOptions(command *cobra.Command) repoinstall.Options {
 	logf := func(format string, arguments ...any) {
 		fmt.Fprintf(command.OutOrStdout(), "%s\n", fmt.Sprintf(format, arguments...))
@@ -43,12 +49,13 @@ func newInstallCommand() *cobra.Command {
 			"  - review 技能：bunx skills add <skills-source> --skill review（写 .claude/skills、\n" +
 			"    .agents/skills，由 skills CLI 管理安装/更新/卸载）\n" +
 			"  - AGENTS.md 的 assistant 段落（标签与流程约定）\n" +
-			"  - .gitea/workflows/assistant.yml（sync + automerge 两个 job）\n" +
+			"  - .gitea/workflows/assistant.yml（action label-sync + action automerge 两个 job）\n" +
 			"  - MCP 配置：claude（.mcp.json + .claude/settings.json 放行 gitea 工具）、\n" +
 			"    opencode（opencode.json）、codex（全局 ~/.codex/config.toml）\n\n" +
 			"模板按绑定数据动态渲染：身份是约定（内容评审 ai、状态评审/合并 merge），\n" +
-			"镜像默认官方 latest，可用 --image 覆盖。其余生成内容带 marker，重复\n" +
-			"install 幂等，uninstall 可精确移除。zcode 暂不支持。",
+			"镜像默认官方 latest，可用 --image 覆盖。仅安装 Gitea Actions 时使用\n" +
+			"assistant install gitea-actions；其余生成内容带 marker，重复 install 幂等，\n" +
+			"uninstall 可精确移除。zcode 暂不支持。",
 		Args: cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			return repoinstall.Install(command.Context(), options.repoOptions(command))
@@ -63,6 +70,41 @@ func newInstallCommand() *cobra.Command {
 		"workflow 容器镜像（缺省 "+repoinstall.DefaultImage+"）")
 	flags.StringVar(&options.SkillsSource, "skills-source", "",
 		"skills CLI 安装源（缺省 "+repoinstall.DefaultSkillsSource+"；none 表示不管理技能）")
+	flags.BoolVar(&options.DryRun, "dry-run", false, "只输出将要写入的内容，不做任何修改")
+	command.AddCommand(newInstallGiteaActionsCommand())
+	return command
+}
+
+// newInstallGiteaActionsCommand 只安装当前仓库的 Gitea Actions workflow。
+func newInstallGiteaActionsCommand() *cobra.Command {
+	options := &giteaActionsOptions{}
+	command := &cobra.Command{
+		Use:   "gitea-actions",
+		Short: "安装或更新 Gitea Actions workflow",
+		Long: "只写入 assistant 托管的 .gitea/workflows/assistant.yml，并清理带 marker 的旧版\n" +
+			"独立 automerge workflow。MERGE_TOKEN secret 由站点管理员运行 assistant setup 分发。",
+		Args: cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			logf := func(format string, arguments ...any) {
+				fmt.Fprintf(command.OutOrStdout(), format+"\n", arguments...)
+			}
+			if err := repoinstall.InstallWorkflows(repoinstall.Options{
+				Dir:    options.Dir,
+				Image:  options.Image,
+				DryRun: options.DryRun,
+				Log:    logf,
+			}); err != nil {
+				return err
+			}
+			if !options.DryRun {
+				logf("Gitea Actions workflow 就绪")
+			}
+			return nil
+		},
+	}
+	flags := command.Flags()
+	flags.StringVar(&options.Dir, "dir", ".", "仓库检出目录")
+	flags.StringVar(&options.Image, "image", "", "workflow 容器镜像（缺省 "+repoinstall.DefaultImage+")")
 	flags.BoolVar(&options.DryRun, "dry-run", false, "只输出将要写入的内容，不做任何修改")
 	return command
 }
@@ -101,7 +143,7 @@ func newDoctorCommand(configFlag *string) *cobra.Command {
 			"    .gitea/workflows/assistant.yml 与 MCP 配置；\n" +
 			"  - 服务端：按 origin remote/--repo 定位实例，检查分支保护策略、标签体系、\n" +
 			"    协作者权限（ai 写 / merge 管理员）与 MERGE_TOKEN secret。\n" +
-			"发现问题时以退出码 1 结束；本地问题重新 install / init actions；服务端问题\n" +
+			"发现问题时以退出码 1 结束；本地问题重新 install 或 install gitea-actions；服务端问题\n" +
 			"重新 setup（dev 侧协作者/分支保护用 assistant init merge / branch-protection）。",
 		Args: cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {

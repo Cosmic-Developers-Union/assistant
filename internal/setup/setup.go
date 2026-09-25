@@ -287,7 +287,7 @@ func setupRepository(
 		}
 	}
 
-	logf("补齐规范标签体系（与 sync 同一口径）")
+	logf("补齐规范标签体系（与 action label-sync 同一口径）")
 	if !options.DryRun {
 		if err := admin.ReconcileLabels(ctx, fullName, reviewerToken); err != nil {
 			return err

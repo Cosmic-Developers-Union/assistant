@@ -199,7 +199,7 @@ func Install(ctx context.Context, options Options) error {
 	return nil
 }
 
-// InstallWorkflows 只安装/更新仓库 Actions workflow（`assistant init actions`
+// InstallWorkflows 只安装/更新仓库 Actions workflow（`assistant install gitea-actions`
 // 用）：内容与 Install 的 workflow 部分一致，带 marker 防覆盖用户手写文件，
 // 并清理旧版带 marker 的独立 automerge workflow。
 func InstallWorkflows(options Options) error {

@@ -13,7 +13,7 @@
 //     不消费请求记录，出清判定以 reviews 为准）；作者推进 head 后旧回应失效，
 //     条目重新入队。重复信号由 settled 守卫吸收，条目离开清单后解除。
 //   - 标签通道（status/triage，仅 Issue）：兼容人工打标签触发分诊的场景。
-//     PR 的 status/review 标签与全部状态标签由 sync 继续维护，但**只是观测
+//     PR 的 status/review 标签与全部状态标签由 action label-sync 继续维护，但**只是观测
 //     产物**（看板、报表、既有集成），不再是任何工作的触发源。
 package dispatcher
 

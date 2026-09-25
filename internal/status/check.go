@@ -34,7 +34,7 @@ func (r Report) HasWork() bool {
 }
 
 // Check 只读检索待处理项：带 status/triage 的 open Issue 和带 status/review 的
-// open PR。标签由 sync（CI 事件驱动）维护，check 不做任何写操作，供调用方
+// open PR。标签由 action label-sync（CI 事件驱动）维护，check 不做任何写操作，供调用方
 // （如 Claude loop）立即获取待办列表。
 func (m *Manager) Check(ctx context.Context) (Report, error) {
 	repositories, err := m.visibleRepositories(ctx)
