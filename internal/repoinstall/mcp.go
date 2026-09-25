@@ -18,8 +18,33 @@ import (
 // MCP 包装层默认值（与 gitea-mcp 的 stdio 用法一致）。
 const (
 	DefaultMCPModule = "gitea.com/gitea/gitea-mcp@latest"
-	DefaultMCPScopes = "wiki,actions,issue,pull_request,commit,branch,tag,search,label,milestone,packages"
 )
+
+var defaultMCPScopes = []string{
+	"version",
+	"user",
+	"search",
+	"notification",
+	"label",
+	"milestone",
+	"wiki",
+	"timetracking",
+	"packages",
+	"project",
+	"issue",
+	"pull_request",
+	"actions",
+	"repository",
+	"file",
+	"branch",
+	"tag",
+	"commit",
+	"release",
+}
+
+func getDefaultMCPScopes() string {
+	return strings.Join(defaultMCPScopes, ",")
+}
 
 // MCPOptions 控制 `assistant mcp gitea` 的解析与启动。
 type MCPOptions struct {
@@ -52,8 +77,10 @@ type MCPSpec struct {
 // ResolveMCP 自动检测项目的 Gitea 实例与当前开发者的访问令牌：
 //
 // host：--host > GITEA_HOST > 检出内的 Gitea remote（多上游时选探测命中的那个）
-//   > config.json 里唯一启用的 gitea 通道 > 凭据库里唯一登记的站点；
-//   仍定不下来（无上游且登记了多个平台）时显式报错，不猜。
+//
+//	> config.json 里唯一启用的 gitea 通道 > 凭据库里唯一登记的站点；
+//	仍定不下来（无上游且登记了多个平台）时显式报错，不猜。
+//
 // token：--token > GITEA_ACCESS_TOKEN > GITEA_ACCESS_TOKEN_FILE >
 // credentials.json 中该站点的 (host, purpose=mcp) 登录令牌。
 // 不自动读取全局 token 文件（config.json 里没有凭据）。
@@ -271,7 +298,7 @@ func RunMCPGitea(ctx context.Context, options MCPOptions) error {
 func mcpCommand(getenv func(string) string) (string, []string) {
 	scopes := strings.TrimSpace(getenv("GITEA_MCP_SCOPES"))
 	if scopes == "" {
-		scopes = DefaultMCPScopes
+		scopes = getDefaultMCPScopes()
 	}
 	if binary := strings.TrimSpace(getenv("GITEA_MCP_BIN")); binary != "" {
 		return binary, []string{"-t", "stdio", "-S", scopes}
