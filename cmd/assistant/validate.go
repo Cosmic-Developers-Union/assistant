@@ -50,7 +50,7 @@ func runValidate(stdout io.Writer, configPath string) error {
 		return err // instances.Load 的报错已带文件与字段位置
 	}
 	if file == nil {
-		return fmt.Errorf("没有 config.json（--config / ASSISTANT_CONFIG / 当前目录）：先 assistant login <host>")
+		return fmt.Errorf("没有 config.json（--config / ASSISTANT_CONFIG / 当前目录）：先 assistant login add <host>")
 	}
 	return reportValidate(stdout, validateConfigFile(path, file), "", path)
 }
@@ -330,7 +330,7 @@ func validateCredentials(configPath string, file *instances.File) []validateFind
 		identity, ok := store.IdentityFor(host)
 		if !ok {
 			findings = append(findings, validateFinding{"ERROR", "credentials " + host,
-				"没有登录身份：assistant login " + host})
+				"没有登录身份：assistant login add " + host})
 			continue
 		}
 		who := identity.User

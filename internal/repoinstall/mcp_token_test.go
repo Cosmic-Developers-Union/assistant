@@ -34,7 +34,7 @@ func TestMissingMCPHintExplainsIdentityOnlyState(t *testing.T) {
 	}
 	for _, want := range []string{
 		"@Ge", "没有 (host, Ge, mcp) 用途令牌",
-		"assistant login https://a.example.com --user Ge",
+		"assistant login add https://a.example.com --user Ge",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("错误信息缺少 %q：\n%v", want, err)
@@ -113,7 +113,7 @@ func TestMCPTokenIsolation(t *testing.T) {
 			}
 			if tc.want == "" {
 				_, err := ResolveMCP(context.Background(), MCPOptions{Host: tc.host, Getenv: getenv})
-				if err == nil || !strings.Contains(err.Error(), "assistant login "+tc.host) {
+				if err == nil || !strings.Contains(err.Error(), "assistant login add "+tc.host) {
 					t.Fatalf("expected host-specific login guidance, got %v", err)
 				}
 			}

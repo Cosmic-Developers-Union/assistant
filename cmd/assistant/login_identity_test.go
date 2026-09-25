@@ -117,7 +117,7 @@ func TestLoginDerivesMCPAndAdminTokens(t *testing.T) {
 	command.SetErr(&out)
 	state.totp = "123456"
 	command.SetIn(strings.NewReader(" s3cret \n"))
-	command.SetArgs([]string{server.URL, "--user", "developer", "--password-stdin", "--totp", "123456"})
+	command.SetArgs([]string{"add", server.URL, "--user", "developer", "--password-stdin", "--totp", "123456"})
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func TestLoginNonAdminOnlyDerivesMCP(t *testing.T) {
 	command.SetOut(&out)
 	command.SetErr(&out)
 	command.SetIn(strings.NewReader(" s3cret \n"))
-	command.SetArgs([]string{server.URL, "--user", "developer", "--password-stdin"})
+	command.SetArgs([]string{"add", server.URL, "--user", "developer", "--password-stdin"})
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +250,7 @@ func TestLoginReusesValidTokenWithoutPassword(t *testing.T) {
 	command := newLoginCommand(&configPath)
 	command.SetOut(&out)
 	command.SetErr(&out)
-	command.SetArgs([]string{server.URL, "--user", "developer"})
+	command.SetArgs([]string{"add", server.URL, "--user", "developer"})
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +291,7 @@ func TestLoginRotateReplacesTokens(t *testing.T) {
 	command.SetOut(&bytes.Buffer{})
 	command.SetErr(&bytes.Buffer{})
 	command.SetIn(strings.NewReader(" s3cret \n"))
-	command.SetArgs([]string{server.URL, "--user", "developer", "--password-stdin", "--rotate"})
+	command.SetArgs([]string{"add", server.URL, "--user", "developer", "--password-stdin", "--rotate"})
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
 	}
@@ -316,6 +316,7 @@ func TestLoginInteractivePrompts(t *testing.T) {
 	command.SetOut(&out)
 	command.SetErr(&out)
 	command.SetIn(strings.NewReader(server.URL + "\ndeveloper\n s3cret \n"))
+	command.SetArgs([]string{"add"})
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +349,7 @@ func TestLoginBadPasswordKeepsStoreEmpty(t *testing.T) {
 	command.SetOut(&out)
 	command.SetErr(&out)
 	command.SetIn(strings.NewReader("wrong\n"))
-	command.SetArgs([]string{server.URL, "--user", "developer", "--password-stdin"})
+	command.SetArgs([]string{"add", server.URL, "--user", "developer", "--password-stdin"})
 	err := command.Execute()
 	if err == nil {
 		t.Fatal("凭据错误应报错")

@@ -38,10 +38,10 @@ func tokenForPurpose(configPath, host, purpose string) (credentials.Credential, 
 func missingTokenHint(host, purpose string) string {
 	switch purpose {
 	case credentials.PurposeAdmin:
-		return "用管理员账号运行 assistant login " + host + " --user <管理员账号>"
+		return "用管理员账号运行 assistant login add " + host + " --user <管理员账号>"
 	case credentials.PurposeReview, credentials.PurposeMerge:
 		return "运行 assistant setup --host " + host + "（机器人账号与令牌由 setup 创建）"
 	default:
-		return "运行 assistant login " + host + " --user <账号>"
+		return "运行 assistant login add " + host + " --user <账号>"
 	}
 }

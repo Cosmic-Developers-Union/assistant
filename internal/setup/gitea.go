@@ -44,7 +44,7 @@ type giteaAdmin struct {
 	login string
 }
 
-// NewAdmin 构造高权限操作面：只接受管理员令牌（assistant login 写入凭据库的
+// NewAdmin 构造高权限操作面：只接受管理员令牌（assistant login add 写入凭据库的
 // purpose=admin），并在线校验该令牌确实是实例管理员。
 func NewAdmin(ctx context.Context, options Options) (*giteaAdmin, error) {
 	options.applyDefaults()
@@ -95,7 +95,7 @@ func NewRepoClient(ctx context.Context, host, token string, logf func(string, ..
 		return nil, fmt.Errorf("host 必须是绝对 HTTP(S) URL：%q", host)
 	}
 	if token == "" {
-		return nil, fmt.Errorf("缺少访问令牌：先 assistant login %s", host)
+		return nil, fmt.Errorf("缺少访问令牌：先 assistant login add %s", host)
 	}
 	if logf == nil {
 		logf = func(string, ...any) {}

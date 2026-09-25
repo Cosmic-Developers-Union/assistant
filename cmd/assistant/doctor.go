@@ -91,7 +91,7 @@ func printSessionFindings(stdout io.Writer, configPath string) int {
 	}
 	_, file, err := resolveInstanceFile(commandOptions{ConfigPath: configPath})
 	if err != nil || file == nil {
-		fmt.Fprintf(stdout, "%-9s 会话 AI 凭据 — 没有 config.json，跳过（先 assistant login）\n", "SKIPPED")
+		fmt.Fprintf(stdout, "%-9s 会话 AI 凭据 — 没有 config.json，跳过（先 assistant login add）\n", "SKIPPED")
 		return problems
 	}
 	name := file.DefaultProvider

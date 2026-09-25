@@ -227,7 +227,7 @@ Linux 服务形态细节：
 之后以服务用户身份补全配置并启动：
 
 ```bash
-sudo -u assistant -H assistant login https://gitea.example --user <管理员账号>   # 管理员登录
+sudo -u assistant -H assistant login add https://gitea.example --user <管理员账号>   # 管理员登录
 sudo -u assistant -H assistant setup                                            # 建 ai/merge 机器人账号并派生令牌
 sudo -u assistant -H assistant validate && sudo systemctl enable --now assistant
 journalctl -u assistant -f                                                      # 观测

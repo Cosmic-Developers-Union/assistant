@@ -48,7 +48,7 @@ func newInitCommand(configFlag *string) *cobra.Command {
 		Use:   "init",
 		Short: "初始化当前仓库（dev 专用）：actions workflow / merge 协作者 / branch-protection",
 		Long: "只处理当前仓库的 dev 侧初始化，需要**目标仓库的管理员权限**（用开发者\n" +
-			"自己的 purpose=mcp 令牌，先 assistant login）。与站点管理员的 assistant\n" +
+			"自己的 purpose=mcp 令牌，先 assistant login add）。与站点管理员的 assistant\n" +
 			"setup（admin 令牌：建号、令牌、MERGE_TOKEN 密钥分发）严格区分。\n\n" +
 			"子命令：\n" +
 			"  actions             写本地 Actions workflow（.gitea/workflows/assistant.yml）；\n" +
@@ -106,7 +106,7 @@ func newInitMergeCommand(configFlag *string, options *initOptions) *cobra.Comman
 		Short: "把 merge 账号加为当前仓库协作者（admin 权限）",
 		Long: "把 merge 账号加为当前仓库协作者并授予 admin 权限（分支保护读取、会签、\n" +
 			"合并都需要）。需要你是目标仓库的管理员（或 owner）；平台必须已在\n" +
-			"config.json 中（先 assistant login <host>）。",
+			"config.json 中（先 assistant login add <host>）。",
 		Args: cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			return runInitMerge(command, *configFlag, options)
@@ -381,7 +381,7 @@ func resolveRepoSetupTargetWithProbe(
 	}
 	if file == nil {
 		return repoSetupTarget{}, fmt.Errorf(
-			"没有 config.json（--config / ASSISTANT_CONFIG / 当前目录）：先 assistant login <host> 注册平台")
+			"没有 config.json（--config / ASSISTANT_CONFIG / 当前目录）：先 assistant login add <host> 注册平台")
 	}
 
 	dir, err := os.Getwd()

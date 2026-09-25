@@ -65,7 +65,7 @@ func newConfigCommand(configFlag *string) *cobra.Command {
 			"  {\"$schema\": \"./config.schema.json\", \"channels\": []}\n" +
 			"  并把 schema 写到旁边（编辑器补全与悬停文档，离线可用）。\n\n" +
 			"骨架还不能直接运行（channels 为空）；随后手工编辑 providers/channels/\n" +
-			"runtimes，或 assistant login <host> / setup 之后用 config init 补全。\n" +
+			"runtimes，或 assistant login add <host> / setup 之后用 config init 补全。\n" +
 			"已有文件不覆盖（--force 才覆盖）。落点与 config init 一致：--config /\n" +
 			"ASSISTANT_CONFIG / 当前目录。",
 		Args: cobra.NoArgs,
@@ -114,7 +114,7 @@ func runConfigNew(command *cobra.Command, configPath string, options *configNewO
 	stdout := command.OutOrStdout()
 	fmt.Fprintf(stdout, "已写入空配置骨架: %s（instances 为空，尚不能运行）\n", path)
 	fmt.Fprintf(stdout, "schema: %s\n", schemaPath)
-	fmt.Fprintf(stdout, "下一步：编辑 providers/instances，或 assistant login <host> / setup 后 "+
+	fmt.Fprintf(stdout, "下一步：编辑 providers/instances，或 assistant login add <host> / setup 后 "+
 		"assistant config init 补全；完成用 assistant validate 校验\n")
 	return nil
 }
@@ -154,7 +154,7 @@ func runConfigInit(command *cobra.Command, configPath string, options *configIni
 	file.Normalize()
 	// 合并结果必须是可加载的：宁可不写，也不写坏
 	if err := file.Validate(); err != nil {
-		return fmt.Errorf("合并结果不合法，未写入：%w（先 assistant login <host>，或用 --provider 指定供应商）", err)
+		return fmt.Errorf("合并结果不合法，未写入：%w（先 assistant login add <host>，或用 --provider 指定供应商）", err)
 	}
 
 	if options.DryRun {

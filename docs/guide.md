@@ -2,7 +2,7 @@
 
 ## Login
 
-use `assistant login`
+use `assistant login add`（查看与轮换令牌：`assistant login token list|show|refresh`）
 
 ## For Development
 

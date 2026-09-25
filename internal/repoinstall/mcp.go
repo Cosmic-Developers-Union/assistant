@@ -6,10 +6,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"assistant/internal/credentials"
 	"assistant/internal/dispatcher"
+	"assistant/internal/instances"
 	"assistant/internal/status"
 )
 
@@ -49,10 +51,17 @@ type MCPSpec struct {
 
 // ResolveMCP 自动检测项目的 Gitea 实例与当前开发者的访问令牌：
 //
-// host：--host > GITEA_HOST > Gitea remote 推导；
+// host：--host > GITEA_HOST > 检出内的 Gitea remote（多上游时选探测命中的那个）
+//   > config.json 里唯一启用的 gitea 通道 > 凭据库里唯一登记的站点；
+//   仍定不下来（无上游且登记了多个平台）时显式报错，不猜。
 // token：--token > GITEA_ACCESS_TOKEN > GITEA_ACCESS_TOKEN_FILE >
 // credentials.json 中该站点的 (host, purpose=mcp) 登录令牌。
 // 不自动读取全局 token 文件（config.json 里没有凭据）。
+//
+// remote 探测在前是为了解决多上游问题：检出同时挂 GitHub 与多个 Gitea remote
+// 时，按「哪个 remote 是 Gitea」选站点。但 MCP 会随任意目录启动（Claude Code
+// 等 AI CLI 的 MCP 配置），没有上游的检出不该让 MCP 起不来——登记状态
+// （login 写入的 config/credentials）是剩下的唯一事实来源。
 func ResolveMCP(ctx context.Context, options MCPOptions) (MCPSpec, error) {
 	getenv := options.Getenv
 	if getenv == nil {
@@ -80,8 +89,15 @@ func ResolveMCP(ctx context.Context, options MCPOptions) (MCPSpec, error) {
 		}
 	}
 	if spec.Host == "" {
+		host, source, hostErr := resolveRegisteredHost(getenv, dir)
+		if hostErr != nil {
+			return MCPSpec{}, hostErr
+		}
+		spec.Host, spec.HostSource = host, source
+	}
+	if spec.Host == "" {
 		return MCPSpec{}, fmt.Errorf(
-			"无法检测 Gitea 实例：用 --host / GITEA_HOST，或在带 Gitea remote 的检出内运行")
+			"无法检测 Gitea 实例：用 --host / GITEA_HOST 指定，先 assistant login add 登记平台，或在带 Gitea remote 的检出内运行")
 	}
 	// token
 	if options.Token != "" {
@@ -106,7 +122,7 @@ func ResolveMCP(ctx context.Context, options MCPOptions) (MCPSpec, error) {
 //     否则「identity 有、mcp 没有」看起来像工具坏了；
 //   - 完全没有身份：直接给出登录命令。
 func missingMCPHint(host string, getenv func(string) string) string {
-	login := "assistant login " + host + " --user <账号>"
+	login := "assistant login add " + host + " --user <账号>"
 	credentialPath, err := credentials.Path()
 	if err != nil {
 		return "请运行 " + login
@@ -116,10 +132,87 @@ func missingMCPHint(host string, getenv func(string) string) string {
 		return "请运行 " + login
 	}
 	if identity, ok := store.IdentityFor(host); ok {
-		return fmt.Sprintf("已登记身份 @%s，但没有 (host, %s, mcp) 用途令牌：运行 assistant login %s --user %s 派生",
+		return fmt.Sprintf("已登记身份 @%s，但没有 (host, %s, mcp) 用途令牌：运行 assistant login add %s --user %s 派生",
 			identity.User, identity.User, host, identity.User)
 	}
 	return "请运行 " + login
+}
+
+// resolveRegisteredHost 从登记状态推导站点：config.json 的 gitea 通道（唯一时）
+// > 凭据库里登记过的站点（唯一时）。多平台不猜——站点选择必须是显式决定，用
+// GITEA_HOST（如 MCP 配置的 env）指定。
+func resolveRegisteredHost(getenv func(string) string, dir string) (string, string, error) {
+	if hosts := configHosts(getenv, dir); len(hosts) > 0 {
+		if len(hosts) == 1 {
+			return hosts[0], "config.json", nil
+		}
+		return "", "", ambiguousHostError(hosts)
+	}
+	if hosts := credentialHosts(); len(hosts) > 0 {
+		if len(hosts) == 1 {
+			return hosts[0], "credentials.json", nil
+		}
+		return "", "", ambiguousHostError(hosts)
+	}
+	return "", "", nil
+}
+
+func ambiguousHostError(hosts []string) error {
+	return fmt.Errorf("无法检测 Gitea 实例：检出内没有 Gitea remote，登记状态又有多个平台（%s）；请用 GITEA_HOST 显式指定（如 MCP 配置的 env）",
+		strings.Join(hosts, "、"))
+}
+
+// configHosts 读配置里启用的 gitea 通道站点：ASSISTANT_CONFIG > 检出内的
+// config.json。配置缺失或损坏时返回空——MCP 只是借用登记状态做兜底，配置
+// 本身的问题由 validate/config 命令负责报错，不在 MCP 启动路径上拦人。
+func configHosts(getenv func(string) string, dir string) []string {
+	path := strings.TrimSpace(getenv("ASSISTANT_CONFIG"))
+	if path == "" {
+		path = filepath.Join(dir, "config.json")
+	}
+	if _, err := os.Stat(path); err != nil {
+		return nil
+	}
+	file, err := instances.Load(path)
+	if err != nil {
+		return nil
+	}
+	var hosts []string
+	for _, channel := range file.Channels {
+		if channel.Type == instances.ChannelGitea && channel.IsEnabled() && channel.Host != "" {
+			hosts = append(hosts, strings.TrimRight(channel.Host, "/"))
+		}
+	}
+	return dedupeHosts(hosts)
+}
+
+// credentialHosts 读凭据库里登记过的站点。凭据库缺失/损坏时返回空：登录状态
+// 的问题由 login/validate 负责，MCP 不在这里拦人。
+func credentialHosts() []string {
+	path, err := credentials.Path()
+	if err != nil {
+		return nil
+	}
+	store, err := credentials.Load(path)
+	if err != nil {
+		return nil
+	}
+	return store.Hosts()
+}
+
+// dedupeHosts 按规范化形式去重，保留首个原始写法（展示用）。
+func dedupeHosts(hosts []string) []string {
+	seen := map[string]bool{}
+	kept := hosts[:0]
+	for _, host := range hosts {
+		key := credentials.NormalizeHost(host)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		kept = append(kept, host)
+	}
+	return kept
 }
 
 // RunMCPGitea 解析凭据后启动 gitea-mcp（stdio），并把子进程退出码透传。

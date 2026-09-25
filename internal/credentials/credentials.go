@@ -59,6 +59,22 @@ func BotScopes() []string {
 	return []string{"read:repository", "write:repository", "read:issue", "write:issue", "read:user"}
 }
 
+// DefaultScopes 返回用途的缺省权限集：记录里没存 scopes 时的兜底。新增用途必须
+// 在这里显式登记——与 Purpose* 常量同文件，switch 漏掉会显式报错，不会静默
+// 错配成其它用途的权限集（用错 scope 的令牌是安全隐患，绝不兜底猜）。
+func DefaultScopes(purpose string) ([]string, error) {
+	switch purpose {
+	case PurposeMCP:
+		return MCPScopes(), nil
+	case PurposeAdmin:
+		return AdminScopes(), nil
+	case PurposeReview, PurposeMerge:
+		return BotScopes(), nil
+	default:
+		return nil, fmt.Errorf("未知用途 %q 没有缺省权限集（支持 %s）", purpose, strings.Join(Purposes(), "、"))
+	}
+}
+
 // 令牌来源，用于诊断（Credential.Source 的取值）。
 const (
 	// SourceLogin 表示登录按身份派生（含轮换重建）。
@@ -409,9 +425,33 @@ func (f *File) RemoveUser(host, user string) int {
 	return removed
 }
 
-// Users 返回站点上已登记的账号名（排序、去重）。
-func (f *File) Users(host string) []string {
+// Hosts 返回凭据库里出现过的站点（规范化、排序、去重）：身份与用途令牌的并集。
+// 「这台机器登录过哪些站点」是 host 兜底解析的事实来源。
+func (f *File) Hosts() []string {
 	if f == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var hosts []string
+	add := func(host string) {
+		host = NormalizeHost(host)
+		if host != "" && !seen[host] {
+			seen[host] = true
+			hosts = append(hosts, host)
+		}
+	}
+	for _, identity := range f.Identity {
+		add(identity.Host)
+	}
+	for _, credential := range f.Credentials {
+		add(credential.Host)
+	}
+	sort.Strings(hosts)
+	return hosts
+}
+
+// Users 返回站点上已登记的账号名（排序、去重）。
+func (f *File) Users(host string) []string {	if f == nil {
 		return nil
 	}
 	host = NormalizeHost(host)

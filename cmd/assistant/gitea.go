@@ -58,7 +58,7 @@ func selectRepoGitea(file *instances.File, hostFlag, repoName string, autoHosts 
 	if host := strings.TrimRight(strings.TrimSpace(hostFlag), "/"); host != "" {
 		channel, ok := findGiteaChannel(file, host)
 		if !ok {
-			return nil, fmt.Errorf("平台 %s 不在配置中：先 assistant login %s", host, host)
+			return nil, fmt.Errorf("平台 %s 不在配置中：先 assistant login add %s", host, host)
 		}
 		return channel, nil
 	}
@@ -85,7 +85,7 @@ func selectRepoGitea(file *instances.File, hostFlag, repoName string, autoHosts 
 	channels := giteaChannels(file)
 	switch len(channels) {
 	case 0:
-		return nil, fmt.Errorf("配置中没有平台：先 assistant login <host>")
+		return nil, fmt.Errorf("配置中没有平台：先 assistant login add <host>")
 	case 1:
 		return channels[0], nil
 	default:

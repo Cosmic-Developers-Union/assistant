@@ -57,7 +57,7 @@ func runIdentityLogin(command *cobra.Command, prompts *promptSession, host, conf
 		if havePassword {
 			return password, nil
 		}
-		value, err := readIdentityPassword(command, prompts, host, user, options)
+		value, err := readIdentityPassword(command, prompts, host, user, &options.passwordSource)
 		if err != nil {
 			return "", err
 		}
@@ -208,12 +208,12 @@ func readIdentityPassword(
 	command *cobra.Command,
 	prompts *promptSession,
 	host, user string,
-	options *loginOptions,
+	source *passwordSource,
 ) (string, error) {
-	if options.Password != "" {
-		return options.Password, nil
+	if source.Password != "" {
+		return source.Password, nil
 	}
-	if options.PasswordStdin {
+	if source.PasswordStdin {
 		data, err := io.ReadAll(io.LimitReader(command.InOrStdin(), 64*1024+1))
 		if err != nil || len(data) > 64*1024 {
 			return "", fmt.Errorf("无法读取密码或密码输入过长")

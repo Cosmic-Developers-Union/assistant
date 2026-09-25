@@ -37,7 +37,7 @@ func TestLoginCredentialIsolation(t *testing.T) {
 	command.SetOut(&out)
 	command.SetErr(&out)
 	command.SetIn(strings.NewReader(" s3cret \n"))
-	command.SetArgs([]string{server.URL, "--user", "developer", "--password-stdin"})
+	command.SetArgs([]string{"add", server.URL, "--user", "developer", "--password-stdin"})
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
 	}

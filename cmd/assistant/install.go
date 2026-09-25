@@ -87,50 +87,6 @@ func newUninstallCommand() *cobra.Command {
 	return command
 }
 
-// newMCPCommand 是 MCP 包装层：`assistant mcp gitea` 自动检测当前开发者在本
-// 项目的 Gitea 实例与访问令牌，然后拉起 gitea-mcp（stdio）。
-func newMCPCommand(configFlag *string) *cobra.Command {
-	mcpCommand := &cobra.Command{
-		Use:   "mcp",
-		Short: "MCP 包装层（供各 AI CLI 的 MCP 配置调用）",
-		Args:  cobra.NoArgs,
-	}
-	giteaOptions := struct {
-		Host  string
-		Token string
-		Dir   string
-	}{}
-	giteaCommand := &cobra.Command{
-		Use:   "gitea",
-		Short: "拉起 gitea MCP：host 从 origin remote 推导，token 取当前开发者凭据",
-		Long: "自动检测当前项目的 Gitea 实例与当前开发者的访问令牌，再以 stdio 拉起\n" +
-			"gitea-mcp（默认 `go run gitea.com/gitea/gitea-mcp@latest`；可用 GITEA_MCP_BIN\n" +
-			"指已安装的二进制）。检测顺序：\n" +
-			"  host：--host > GITEA_HOST > origin remote 推导；\n" +
-			"  token：--token > GITEA_ACCESS_TOKEN > GITEA_ACCESS_TOKEN_FILE >\n" +
-			"         assistant login <host> --user <账号> 的上站点凭据（凭据库）。\n" +
-			"凭据库在平台标准配置目录（ASSISTANT_CREDENTIALS 可显式指定位置），与当前\n" +
-			"目录无关——从任何项目启动都解析同一份登录状态。",
-		Args: cobra.NoArgs,
-		RunE: func(command *cobra.Command, _ []string) error {
-			return repoinstall.RunMCPGitea(command.Context(), repoinstall.MCPOptions{
-				Dir:        giteaOptions.Dir,
-				Host:       giteaOptions.Host,
-				Token:      giteaOptions.Token,
-				Log: func(format string, arguments ...any) {
-					fmt.Fprintf(command.ErrOrStderr(), format+"\n", arguments...)
-				},
-			})
-		},
-	}
-	flags := giteaCommand.Flags()
-	flags.StringVar(&giteaOptions.Host, "host", "", "覆盖 Gitea 站点（缺省 origin remote 推导）")
-	flags.StringVar(&giteaOptions.Token, "token", "", "覆盖访问令牌（缺省多候选检测）")
-	flags.StringVar(&giteaOptions.Dir, "dir", ".", "项目目录（缺省 cwd）")
-	mcpCommand.AddCommand(giteaCommand, newDaemonMCPCommand(), newSessionsMCPCommand(configFlag))
-	return mcpCommand
-}
-
 // newDoctorCommand 检测当前仓库的 assistant 配置状态：本地 install 产物
 // （文件/段落/MCP）与仓库服务端（分支保护/标签/协作者/merge 令牌）。
 func newDoctorCommand(configFlag *string) *cobra.Command {

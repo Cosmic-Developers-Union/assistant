@@ -15,25 +15,61 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// loginOptions 是唯一登录入口的输入：host + username + password（无参数时交互式
-// 询问）。没有第二种登录方式，凭据只有一份落点（credentials.json）。
-type loginOptions struct {
-	Host          string
-	User          string
+// passwordSource 是「本次派生/轮换令牌用的密码来源」。独立成类型是因为
+// readIdentityPassword 只消费这三个字段：账号与站点都由调用方显式传入，
+// loginOptions 的其余旗标（--host/--token-name/--rotate）不允许被密码流程
+// 静默卷入。
+type passwordSource struct {
 	Password      string
 	PasswordStdin bool
 	TOTP          string
-	TokenName     string
+}
+
+// loginOptions 是唯一登录入口的输入：host + username + password（无参数时交互式
+// 询问）。没有第二种登录方式，凭据只有一份落点（credentials.json）。
+type loginOptions struct {
+	passwordSource
+	Host      string
+	User      string
+	TokenName string
 	// Rotate 为真时忽略已存令牌，重建当前账号的用途令牌（令牌名保持不变）。
 	Rotate bool
 }
 
-// newLoginCommand 是唯一登录入口：校验账号身份（含是否实例管理员），按身份派生
-// 用途令牌并写入凭据库。
+// newLoginCommand 是 login 命令组：add（唯一登录入口）、list/remove（查看与
+// 移除）、token（用途令牌的查看与轮换）。裸命令只打印帮助。
 func newLoginCommand(configFlag *string) *cobra.Command {
+	command := &cobra.Command{
+		Use:   "login",
+		Short: "平台登录与本地凭据管理（add/list/remove/token）",
+		Long: "Gitea 平台登录与本地凭据管理命令组。\n\n" +
+			"登录的唯一入口是 add：host + username + password → 站点确认身份（账号名 +\n" +
+			"是否实例管理员）→ 按身份派生用途令牌写入凭据库（credentials.json，0600，\n" +
+			"按 (host, user, purpose) 唯一）。\n\n" +
+			"  assistant login add <host>                登录并按身份派生用途令牌\n" +
+			"  assistant login list                      列出平台、身份与各用途令牌\n" +
+			"  assistant login remove <host>             移除平台条目与该站点的本地凭据\n" +
+			"  assistant login token list|show|refresh   查看与轮换用途令牌",
+		Args: cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			return command.Help()
+		},
+	}
+	command.AddCommand(
+		newLoginAddCommand(configFlag),
+		newLoginListCommand(configFlag),
+		newLoginRemoveCommand(configFlag),
+		newLoginTokenCommand(),
+	)
+	return command
+}
+
+// newLoginAddCommand 是唯一登录入口：校验账号身份（含是否实例管理员），按身份
+// 派生用途令牌并写入凭据库。
+func newLoginAddCommand(configFlag *string) *cobra.Command {
 	options := &loginOptions{}
 	command := &cobra.Command{
-		Use:   "login [host]",
+		Use:   "add [host]",
 		Short: "登录 Gitea（host + username + password），按身份派生用途令牌",
 		Long: "登录并登记平台。不带参数时进入交互式询问（host → username → password）。\n\n" +
 			"登录做三件事：\n" +
@@ -45,7 +81,8 @@ func newLoginCommand(configFlag *string) *cobra.Command {
 			"0600），按 (host, user, purpose) 唯一；重复登录时仍然有效的令牌原样复用，不重复创建\n" +
 			"（ASSISTANT_CREDENTIALS 可显式指定凭据库位置）。\n\n" +
 			"  assistant login list            列出平台、身份与该站点的各用途令牌\n" +
-			"  assistant login remove <host>   移除平台条目与该站点的本地凭据",
+			"  assistant login remove <host>   移除平台条目与该站点的本地凭据\n" +
+			"  assistant login token refresh <host> [purpose]   轮换单条用途令牌",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(command *cobra.Command, args []string) error {
 			host := ""
@@ -63,7 +100,6 @@ func newLoginCommand(configFlag *string) *cobra.Command {
 	flags.StringVar(&options.TOTP, "totp", "", "双因素验证码")
 	flags.StringVar(&options.TokenName, "token-name", "", "令牌名（缺省按 host+账号+用途确定性派生）")
 	flags.BoolVar(&options.Rotate, "rotate", false, "忽略已存令牌，重新创建该账号的用途令牌（旧同名令牌在站点上删除）")
-	command.AddCommand(newLoginListCommand(configFlag), newLoginRemoveCommand(configFlag))
 	return command
 }
 
@@ -169,10 +205,10 @@ func newLoginListCommand(configFlag *string) *cobra.Command {
 			store, credentialPath := loadCredentialStore(command, path)
 			if file == nil || giteaHostCount(file) == 0 {
 				if store.Empty() {
-					fmt.Fprintln(stdout, "未登记任何平台（assistant login 添加）")
+					fmt.Fprintln(stdout, "未登记任何平台（assistant login add 添加）")
 					return nil
 				}
-				for _, host := range credentialHosts(store) {
+				for _, host := range store.Hosts() {
 					fmt.Fprintf(stdout, "%s\trepos=0\tidentity=%s\ttokens=%s\n",
 						host, describeIdentity(store, host), describePurposes(store, host))
 				}
@@ -231,25 +267,6 @@ func describePurposes(store *credentials.File, host string) string {
 		return "none"
 	}
 	return strings.Join(parts, ",")
-}
-
-// credentialHosts 返回凭据库里出现过的站点（去重）。
-func credentialHosts(store *credentials.File) []string {
-	seen := map[string]bool{}
-	var hosts []string
-	add := func(host string) {
-		if host != "" && !seen[host] {
-			seen[host] = true
-			hosts = append(hosts, host)
-		}
-	}
-	for _, identity := range store.Identity {
-		add(identity.Host)
-	}
-	for _, credential := range store.Credentials {
-		add(credential.Host)
-	}
-	return hosts
 }
 
 func newLoginRemoveCommand(configFlag *string) *cobra.Command {

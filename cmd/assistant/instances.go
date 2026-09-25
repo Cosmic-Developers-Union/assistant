@@ -144,7 +144,7 @@ func newInstanceManager(
 		}
 		logf("分支保护读取使用 admin 令牌（@%s）", admin.User)
 	} else if !ok {
-		logf("没有 admin 用途令牌：分支保护读取将回退严格模式（管理员账号运行 assistant login 可补）")
+		logf("没有 admin 用途令牌：分支保护读取将回退严格模式（管理员账号运行 assistant login add 可补）")
 	}
 	managerOptions := []status.ManagerOption{status.WithProgress(logf)}
 	if instance.Reviewer.Name != "" {

@@ -37,9 +37,9 @@ func newSetupCommand(configFlag *string) *cobra.Command {
 			"  4. 在默认分支配置分支保护（required approvals、驳回阻塞、过期批准作废、落后分支阻塞）；\n" +
 			"  5. 扫描 merge 为管理员协作者的仓库，自动写入 MERGE_TOKEN secret；\n" +
 			"  6. 把实例与仓库写回 config.json（0600）。\n\n" +
-			"不使用任何独立的凭据参数：管理员令牌来自 assistant login 写入凭据库的\n" +
+			"不使用任何独立的凭据参数：管理员令牌来自 assistant login add 写入凭据库的\n" +
 			"purpose=admin，因此运行前必须先用**管理员账号**登录：\n" +
-			"  assistant login <host> --user <管理员账号>\n\n" +
+			"  assistant login add <host> --user <管理员账号>\n\n" +
 			"仓库清单可省略（--repos 与配置文件都为空时只初始化实例：建号与令牌，\n" +
 			"不触碰任何仓库），之后再次运行 setup 补齐仓库即可。全流程幂等。",
 		Args: cobra.NoArgs,
@@ -108,7 +108,7 @@ func runSetup(command *cobra.Command, configPath string, options *setupOptions) 
 	if err := requireAdminIdentity(configPath, host); err != nil {
 		return err
 	}
-	// 唯一的凭据来源：assistant login 写入的 admin 用途令牌
+	// 唯一的凭据来源：assistant login add 写入的 admin 用途令牌
 	adminCredential, err := tokenForPurpose(writePath, host, credentials.PurposeAdmin)
 	if err != nil {
 		return err

@@ -334,7 +334,7 @@ EOF
   echo "配置补全（凭据与配置都在工作目录）："
   echo "  1. token 最快路径：sudo -u $SERVICE_USER -H env GITEA_HOST=https://<gitea地址> GITEA_ACCESS_TOKEN=<token> $BINDIR/assistant list   # 只读验证"
   echo "  2. 长期配置：编辑 $work_dir/config.json（providers/channels/runtimes），"
-  echo "     或 sudo -u $SERVICE_USER -H $BINDIR/assistant login <gitea地址> --user <管理员账号> 后 setup 建机器人账号"
+  echo "     或 sudo -u $SERVICE_USER -H $BINDIR/assistant login add <gitea地址> --user <管理员账号> 后 setup 建机器人账号"
   echo "  3. 校验: sudo -u $SERVICE_USER -H $BINDIR/assistant validate；claude CLI 装到 PATH（/usr/local/bin）"
   if [ "$INSTALL_SYSTEMD" = yes ]; then
     echo "  4. 启动: systemctl enable --now assistant；观测 journalctl -u assistant -f"

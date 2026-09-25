@@ -46,6 +46,6 @@ func resolveMCPToken(host string, getenv func(string) string) (string, string, e
 	if !ok {
 		return "", "", nil
 	}
-	return credential.Token, "assistant login (" + credentialPath + "，@" + credential.User + ")", nil
+	return credential.Token, "assistant login add (" + credentialPath + "，@" + credential.User + ")", nil
 }
 

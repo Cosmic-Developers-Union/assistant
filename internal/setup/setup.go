@@ -397,7 +397,7 @@ func (o Options) validate() error {
 		return fmt.Errorf("host 必须是绝对 HTTP(S) URL：%q", o.Host)
 	}
 	if o.AdminToken == "" {
-		return fmt.Errorf("缺少管理员令牌：先用管理员账号 assistant login %s", o.Host)
+		return fmt.Errorf("缺少管理员令牌：先用管理员账号 assistant login add %s", o.Host)
 	}
 	for _, name := range []string{o.ReviewerName, o.MergerName} {
 		if !accountNamePattern.MatchString(name) {
