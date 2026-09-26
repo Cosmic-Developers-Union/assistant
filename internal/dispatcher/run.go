@@ -442,8 +442,7 @@ func RunSession(options SessionOptions) SessionOutcome {
 	// 归因都在 Runner 里；这里只管「拿到结论没有」。
 	runErr := sessionRunner().Run(context.Background(), spec, stream.consume)
 
-	// Runner 按行交付，flush 只兜底无换行结尾的残余行
-	stream.flush()
+	// 无换行结尾的末行由 Runner 在返回前冲刷，这里不必再兜底
 	// 残留的思考段（流以 thinking 帧结尾时）冲刷 + 全会话合计
 	stream.thinking.finish()
 	if runErr != nil {
@@ -528,9 +527,7 @@ func runSessionSpec(options SessionOptions) claude.Spec {
 type sessionStream struct {
 	outcome    *sessionOutcome
 	onProgress func(string)
-	// buffer 只作兜底：Runner 正常按行交付时它始终为空
-	buffer    []byte
-	sawResult bool
+	sawResult  bool
 	// debug 为真时把每行原始 stream 事件也交给 onProgress（排查「会话在干什么」）
 	debug bool
 	// thinking 聚合 system/thinking_tokens 帧
@@ -580,16 +577,6 @@ func (s *sessionStream) consume(line []byte) {
 	if claude.Feed(&s.outcome.Outcome, line, claude.ProgressTerse, s.onProgress) {
 		s.sawResult = true
 	}
-}
-
-// flush 折叠尚未交付的残余行（正常路径下缓冲为空）。
-func (s *sessionStream) flush() {
-	if len(s.buffer) == 0 {
-		return
-	}
-	line := s.buffer
-	s.buffer = nil
-	s.consume(line)
 }
 
 // debugProgress 在 --debug 下把细节写进待办日志（前缀 [debug]，便于过滤）。

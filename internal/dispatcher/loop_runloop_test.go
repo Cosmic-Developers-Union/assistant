@@ -834,47 +834,6 @@ func TestDescribeStreamEventLabelsEachShape(t *testing.T) {
 	}
 }
 
-// TestSessionStreamFlushWritesArchiveTailAndFold：残余行（Runner 未能按行交付时
-// 的兜底路径）在收尾 flush 时也要写进归档并折叠进归集结果——归档是会话原始流量
-// 的唯一副本，丢尾巴等于丢结论。
-func TestSessionStreamFlushWritesArchiveTail(t *testing.T) {
-	dir := t.TempDir()
-	archive := filepath.Join(dir, "archive.jsonl")
-	file, err := os.Create(archive)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var debugLines []string
-	outcome := newSessionOutcome()
-	outcome.SessionID = "s-tail"
-	stream := newSessionStream(&outcome, func(line string) { debugLines = append(debugLines, line) }, true)
-	stream.archiveFile = file
-	stream.buffer = []byte(`{"type":"assistant","subtype":"text"}`)
-	stream.flush()
-	if err := file.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	data, err := os.ReadFile(archive)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := "{\"type\":\"assistant\",\"subtype\":\"text\"}\n"; string(data) != want {
-		t.Errorf("归档内容 = %q, want %q", data, want)
-	}
-	if len(debugLines) == 0 || !strings.Contains(strings.Join(debugLines, "\n"), "[debug] 事件 assistant/text") {
-		t.Errorf("flush 应上报事件时间线：%v", debugLines)
-	}
-	if outcome.NumTurns != 1 {
-		t.Errorf("NumTurns = %d, want 1（残余行也要折叠）", outcome.NumTurns)
-	}
-	// 二次 flush 无残余：不得重复写
-	stream.flush()
-	if again, _ := os.ReadFile(archive); string(again) != string(data) {
-		t.Errorf("空缓冲 flush 不应重复写归档：%q", again)
-	}
-}
-
 // TestThinkingTrackerFlushDisabledStaysSilent：未开 --debug 时思考段汇总不得上报
 // （默认日志只留操作者需要的信息），但累计值仍要结算，否则合计会漏掉最后一段。
 func TestThinkingTrackerFlushDisabledStaysSilent(t *testing.T) {

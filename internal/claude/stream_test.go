@@ -418,6 +418,41 @@ func TestFeedThinkingTokensThrottling(t *testing.T) {
 	}
 }
 
+// 新一轮思考（计数从高位回落到低位）**立即播报**，不受时间窗节流。
+//
+// 节流是为了不让同一段思考刷屏；但计数回落意味着模型换了新的一段思考，此时
+// 用户看到的「思考中…（约 8000 词元）」会原地冻住最长一个时间窗，恰好是他怀疑
+// 「是不是卡住了」的时候。旧 daemon 实现专门处理了这条（计数重置 ⇒ 重新开始播
+// 报），合并两个解析器时必须保留。
+func TestFeedThinkingTokensNewRoundReportsImmediately(t *testing.T) {
+	originalNow := Now
+	originalInterval := ThinkingProgressInterval
+	t.Cleanup(func() { Now = originalNow; ThinkingProgressInterval = originalInterval })
+	thinkingState.set(thinkingReport{})
+
+	clock := nowStub(t)
+	var progress []string
+	outcome := NewOutcome()
+
+	// 第一轮：走到 8000 词元
+	Feed(&outcome, []byte(`{"type":"system","subtype":"thinking_tokens","estimated_tokens":8000}`),
+		ProgressTerse, collect(&progress))
+	if len(progress) != 1 {
+		t.Fatalf("首帧应播报：%v", progress)
+	}
+
+	// 时间窗内进入新一轮：计数回落到 300
+	clock.advance(100 * 1e6) // 100ms，远小于 2s 窗口
+	Feed(&outcome, []byte(`{"type":"system","subtype":"thinking_tokens","estimated_tokens":300}`),
+		ProgressTerse, collect(&progress))
+	if len(progress) != 2 {
+		t.Errorf("新一轮思考（计数回落）应立即播报，实际只播了 %d 次：%v", len(progress), progress)
+	}
+	if outcome.ThinkingTokens != 300 {
+		t.Errorf("ThinkingTokens = %d, want 300（新一轮应覆盖计数）", outcome.ThinkingTokens)
+	}
+}
+
 // onProgress 为 nil 时只归集、不 panic（评审会话在某些路径下不订阅进度）。
 func TestFeedNilProgressIsTolerated(t *testing.T) {
 	outcome := NewOutcome()

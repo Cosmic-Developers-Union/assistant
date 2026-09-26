@@ -774,11 +774,19 @@ func TestThinkingTrackerFlushesTrailingBurst(t *testing.T) {
 			t.Errorf("thinking 帧被逐条上报：%q", line)
 		}
 	}
-	if len(progress) != 2 {
-		t.Fatalf("progress = %v, want 段汇总 + 合计", progress)
+	// 只挑汇总行做断言：思考期间的进度播报（「思考中…」）是另一条独立通道，
+	// 它的节流有自己的测试，不该把行数钉死在这里。
+	var summaries []string
+	for _, line := range progress {
+		if strings.Contains(line, "thinking 段汇总") || strings.Contains(line, "thinking 合计") {
+			summaries = append(summaries, line)
+		}
 	}
-	if !strings.Contains(progress[0], "21 tokens") || !strings.Contains(progress[1], "21 tokens") {
-		t.Errorf("汇总 = %v, want 各含 21 tokens", progress)
+	if len(summaries) != 2 {
+		t.Fatalf("段汇总 + 合计应各报一条，实际 %d 条：%v", len(summaries), summaries)
+	}
+	if !strings.Contains(summaries[0], "21 tokens") || !strings.Contains(summaries[1], "21 tokens") {
+		t.Errorf("汇总 = %v, want 各含 21 tokens", summaries)
 	}
 }
 

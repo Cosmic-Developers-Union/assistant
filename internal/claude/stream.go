@@ -358,9 +358,15 @@ func feedToolResults(message Message, style Progress, report func(string)) {
 // 节流，既能看到模型在动又不刷屏。
 func feedThinkingTokens(outcome *Outcome, event Event, onProgress func(string)) {
 	total := 0
+	newRound := false
 	switch {
 	case event.EstimatedTokens != nil:
 		total = int(*event.EstimatedTokens)
+		// 计数回落到比上一轮低说明换了一段思考（本轮重新从几十起数）。这时要
+		// **立即播报**：否则用户看到的「思考中…（约 8000 词元）」会在模型真正
+		// 开始新一轮思考后原地冻住最长一个时间窗，恰好是他怀疑「是不是卡住了」
+		// 的时候。
+		newRound = total < outcome.ThinkingTokens
 		outcome.ThinkingTokens = total
 	case event.EstimatedTokensDelta != nil:
 		outcome.ThinkingTokens += int(*event.EstimatedTokensDelta)
@@ -371,7 +377,7 @@ func feedThinkingTokens(outcome *Outcome, event Event, onProgress func(string)) 
 	}
 	now := Now()
 	state := thinkingState.get()
-	if now.Sub(state.reportedAt) < ThinkingProgressInterval && total-state.reported < thinkingBurstDelta {
+	if !newRound && now.Sub(state.reportedAt) < ThinkingProgressInterval && total-state.reported < thinkingBurstDelta {
 		return
 	}
 	thinkingState.set(thinkingReport{reportedAt: now, reported: total})
