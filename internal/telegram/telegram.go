@@ -76,9 +76,9 @@ type Chat struct {
 
 // Message 是一条文本消息（非文本消息 Text 为空，通道层跳过）。
 type Message struct {
-	MessageID int64 `json:"message_id"`
-	From      *User `json:"from,omitempty"`
-	Chat      Chat  `json:"chat"`
+	MessageID int64  `json:"message_id"`
+	From      *User  `json:"from,omitempty"`
+	Chat      Chat   `json:"chat"`
 	Text      string `json:"text,omitempty"`
 }
 

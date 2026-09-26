@@ -86,9 +86,9 @@ type Config struct {
 // Flags 是命令行参数（未给出的项回退环境变量/默认值/自动检测）。SyncMirror
 // 用指针区分「显式 false」与「未给出」，前者压过环境变量。
 type Flags struct {
-	Host          string
-	Repository    string
-	AccessToken   string
+	Host        string
+	Repository  string
+	AccessToken string
 	// SessionDir 覆盖会话配置根（Claude Code 配置根）：runtime 装配时传
 	// runtime.claude_dir 的解析值，使评审会话与对话会话共享同一配置根
 	SessionDir    string

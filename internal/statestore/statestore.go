@@ -241,15 +241,15 @@ type Result struct {
 
 // Session 是 sessions 表的一行（内省视图）。
 type Session struct {
-	Host       string `json:"host"`
-	Repository string `json:"repository"`
-	Kind       string `json:"kind"`
-	Number     int64  `json:"number"`
-	State      string `json:"state"`
-	Subtype    string `json:"subtype"`
-	StartedAt  string `json:"started_at"`
-	FinishedAt string `json:"finished_at,omitempty"`
-	Turns      int    `json:"turns"`
+	Host       string  `json:"host"`
+	Repository string  `json:"repository"`
+	Kind       string  `json:"kind"`
+	Number     int64   `json:"number"`
+	State      string  `json:"state"`
+	Subtype    string  `json:"subtype"`
+	StartedAt  string  `json:"started_at"`
+	FinishedAt string  `json:"finished_at,omitempty"`
+	Turns      int     `json:"turns"`
 	CostUSD    float64 `json:"cost_usd"`
 	DurationMS int64   `json:"duration_ms"`
 	SessionID  string  `json:"session_id"`

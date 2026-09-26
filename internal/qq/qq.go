@@ -115,10 +115,10 @@ func (c *Client) SendGroupText(ctx context.Context, groupOpenID, msgID string, m
 
 func (c *Client) sendMessage(ctx context.Context, path, msgID string, msgSeq int, text string) error {
 	body := map[string]any{
-		"content": text,
+		"content":  text,
 		"msg_type": 0,
-		"msg_id":  msgID,
-		"msg_seq": msgSeq,
+		"msg_id":   msgID,
+		"msg_seq":  msgSeq,
 	}
 	return c.post(ctx, path, body)
 }

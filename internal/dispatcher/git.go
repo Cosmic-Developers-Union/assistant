@@ -132,6 +132,7 @@ func SingleFlightMirror(window time.Duration, mirror func() (string, error)) fun
 		return sha, failure
 	}
 }
+
 // PinStandard 用宿主检出的 .claude/ 整体替换 worktree 的同名目录。worktree 按
 // PR head 检出，随带的 .claude 是 PR 自己的版本——照单全收等于允许 PR 改弱
 // 自己被审的规则（甚至自带放行权限的 settings），所以一律先删掉：基线有

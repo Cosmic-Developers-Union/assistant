@@ -451,7 +451,8 @@ func (f *File) Hosts() []string {
 }
 
 // Users 返回站点上已登记的账号名（排序、去重）。
-func (f *File) Users(host string) []string {	if f == nil {
+func (f *File) Users(host string) []string {
+	if f == nil {
 		return nil
 	}
 	host = NormalizeHost(host)
