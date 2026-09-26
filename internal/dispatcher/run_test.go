@@ -51,6 +51,26 @@ func TestBuildPromptIssue(t *testing.T) {
 	}
 }
 
+// 标题里的换行/空白先折叠成单空格再按 160 字截断：超长标题不能把起手式
+// （「review pr #N」）顶出提示词开头，也不能靠换行伪造分段。
+func TestBuildPromptTruncatesLongTitleByRunes(t *testing.T) {
+	long := strings.Repeat("标", 100) + "\n\n  " + strings.Repeat("题", 100)
+	prompt := BuildPrompt(KindPull, 58, PromptContext{Repository: "owner/repo", Title: long})
+	if !strings.HasPrefix(prompt, "review pr #58\n") {
+		t.Errorf("prompt 起手式被破坏：%q", prompt[:min(len(prompt), 40)])
+	}
+	subject := strings.SplitN(prompt, "\n", 2)[1]
+	if !strings.Contains(subject, strings.Repeat("标", 100)+" "+strings.Repeat("题", 59)) {
+		t.Errorf("标题应按 160 字（含折叠空格）截断：%q", subject)
+	}
+	if strings.Contains(subject, strings.Repeat("题", 60)) {
+		t.Errorf("标题未截断到 160 字：%q", subject)
+	}
+	if strings.Contains(subject, "\n\n") {
+		t.Errorf("标题内换行未折叠：%q", subject)
+	}
+}
+
 func TestFeedStreamLineInit(t *testing.T) {
 	outcome := NewSessionOutcome()
 	var progress []string
@@ -93,6 +113,46 @@ func TestFeedStreamLineAssistant(t *testing.T) {
 			t.Errorf("progress[%d] = %q, want %q", i, progress[i], want[i])
 		}
 	}
+}
+
+// 工具调用没有可摘要的入参（无 input / 摘要为空）时只报工具名；tool_result 帧
+// 折成一行回执（含错误标记），二者共同构成会话时间线的「当前步在干什么」。
+func TestFeedStreamLineToolUseWithoutDetailAndToolResult(t *testing.T) {
+	outcome := NewSessionOutcome()
+	var progress []string
+	collect := func(line string) { progress = append(progress, line) }
+
+	FeedStreamLine(&outcome,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"mcp__gitea__issue_read"}]}}`,
+		collect)
+	FeedStreamLine(&outcome,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Task","input":{}}]}}`,
+		collect)
+	FeedStreamLine(&outcome,
+		`{"type":"user","message":{"content":[`+
+			`{"type":"tool_result","content":"读取成功"},`+
+			`{"type":"tool_result","is_error":true,"content":"mcp\n拒绝"},`+
+			`{"type":"tool_result","text":"裸文本回执"},`+
+			`{"type":"tool_result"},`+
+			`{"type":"text","text":"不是工具回执"}]}}`,
+		collect)
+	want := []string{
+		"🔧 mcp__gitea__issue_read", "🔧 Task",
+		"  ↳ （返回 14 字）",   // Content 原文按字节计数（"读取成功" 12 字节 + 引号）
+		`  ↳ ✗ "mcp\n拒绝"`, // 错误回执用 Content 原文，转义序列的 \n 不展开
+		"  ↳ （返回 5 字）",    // 无 Content 时退回 Text，按字符计数
+		"  ↳ （完成）",        // 两者皆无
+	}
+	if len(progress) != len(want) {
+		t.Fatalf("progress = %v, want %v", progress, want)
+	}
+	for i := range want {
+		if progress[i] != want[i] {
+			t.Errorf("progress[%d] = %q, want %q", i, progress[i], want[i])
+		}
+	}
+	// 无 onProgress（--debug 关闭）时不得 panic
+	FeedStreamLine(&outcome, `{"type":"user","message":{"content":[{"type":"tool_result"}]}}`, nil)
 }
 
 func TestFeedStreamLineResultSuccess(t *testing.T) {
@@ -699,5 +759,110 @@ func TestThinkingTrackerFallsBackToCumulative(t *testing.T) {
 	tracker.flush()
 	if len(progress) != 1 || !strings.Contains(progress[0], "15 tokens") {
 		t.Fatalf("progress = %v, want 汇总含 15 tokens（25-10 基线差值）", progress)
+	}
+}
+
+// RunSession 的 debug 归档与三条收尾出口：debug 打开时归档原始 stream-json
+// 并逐项打点（会话命令 / 文本记录 / 配置根 / MCP 声明 / 结束汇总），
+// 归档文件必须是可内省的完整帧而非折叠后的摘要。这里同时走一遍会话配置
+// 落盘失败（SessionDir 落在普通文件下）与 spawn 失败两条出口——它们都在
+// RunSession 内、不依赖真实 claude。
+func TestRunSessionDebugArchiveAndConfigFailures(t *testing.T) {
+	t.Run("debug 打点与归档", func(t *testing.T) {
+		dir := t.TempDir()
+		archiveDir := filepath.Join(dir, "archive")
+		bin := fakeClaude(t, dir, `printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-arc","model":"fake"}'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.2,"duration_ms":300,"session_id":"s-arc","result":"归档结果"}'`,
+		)
+		var progress []string
+		outcome := RunSession(SessionOptions{
+			Config: testConfig(func(config *Config) {
+				config.ClaudeBin = bin
+				config.Debug = true
+				config.SessionArchiveDir = archiveDir
+			}),
+			Prompt:        "review pr #64",
+			Cwd:           dir,
+			MCPConfigPath: filepath.Join(dir, ".mcp.json"),
+			OnProgress:    func(line string) { progress = append(progress, line) },
+		})
+		if outcome.IsError {
+			t.Fatalf("outcome = %+v, want success", outcome)
+		}
+		joined := strings.Join(progress, "\n")
+		for _, want := range []string{"会话命令：", "文本记录：", "会话配置：", "MCP 声明：", "会话结束：subtype=success"} {
+			if !strings.Contains(joined, want) {
+				t.Errorf("debug 打点缺少 %q：\n%s", want, joined)
+			}
+		}
+		if outcome.ArchivePath == "" {
+			t.Fatal("ArchivePath 为空，debug 归档应落盘")
+		}
+		archived, err := os.ReadFile(outcome.ArchivePath)
+		if err != nil {
+			t.Fatalf("归档不可读: %v", err)
+		}
+		// 归档保留原始帧（外部工具无需经 daemon 即可内省），不是折叠摘要
+		if !strings.Contains(string(archived), `"subtype":"init"`) ||
+			!strings.Contains(string(archived), `"subtype":"success"`) {
+			t.Errorf("归档内容 = %q, want 原始 stream-json 帧", archived)
+		}
+	})
+
+	t.Run("SessionDir 落在普通文件下：配置根创建失败即退出", func(t *testing.T) {
+		dir := t.TempDir()
+		blocker := filepath.Join(dir, "not-a-dir")
+		writeFile(t, blocker, "占位\n")
+		outcome := RunSession(SessionOptions{
+			Config: testConfig(func(config *Config) {
+				config.ClaudeBin = fakeClaude(t, dir, "exit 0")
+				config.SessionDir = filepath.Join(blocker, "session")
+			}),
+			Prompt:        "p",
+			Cwd:           dir,
+			MCPConfigPath: filepath.Join(dir, ".mcp.json"),
+		})
+		if !outcome.IsError || !strings.Contains(strings.Join(outcome.Errors, "\n"), "创建会话配置根") {
+			t.Errorf("outcome = %+v, want 创建会话配置根失败", outcome)
+		}
+	})
+
+	t.Run("ClaudeBin 不存在：spawn 失败即退出", func(t *testing.T) {
+		dir := t.TempDir()
+		outcome := RunSession(SessionOptions{
+			Config: testConfig(func(config *Config) {
+				config.ClaudeBin = filepath.Join(dir, "absent-bin")
+			}),
+			Prompt:        "p",
+			Cwd:           dir,
+			MCPConfigPath: filepath.Join(dir, ".mcp.json"),
+		})
+		if !outcome.IsError || len(outcome.Errors) == 0 {
+			t.Errorf("outcome = %+v, want spawn 失败", outcome)
+		}
+	})
+}
+
+// 退出码为负且未被信号终止时的「异常终止」出口：用 exec 崩溃的 shell
+// （自身收到 SIGSEGV）走 processSignaled 的 false 分支，钉住错误文案。
+func TestRunSessionAbnormalExit(t *testing.T) {
+	dir := t.TempDir()
+	bin := fakeClaude(t, dir, "kill -SEGV $$")
+	outcome := RunSession(SessionOptions{
+		Config: testConfig(func(config *Config) {
+			config.ClaudeBin = bin
+			config.SessionTimeout = 20 * time.Second
+		}),
+		Prompt:        "p",
+		Cwd:           dir,
+		MCPConfigPath: filepath.Join(dir, ".mcp.json"),
+	})
+	if !outcome.IsError {
+		t.Fatalf("outcome = %+v, want error", outcome)
+	}
+	joined := strings.Join(outcome.Errors, "\n")
+	// 无论落到「被信号 X 终止」还是「异常终止」，都必须是 claude 前缀的收尾错误
+	if !strings.Contains(joined, "claude ") {
+		t.Errorf("errors = %v, want claude 退出归因", outcome.Errors)
 	}
 }

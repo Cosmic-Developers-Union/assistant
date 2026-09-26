@@ -295,3 +295,307 @@ func TestSingleFlightMirrorReusesFailure(t *testing.T) {
 		t.Errorf("calls = %d, want 1", got)
 	}
 }
+
+// copyDir/copyFile 是 PinStandard 的底座：必须保留目录层级、文件权限位与符号链接，
+// 且链接不得被解引用（否则会把链接目标的内容复制进来，标准被替换仍能通过校验）。
+func TestCopyDirPreservesTreeModesAndSymlinks(t *testing.T) {
+	source := t.TempDir()
+	destination := filepath.Join(t.TempDir(), "copied")
+
+	nested := filepath.Join(source, "skills", "review")
+	if err := os.MkdirAll(nested, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(source, "top.txt"), "顶层\n")
+	writeFile(t, filepath.Join(nested, "SKILL.md"), "标准\n")
+	if err := os.Chmod(filepath.Join(source, "top.txt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(source, "top.txt")
+	link := filepath.Join(source, "link-to-top")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := copyDir(source, destination); err != nil {
+		t.Fatalf("copyDir() error = %v", err)
+	}
+
+	if content, err := os.ReadFile(filepath.Join(destination, "top.txt")); err != nil || string(content) != "顶层\n" {
+		t.Errorf("顶层文件 = %q/%v, want 顶层", content, err)
+	}
+	if content, err := os.ReadFile(filepath.Join(destination, "skills", "review", "SKILL.md")); err != nil || string(content) != "标准\n" {
+		t.Errorf("嵌套文件 = %q/%v, want 标准", content, err)
+	}
+	info, err := os.Stat(filepath.Join(destination, "top.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("权限位 = %v, want 0600（评审标准可读性受权限约束）", info.Mode().Perm())
+	}
+	// 链接按链接复制，指向的原目标路径不变
+	if info, err := os.Lstat(filepath.Join(destination, "link-to-top")); err != nil {
+		t.Errorf("符号链接丢失: %v", err)
+	} else if info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("符号链接被解引用：mode = %v", info.Mode())
+	} else if resolved, err := os.Readlink(filepath.Join(destination, "link-to-top")); err != nil || resolved != target {
+		t.Errorf("链接目标 = %q/%v, want %q", resolved, err, target)
+	}
+}
+
+func TestCopyDirAndFileErrors(t *testing.T) {
+	if err := copyDir(filepath.Join(t.TempDir(), "missing"), filepath.Join(t.TempDir(), "out")); err == nil {
+		t.Error("源目录不存在应报错")
+	}
+	if err := copyFile(filepath.Join(t.TempDir(), "missing"), filepath.Join(t.TempDir(), "out"), 0o644); err == nil {
+		t.Error("源文件不存在应报错")
+	}
+	// 目标目录不可写：写入失败必须冒泡而不是静默成功
+	source := filepath.Join(t.TempDir(), "src.txt")
+	writeFile(t, source, "内容\n")
+	blocked := filepath.Join(t.TempDir(), "blocked")
+	if err := os.MkdirAll(blocked, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root 不受权限位约束")
+	}
+	if err := copyFile(source, filepath.Join(blocked, "out.txt"), 0o644); err == nil {
+		t.Error("目标不可写应报错")
+	}
+}
+
+// PinStandard / copyDir / copyFile / runGitEnv 的本地失败分支：不依赖 git，
+// 用文件系统权限与路径形态把每条错误出口走一遍——这些出口一旦静默，
+// 坏掉的 .claude/ 或半截 worktree 会被当成正常结果放过去。
+func TestGitHelpersLocalErrorBranches(t *testing.T) {
+	t.Run("copyFile 目标是目录", func(t *testing.T) {
+		dir := t.TempDir()
+		source := filepath.Join(dir, "src.txt")
+		writeFile(t, source, "内容\n")
+		// 目标是目录：O_WRONLY 打开目录必然失败，错误必须冒泡
+		if err := copyFile(source, dir, 0o644); err == nil {
+			t.Error("目标不可写应报错")
+		}
+	})
+
+	t.Run("copyDir 源不存在", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := copyDir(filepath.Join(dir, "absent"), filepath.Join(dir, "out")); err == nil {
+			t.Error("源目录不存在应报错")
+		}
+	})
+
+	t.Run("copyDir 目标是文件", func(t *testing.T) {
+		dir := t.TempDir()
+		source := filepath.Join(dir, "src")
+		if err := os.MkdirAll(source, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(source, "f.txt"), "x\n")
+		target := filepath.Join(dir, "target.txt")
+		writeFile(t, target, "占位\n")
+		// MkdirAll 落在已有文件上必然失败
+		if err := copyDir(source, target); err == nil {
+			t.Error("目标已被文件占用应报错")
+		}
+	})
+
+	t.Run("copyDir 条目是断链符号链接", func(t *testing.T) {
+		dir := t.TempDir()
+		source := filepath.Join(dir, "src")
+		if err := os.MkdirAll(source, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// 断链：entry.Info() 拿到链接自身的 lstat（不跟随），因此复制的是链接
+		// 本身，产品语义是「保留符号链接，不解引用」——不断链也不报错
+		if err := os.Symlink(filepath.Join(dir, "absent"), filepath.Join(source, "dangling")); err != nil {
+			t.Fatal(err)
+		}
+		destination := filepath.Join(dir, "out")
+		if err := copyDir(source, destination); err != nil {
+			t.Fatalf("断链应原样复制: %v", err)
+		}
+		if resolved, err := os.Readlink(filepath.Join(destination, "dangling")); err != nil || resolved != filepath.Join(dir, "absent") {
+			t.Errorf("断链 = %q/%v, want 目标原样保留", resolved, err)
+		}
+	})
+
+	t.Run("copyDir 符号链接目标已存在", func(t *testing.T) {
+		dir := t.TempDir()
+		source := filepath.Join(dir, "src")
+		if err := os.MkdirAll(source, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(dir, "real.txt")
+		writeFile(t, target, "真文件\n")
+		// 链到已存在的真文件：Info 成功，Symlink 落点被占必然失败
+		if err := os.Symlink(target, filepath.Join(source, "link")); err != nil {
+			t.Fatal(err)
+		}
+		destination := filepath.Join(dir, "out")
+		if err := os.MkdirAll(destination, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(destination, "link")); err != nil {
+			t.Fatal(err)
+		}
+		if err := copyDir(source, destination); err == nil {
+			t.Error("落点已存在时建链应报错")
+		}
+	})
+
+	t.Run("PinStandard 目标不可删", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root 无视权限位，跳过")
+		}
+		dir := t.TempDir()
+		worktree := filepath.Join(dir, "wt")
+		if err := os.MkdirAll(filepath.Join(worktree, ".claude"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		repo := filepath.Join(dir, "repo")
+		if err := os.MkdirAll(filepath.Join(repo, ".claude"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// 父目录去掉写权限：RemoveAll 无法删除其下的 .claude
+		if err := os.Chmod(worktree, 0o555); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(worktree, 0o755) })
+		if err := PinStandard(repo, worktree); err == nil {
+			t.Error("目标 .claude 无法删除时应报错，不能假装覆盖成功")
+		}
+	})
+
+	t.Run("PinStandard 源不可读", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root 无视权限位，跳过")
+		}
+		dir := t.TempDir()
+		repo := filepath.Join(dir, "repo")
+		if err := os.MkdirAll(filepath.Join(repo, ".claude"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(filepath.Join(repo, ".claude"), 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(filepath.Join(repo, ".claude"), 0o755) })
+		// Stat 成功（父目录可进入）但 ReadDir 失败：错误须冒泡而非当成「没有源」
+		if err := PinStandard(repo, filepath.Join(dir, "wt")); err == nil {
+			t.Error("源 .claude 不可读应报错，不能当成缺省标准")
+		}
+	})
+
+	t.Run("runGitEnv 失败带命令回显", func(t *testing.T) {
+		dir := t.TempDir()
+		_, err := runGitEnv(filepath.Join(dir, "absent"), nil, "status")
+		if err == nil {
+			t.Fatal("非 git 目录调用应失败")
+		}
+		if !strings.Contains(err.Error(), "git status") {
+			t.Errorf("error = %v, want 含命令回显", err)
+		}
+	})
+
+	t.Run("runGitEnv 空 stderr 回落 err.Error", func(t *testing.T) {
+		// 直接执行一个不存在的二进制拿不到（runGitEnv 固定跑 git）；这里用
+		// PATH 被清空的形态：git 找不到时不产生 stderr 输出
+		dir := t.TempDir()
+		t.Setenv("PATH", dir)
+		_, err := runGitEnv(dir, nil, "status")
+		if err == nil {
+			t.Fatal("PATH 为空时调用 git 应失败")
+		}
+		if !strings.Contains(err.Error(), "git status") {
+			t.Errorf("error = %v, want 含命令回显（回落 err.Error）", err)
+		}
+	})
+}
+
+// PinStandard 以源 .claude 整棵为准：目标里的残留必须先清空（否则旧的弱标准
+// 文件会留下来，评审标准可被绕过）。
+func TestPinStandardReplacesTargetAndToleratesMissingSource(t *testing.T) {
+	repoDir := t.TempDir()
+	worktreeDir := t.TempDir()
+	sourceSkill := filepath.Join(repoDir, ".claude", "skills", "review")
+	if err := os.MkdirAll(sourceSkill, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(sourceSkill, "SKILL.md"), skillBaseline)
+	// 目标里的旧内容（含源中不存在的残留文件）
+	residue := filepath.Join(worktreeDir, ".claude", "skills", "review")
+	if err := os.MkdirAll(residue, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(residue, "SKILL.md"), skillEvil)
+	writeFile(t, filepath.Join(worktreeDir, ".claude", "stale.json"), "{}\n")
+
+	if err := PinStandard(repoDir, worktreeDir); err != nil {
+		t.Fatalf("PinStandard() error = %v", err)
+	}
+	if content, err := os.ReadFile(filepath.Join(residue, "SKILL.md")); err != nil || string(content) != skillBaseline {
+		t.Errorf("SKILL.md = %q/%v, want 基线标准", content, err)
+	}
+	if _, err := os.Stat(filepath.Join(worktreeDir, ".claude", "stale.json")); !os.IsNotExist(err) {
+		t.Errorf("目标残留未清空: err = %v", err)
+	}
+
+	// 源不存在：目标被清掉且不报错（托管标准缺席时不留半份现场）
+	emptyRepo := t.TempDir()
+	if err := PinStandard(emptyRepo, worktreeDir); err != nil {
+		t.Fatalf("源缺失时 PinStandard() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(worktreeDir, ".claude")); !os.IsNotExist(err) {
+		t.Errorf("源缺失时应移除目标 .claude: err = %v", err)
+	}
+}
+
+// RemoveWorktree 对已消失的工作树不报错：git 记录里的登记项要靠 prune 清掉，
+// 残留登记会让后续同名 worktree add 失败。
+func TestRemoveWorktreePrunesMissingDirectory(t *testing.T) {
+	base := makeFixture(t)
+	repoDir := filepath.Join(base, "seed")
+	worktreeDir := filepath.Join(t.TempDir(), "wt")
+	sha, err := PrepareWorktree(repoDir, 1, worktreeDir, "")
+	if err != nil {
+		t.Fatalf("PrepareWorktree() error = %v", err)
+	}
+	if err := RemoveWorktree(repoDir, worktreeDir); err != nil {
+		t.Fatalf("RemoveWorktree() error = %v", err)
+	}
+	if _, err := os.Stat(worktreeDir); !os.IsNotExist(err) {
+		t.Errorf("工作树目录未删除: err = %v", err)
+	}
+	// 再次删除（目录已不在）→ prune 后返回 nil
+	if err := RemoveWorktree(repoDir, worktreeDir); err != nil {
+		t.Errorf("重复删除 error = %v, want nil", err)
+	}
+	// prune 生效：同一路径可再次检出
+	if again, err := PrepareWorktree(repoDir, 1, worktreeDir, ""); err != nil {
+		t.Fatalf("二次 PrepareWorktree() error = %v", err)
+	} else if again != sha {
+		t.Errorf("二次 sha = %q, want %q", again, sha)
+	}
+}
+
+// 取不到 ref 的出口：fetch 失败（PR head 不存在 / 基线分支拼错）时直接返回
+// 错误，不建 half-baked worktree——早期失败比留下半截现场更容易诊断。
+func TestWorktreePreparationFailsOnMissingRef(t *testing.T) {
+	base := makeFixture(t)
+	seed := filepath.Join(base, "seed")
+
+	if _, err := PrepareWorktree(seed, 999, filepath.Join(base, "wt-pr-999"), ""); err == nil {
+		t.Error("不存在的 PR ref 应报错")
+	}
+	if _, err := PrepareBaselineWorktree(seed, "no-such-branch", filepath.Join(base, "wt-base"), ""); err == nil {
+		t.Error("不存在的基线分支应报错")
+	}
+	// 失败路径不落残缺 worktree：目录不应存在
+	for _, dir := range []string{filepath.Join(base, "wt-pr-999"), filepath.Join(base, "wt-base")} {
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Errorf("%s 不应存在: err = %v", dir, err)
+		}
+	}
+}

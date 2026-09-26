@@ -40,7 +40,9 @@ type fakeAPI struct {
 	pull    status.PullRequest
 	pullErr error
 	reviews []status.Review
-	labels  []status.Label
+	// reviewsErr 非空时作为 review 列表失败（完成判定的错误路径）
+	reviewsErr error
+	labels     []status.Label
 	// 非空时优先作为标签错误
 	labelsErr error
 	login     string
@@ -81,7 +83,7 @@ func (f *fakeAPI) GetPullRequest(context.Context, status.Repository, int64) (sta
 }
 
 func (f *fakeAPI) ListPullReviews(context.Context, status.Repository, int64) ([]status.Review, error) {
-	return f.reviews, nil
+	return f.reviews, f.reviewsErr
 }
 
 func (f *fakeAPI) GetIssueLabels(context.Context, status.Repository, int64) ([]status.Label, error) {

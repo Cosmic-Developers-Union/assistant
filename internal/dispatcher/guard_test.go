@@ -2,6 +2,7 @@ package dispatcher
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -216,5 +217,145 @@ func TestProcessItemFollowUpRunsResumeSessionWithoutVerify(t *testing.T) {
 		if !strings.Contains(detail, want) {
 			t.Errorf("待办日志 missing %q:\n%s", want, detail)
 		}
+	}
+}
+
+// selectDispatch 的边界与失败路径：容差恰好命中、追问消息检查失败必须放行到
+// 下一轮（不能把失败当「无消息」静默吞掉）、未接入检查时报文要能被看到。
+func TestSelectDispatchBoundariesAndFailures(t *testing.T) {
+	handledAt := time.Date(2026, 9, 17, 14, 36, 1, 0, time.UTC)
+	// 预检为 item.Updated.After(handled - 容差)：恰好等于容差下界不派发
+	exactlyAtTolerance := handledAt.Add(-clockSkewTolerance)
+	justInside := handledAt.Add(-clockSkewTolerance + time.Second)
+
+	newHarness := func() *guardHarness {
+		h := newGuardHarness(t, []string{"@Ge：新消息"})
+		h.guards.apply("issue#6", ProcessResult{Settled: true, Responded: true}, handledAt)
+		return h
+	}
+
+	t.Run("Updated 恰好等于容差下界：不派发", func(t *testing.T) {
+		h := newHarness()
+		if _, ok := h.deps.selectDispatch(context.Background(), h.guards, WorkItem{
+			Kind: KindIssue, Number: 6, Mention: true, Updated: exactlyAtTolerance,
+		}); ok {
+			t.Error("容差边界应吸收：After(handled-容差) 为假")
+		}
+		if h.comments != 0 {
+			t.Errorf("comments = %d, want 0（预检已挡下，不应细查）", h.comments)
+		}
+	})
+
+	t.Run("Updated 略高于容差下界：细查后派发追问", func(t *testing.T) {
+		h := newHarness()
+		dispatch, ok := h.deps.selectDispatch(context.Background(), h.guards, WorkItem{
+			Kind: KindIssue, Number: 6, Mention: true, Updated: justInside,
+		})
+		if !ok || !dispatch.FollowUp {
+			t.Fatalf("dispatch = %+v/%v, want 追问轮", dispatch, ok)
+		}
+	})
+
+	t.Run("未接入新消息检查：mention 已回应即压制", func(t *testing.T) {
+		h := newHarness()
+		h.deps.FollowUpMessages = nil
+		if _, ok := h.deps.selectDispatch(context.Background(), h.guards, WorkItem{
+			Kind: KindIssue, Number: 6, Mention: true, Updated: handledAt.Add(time.Hour),
+		}); ok {
+			t.Error("未接入检查时不得派发追问轮")
+		}
+	})
+
+	t.Run("新消息检查失败：不派发且说明下一轮重试", func(t *testing.T) {
+		h := newHarness()
+		var logs []string
+		h.deps.Log = func(line string) { logs = append(logs, line) }
+		h.deps.FollowUpMessages = func(context.Context, WorkItem, time.Time) ([]string, error) {
+			return nil, errors.New("gitea 504")
+		}
+		if _, ok := h.deps.selectDispatch(context.Background(), h.guards, WorkItem{
+			Kind: KindIssue, Number: 6, Mention: true, Updated: handledAt.Add(time.Hour),
+		}); ok {
+			t.Error("检查失败不得派发（避免重复全量会话）")
+		}
+		if len(logs) != 1 || !strings.Contains(logs[0], "gitea 504") || !strings.Contains(logs[0], "下一轮重试") {
+			t.Errorf("logs = %v, want 含错误与重试说明", logs)
+		}
+	})
+
+	t.Run("请求类通道从未回应：即使条目不新也全量派发", func(t *testing.T) {
+		h := newGuardHarness(t, nil)
+		dispatch, ok := h.deps.selectDispatch(context.Background(), h.guards, WorkItem{
+			Kind: KindIssue, Number: 6, Labeled: true, Mention: true,
+		})
+		if !ok || dispatch.FollowUp {
+			t.Fatalf("dispatch = %+v/%v, want 全量", dispatch, ok)
+		}
+		if h.comments != 0 {
+			t.Errorf("comments = %d, want 0（全量派发不细查消息）", h.comments)
+		}
+	})
+
+	t.Run("请求类通道已 settled 且无 mention：压制", func(t *testing.T) {
+		h := newHarness()
+		if _, ok := h.deps.selectDispatch(context.Background(), h.guards, WorkItem{
+			Kind: KindIssue, Number: 6, Labeled: true,
+		}); ok {
+			t.Error("标签 settled 且不在 mention 清单：压制")
+		}
+	})
+
+	t.Run("PR 双通道命中且请求未 settled：请求通道优先全量", func(t *testing.T) {
+		h := newGuardHarness(t, []string{"@Ge：新消息"})
+		// 水位线已推进但 review 请求未回应：必须走全量（覆盖追问诉求）
+		h.guards.apply("pull#9", ProcessResult{Responded: true}, handledAt)
+		dispatch, ok := h.deps.selectDispatch(context.Background(), h.guards, WorkItem{
+			Kind: KindPull, Number: 9, Mention: true, Requested: true,
+			Updated: handledAt.Add(time.Hour),
+		})
+		if !ok || dispatch.FollowUp {
+			t.Fatalf("dispatch = %+v/%v, want 请求通道全量", dispatch, ok)
+		}
+		if h.comments != 0 {
+			t.Errorf("comments = %d, want 0（请求通道命中即全量，不必细查消息）", h.comments)
+		}
+	})
+}
+
+// apply：Settled 只压请求类；Responded 只推水位线——两类结果互不串味。
+func TestGuardStateApplyKeepsChannelsSeparate(t *testing.T) {
+	guards := newGuardState()
+	at := time.Date(2026, 9, 17, 14, 36, 1, 0, time.UTC)
+	guards.apply("issue#6", ProcessResult{Settled: true}, at)
+	if settled, handled := guards.get("issue#6"); !settled || !handled.IsZero() {
+		t.Errorf("settled/handled = %t/%v, want true/零值（未回应不推水位线）", settled, handled)
+	}
+	guards.apply("issue#7", ProcessResult{Responded: true}, at)
+	if settled, handled := guards.get("issue#7"); settled || !handled.Equal(at) {
+		t.Errorf("settled/handled = %t/%v, want false/%v", settled, handled, at)
+	}
+}
+
+// release 只在键真的从清单消失时清除，并在 debug 日志里留下变化原因。
+func TestGuardStateReleaseLogsReasonAndKeepsLiveKeys(t *testing.T) {
+	guards := newGuardState()
+	at := time.Date(2026, 9, 17, 14, 36, 1, 0, time.UTC)
+	guards.apply("issue#6", ProcessResult{Settled: true, Responded: true}, at)
+	guards.apply("pull#7", ProcessResult{Settled: true}, at)
+
+	var logs []string
+	guards.release([]WorkItem{
+		{Kind: KindIssue, Number: 6, Mention: true},  // settled 解除、水位线保留
+		{Kind: KindPull, Number: 7, Requested: true}, // 双守卫保留
+	}, func(line string) { logs = append(logs, line) })
+
+	if len(logs) != 1 || !strings.Contains(logs[0], "issue#6") || !strings.Contains(logs[0], "settled 守卫解除") {
+		t.Errorf("logs = %v, want 仅 issue#6 的 settled 解除日志", logs)
+	}
+	if settled, _ := guards.get("pull#7"); !settled {
+		t.Error("清单仍在的键不得解除 settled")
+	}
+	if _, handled := guards.get("issue#6"); handled.IsZero() {
+		t.Error("mention 清单仍在，水位线必须保留")
 	}
 }

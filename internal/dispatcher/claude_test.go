@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
@@ -78,6 +79,104 @@ func TestWriteSessionMCPConfig(t *testing.T) {
 	}
 	if _, err := writeSessionMCPConfig(dir, base, claudecfg.Overrides{}); err == nil {
 		t.Error("非法 base 应报错")
+	}
+}
+
+// writeSessionMCPConfig / writeClaudeSessionSettings / createSessionConfigDir 的
+// 失败路径：读不动、写不进、目录建不出来时必须报错退出，不能静默吞掉——
+// 否则会话会在没有工具面或没有权限放行的状态下跑起来。
+func TestClaudeConfigWriteFailures(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("base 存在但不是普通文件：读取错误原样上抛", func(t *testing.T) {
+		sub := filepath.Join(dir, "as-dir")
+		if err := os.MkdirAll(sub, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// 目录不能当文件读，且不是 ErrNotExist：走 !os.IsNotExist 分支
+		if _, err := writeSessionMCPConfig(dir, sub, claudecfg.Overrides{}); err == nil ||
+			!strings.Contains(err.Error(), "读取 MCP 配置") {
+			t.Errorf("error = %v, want 读取 MCP 配置失败", err)
+		}
+	})
+
+	t.Run("目标目录不存在：写 MCP 配置报错", func(t *testing.T) {
+		if _, err := writeSessionMCPConfig(filepath.Join(dir, "absent-dir"), "", claudecfg.Overrides{}); err == nil ||
+			!strings.Contains(err.Error(), "写入合并后的 MCP 配置") {
+			t.Errorf("error = %v, want 写入合并后的 MCP 配置失败", err)
+		}
+	})
+
+	t.Run("目标目录不存在：写会话配置报错", func(t *testing.T) {
+		if _, err := writeClaudeSessionSettings(filepath.Join(dir, "absent-dir"), claudecfg.Overrides{}); err == nil ||
+			!strings.Contains(err.Error(), "写入会话配置") {
+			t.Errorf("error = %v, want 写入会话配置失败", err)
+		}
+	})
+
+	t.Run("正常路径落盘且权限收紧", func(t *testing.T) {
+		settings, err := writeClaudeSessionSettings(dir, claudecfg.Overrides{})
+		if err != nil {
+			t.Fatalf("writeClaudeSessionSettings: %v", err)
+		}
+		info, err := os.Stat(settings)
+		if err != nil {
+			t.Fatalf("stat: %v", err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Errorf("settings 权限 = %v, want 0600（会话配置含环境变量，不外泄）", info.Mode().Perm())
+		}
+		mcp, err := writeSessionMCPConfig(dir, "", claudecfg.Overrides{})
+		if err != nil {
+			t.Fatalf("writeSessionMCPConfig: %v", err)
+		}
+		if mcpInfo, err := os.Stat(mcp); err != nil || mcpInfo.Mode().Perm() != 0o600 {
+			t.Errorf("mcp.json 权限 = %v/%v, want 0600", mcpInfo.Mode().Perm(), err)
+		}
+	})
+
+	t.Run("配置目录创建成功且 cleanup 清干净", func(t *testing.T) {
+		created, cleanup, err := createSessionConfigDir()
+		if err != nil {
+			t.Fatalf("createSessionConfigDir: %v", err)
+		}
+		if _, err := os.Stat(created); err != nil {
+			t.Fatalf("配置目录应存在: %v", err)
+		}
+		cleanup()
+		if _, err := os.Stat(created); !os.IsNotExist(err) {
+			t.Errorf("cleanup 后目录应消失, stat err = %v", err)
+		}
+	})
+}
+
+// sessionProjectsDir / sessionMountDirs 的空值口径：SessionDir 为空时不产出
+// 挂载点（否则 docker 会拿到空字符串路径），MCP / settings 路径为空同理。
+func TestSessionProjectsDirEmptyAndMountDirsSkipsEmpty(t *testing.T) {
+	if got := sessionProjectsDir(Config{}); got != "" {
+		t.Errorf("sessionProjectsDir(空 SessionDir) = %q, want 空", got)
+	}
+	if got := sessionProjectsDir(Config{SessionDir: "/root/claude"}); got != "/root/claude/projects" {
+		t.Errorf("sessionProjectsDir = %q, want /root/claude/projects", got)
+	}
+	// 空 SessionDir + 无路径选项：没有任何挂载点
+	if dirs := sessionMountDirs(SessionOptions{}); len(dirs) != 0 {
+		t.Errorf("sessionMountDirs = %v, want 空", dirs)
+	}
+	// 三者齐全时去重后保持 MCP / settings / projects 的顺序
+	dirs := sessionMountDirs(SessionOptions{
+		MCPConfigPath: "/cfg/mcp.json",
+		SettingsPath:  "/cfg/settings.json",
+		Config:        Config{SessionDir: "/root/claude"},
+	})
+	want := []string{"/cfg", "/root/claude/projects"}
+	if len(dirs) != len(want) {
+		t.Fatalf("sessionMountDirs = %v, want %v", dirs, want)
+	}
+	for i := range want {
+		if dirs[i] != want[i] {
+			t.Errorf("dirs[%d] = %q, want %q", i, dirs[i], want[i])
+		}
 	}
 }
 
