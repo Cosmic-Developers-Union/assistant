@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestClientVerifyAuthentication(t *testing.T) {
@@ -718,4 +719,175 @@ func TestClientDisarmAutoMerge(t *testing.T) {
 			}
 		})
 	}
+}
+
+// 评审请求时刻只认「assignee 是本 reviewer」的 review_request 事件：别的
+// reviewer 的请求与其它类型的事件（评论、标签）都不算。
+func TestClientListReviewRequestEventsFiltersByReviewer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/api/v1/repos/acme/video/issues/199/timeline" {
+			http.NotFound(writer, request)
+			return
+		}
+		if request.Header.Get("Authorization") != "token secret" {
+			http.Error(writer, "missing token", http.StatusUnauthorized)
+			return
+		}
+		_, _ = writer.Write([]byte(`[
+			{"type":"comment","assignee":null,"created_at":"2026-09-25T23:25:19+08:00"},
+			{"type":"review_request","assignee":{"login":"bob"},"created_at":"2026-09-25T23:21:38+08:00"},
+			{"type":"review_request","assignee":{"login":"ai"},"created_at":"2026-09-25T23:05:27+08:00"},
+			{"type":"review_request","assignee_team":{"name":"reviewers"},"created_at":"2026-09-25T23:30:00+08:00"},
+			{"type":"review_request","assignee":{"login":"ai"},"created_at":"2026-09-25T23:34:08+08:00"},
+			{"type":"label","assignee":null,"created_at":"2026-09-25T23:07:16+08:00"}
+		]`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, "secret")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	events, err := client.ListReviewRequestEvents(
+		t.Context(), Repository{Owner: "acme", Name: "video"}, 199, "ai")
+	if err != nil {
+		t.Fatalf("ListReviewRequestEvents() error = %v", err)
+	}
+	want := []time.Time{
+		time.Date(2026, 9, 25, 23, 5, 27, 0, time.FixedZone("", 8*3600)),
+		time.Date(2026, 9, 25, 23, 34, 8, 0, time.FixedZone("", 8*3600)),
+	}
+	assertInstants(t, events, want)
+}
+
+// 时间戳缺失或非法的单条事件按「无法定位时刻」跳过，不让一条异常事件打断
+// 整轮请求维护。
+func TestClientListReviewRequestEventsSkipsMalformedTimestamps(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte(`[
+			{"type":"review_request","assignee":{"login":"ai"},"created_at":"not-a-time"},
+			{"type":"review_request","assignee":{"login":"ai"}},
+			{"type":"review_request","assignee":{"login":"ai"},"created_at":"2026-09-25T23:05:27Z"}
+		]`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, "secret")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	events, err := client.ListReviewRequestEvents(
+		t.Context(), Repository{Owner: "acme", Name: "video"}, 199, "ai")
+	if err != nil {
+		t.Fatalf("ListReviewRequestEvents() error = %v", err)
+	}
+	want := []time.Time{time.Date(2026, 9, 25, 23, 5, 27, 0, time.UTC)}
+	assertInstants(t, events, want)
+}
+
+// 满页即认为还有下一页（原始 HTTP 路径没有 SDK 的分页元数据，按 nextPage 的
+// 兜底分支同口径推进）。
+func TestClientListReviewRequestEventsFollowsPagination(t *testing.T) {
+	pageSizeCount := pageSize
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Query().Get("page") {
+		case "1":
+			events := make([]string, 0, pageSizeCount)
+			for range pageSizeCount {
+				events = append(events, `{"type":"label","assignee":null,"created_at":"2026-09-25T23:00:00Z"}`)
+			}
+			_, _ = writer.Write([]byte("[" + strings.Join(events, ",") + "]"))
+		case "2":
+			_, _ = writer.Write([]byte(
+				`[{"type":"review_request","assignee":{"login":"ai"},"created_at":"2026-09-25T23:34:08Z"}]`))
+		default:
+			http.Error(writer, "unexpected page", http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, "secret")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	events, err := client.ListReviewRequestEvents(
+		t.Context(), Repository{Owner: "acme", Name: "video"}, 199, "ai")
+	if err != nil {
+		t.Fatalf("ListReviewRequestEvents() error = %v", err)
+	}
+	want := []time.Time{time.Date(2026, 9, 25, 23, 34, 8, 0, time.UTC)}
+	assertInstants(t, events, want)
+}
+
+// 非 2xx 时把 Gitea 的 message 带进错误：调用方据此放弃本轮撤回。
+func TestClientListReviewRequestEventsReportsHTTPError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusInternalServerError)
+		_, _ = writer.Write([]byte(`{"message":"boom"}`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, "secret")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	_, err = client.ListReviewRequestEvents(
+		t.Context(), Repository{Owner: "acme", Name: "video"}, 199, "ai")
+	if err == nil {
+		t.Fatal("ListReviewRequestEvents() error = nil, want failure")
+	}
+	if !strings.Contains(err.Error(), "boom") {
+		t.Errorf("error = %v, want 含服务端 message", err)
+	}
+}
+
+// assertInstants 按时间点（而非 time.Time 的时区表示）比较两个时刻序列：
+// API 返回的时刻带 Gitea 的服务端时区，断言只关心瞬时值。
+func assertInstants(t *testing.T, got, want []time.Time) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("events = %+v, want %+v", got, want)
+	}
+	for index := range want {
+		if !got[index].Equal(want[index]) {
+			t.Errorf("events[%d] = %v, want %v", index, got[index], want[index])
+		}
+	}
+}
+
+// 传输层失败（连接被拒）与响应体不是 JSON 都要报错，且错误里带上目标编号，
+// 便于运维定位是哪条 PR 的时间线读不到。
+func TestClientListReviewRequestEventsReportsBadResponses(t *testing.T) {
+	t.Run("connection refused", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		url := server.URL
+		server.Close() // 关掉后端口无人监听
+		client, err := NewClient(url, "secret")
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		if _, err := client.ListReviewRequestEvents(
+			t.Context(), Repository{Owner: "acme", Name: "video"}, 199, "ai"); err == nil {
+			t.Fatal("ListReviewRequestEvents() error = nil, want failure")
+		}
+	})
+
+	t.Run("malformed body", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			_, _ = writer.Write([]byte(`{"not":"an array"}`))
+		}))
+		defer server.Close()
+		client, err := NewClient(server.URL, "secret")
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		_, err = client.ListReviewRequestEvents(
+			t.Context(), Repository{Owner: "acme", Name: "video"}, 199, "ai")
+		if err == nil {
+			t.Fatal("ListReviewRequestEvents() error = nil, want failure")
+		}
+		if !strings.Contains(err.Error(), "#199") {
+			t.Errorf("error = %v, want 含 PR 编号", err)
+		}
+	})
 }

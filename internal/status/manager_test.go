@@ -63,6 +63,10 @@ type fakeAPI struct {
 	pullListError  map[string]error
 	protectError   map[string]error
 	nextLabelID    int64
+	// requestEvents 预置 PR 上针对 reviewer 的评审请求时刻（时间线
+	// review_request 事件）；timelineError 模拟时间线读取失败。
+	requestEvents map[string][]time.Time
+	timelineError error
 	// selfLogin 是 AuthenticatedUser 返回的身份（会签方），默认 "merge"。
 	selfLogin string
 	// ops 按发生顺序记录 review 提交与合并动作，供时序断言使用。
@@ -240,6 +244,20 @@ func (f *fakeAPI) DeleteReviewRequests(_ context.Context, _ Repository, index in
 		f.deletedRequests = append(f.deletedRequests, reviewRequestChange{PullRequest: index, Reviewer: reviewer})
 	}
 	return nil
+}
+
+// ListReviewRequestEvents 返回预置的评审请求时刻；未预置时按「没有请求记录」
+// 返回（撤回判定据此退化为「请求早于结论」，与旧行为一致）。
+func (f *fakeAPI) ListReviewRequestEvents(
+	_ context.Context,
+	_ Repository,
+	index int64,
+	reviewer string,
+) ([]time.Time, error) {
+	if f.timelineError != nil {
+		return nil, f.timelineError
+	}
+	return f.requestEvents[reviewerRequestKey(index, reviewer)], nil
 }
 
 func (f *fakeAPI) AuthenticatedUser(context.Context) (string, error) {
@@ -537,6 +555,18 @@ func TestHasReviewCommand(t *testing.T) {
 		{"/reviewer 不是命令", false},
 		{"/review。直接跟标点不算", false},
 		{"普通评论", false},
+		// 提及叠在命令前（线上 PR #199 的实际写法）：先点名义再下命令，仍是
+		// 命令而非纯提及——纯提及只走追问轮续聊，不会重跑评审协议
+		{"@ai /review", true},
+		{"@AI /review", true},
+		{"@reviewer /review", true},
+		{"@ai /review 麻烦看下最新提交", true},
+		{"@reviewer\t/review", true},
+		{"@ai   /review", true},      // 提及后多个空格
+		{"@bob /review 我看过了", false}, // 别人的提及不算命令前缀
+		{"@ai /reviewer", false},     // 仍是 /reviewer，不是命令
+		{"@aim /review", false},      // 提及本身不成立（@aim 是另一个账号）
+		{"前面有字 @ai /review", false},  // 命令仍需独占行首（提及前缀除外）
 	} {
 		comments := []Comment{{Body: test.body}}
 		if got := hasReviewCommand(comments); got != test.want {
@@ -940,6 +970,39 @@ func TestManagerHonorsRequestFromOtherReviewer(t *testing.T) {
 	}
 }
 
+// `@ai /review`（提及叠在命令前）是有效的评审意图，且请求登记后不被撤回：
+// 线上 PR #199 的实际写法。它必须走命令通道——纯提及只走追问轮续聊，不重跑
+// 评审协议，作者以为点了「重新评审」却拿不到正式结论；请求登记后又必须保留
+// （请求晚于 reviewer 的旧结论）。
+func TestManagerTreatsMentionedReviewCommandAsIntent(t *testing.T) {
+	repository := Repository{Owner: "acme", Name: "video"}
+	labels := completeLabels()
+	reviewLabel := labelByName(t, labels, reviewLabelName)
+	awaitingReviewerLabel := labelByName(t, labels, awaitingReviewerLabelName)
+	api := newFakeAPI(repository, labels)
+	api.pullRequests[repository.FullName()] = []PullRequest{{Index: 199}}
+	pr := mergeablePullRequest(199, nil)
+	api.current[pullRequestKey(repository, 199)] = pr
+	// reviewer 的旧结论（驳回）之后，作者评论 `@ai /review`
+	api.reviews[pullRequestKey(repository, 199)] = []Review{
+		{ID: 1, State: ReviewStateRequestChanges, Submitted: time.Unix(10, 0), User: "ai"},
+	}
+	api.comments[pullRequestKey(repository, 199)] = []Comment{
+		{ID: 2, Body: "@ai /review", Created: time.Unix(20, 0)},
+	}
+
+	if err := NewManager(api).Sync(t.Context()); err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	wantAdded := []labelChange{
+		{Item: 199, Label: reviewLabel.ID},
+		{Item: 199, Label: awaitingReviewerLabel.ID},
+	}
+	if !slices.Equal(api.addedLabels, wantAdded) {
+		t.Errorf("added labels = %+v, want %+v（@ai /review 应进评审队列）", api.addedLabels, wantAdded)
+	}
+}
+
 // REQUEST_REVIEW 记录晚于最新内容结论时是一次明确的复审请求（原生按钮的
 // 新鲜信号——requested_reviewers 字段对重复请求是 no-op）：无内容结论的纯
 // 记录进评审队列，批准之后的新记录把 PR 拉回评审。
@@ -1157,6 +1220,220 @@ func TestManagerKeepsFreshRequestRecordWithoutWithdrawal(t *testing.T) {
 	}
 }
 
+// 评论 @提及 触发的新一轮复审请求必须保留：reviewer 名下已有旧结论（旧
+// REQUEST_CHANGES），但请求时刻晚于该结论，是明确的新意图。
+//
+// 这是线上 PR #199 的真实形状：ai 在 head 上留下 REQUEST_CHANGES，作者推新
+// 提交后评论 `@ai review`；若按「reviewer 有结论即遗留」撤回请求，分支保护的
+// official review request 门禁会被解绑，而该 PR 又会被 automerge 跳过——复审
+// 请求静默消失，最坏情况是批准在新 head 上生效后未经复审即合并。
+func TestManagerKeepsFreshCommentRequestAfterContentConclusion(t *testing.T) {
+	repository := Repository{Owner: "acme", Name: "video"}
+	api := newFakeAPI(repository, completeLabels())
+	api.pullRequests[repository.FullName()] = []PullRequest{{Index: 199}}
+	pr := mergeablePullRequest(199, nil)
+	pr.RequestedReviewers = []string{"ai"}
+	api.current[pullRequestKey(repository, 199)] = pr
+	// 旧结论：驳回（早于请求）
+	api.reviews[pullRequestKey(repository, 199)] = []Review{
+		{ID: 1, State: ReviewStateRequestChanges, Submitted: time.Unix(10, 0), User: "ai"},
+	}
+	// 请求晚于结论（时间线的 review_request 事件）
+	api.requestEvents[reviewerRequestKey(199, "ai")] = []time.Time{time.Unix(20, 0)}
+
+	manager := NewManager(api)
+	if err := manager.ReconcileReviewRequests(t.Context()); err != nil {
+		t.Fatalf("ReconcileReviewRequests() error = %v", err)
+	}
+	if len(api.deletedRequests) != 0 {
+		t.Errorf("deleted requests = %+v, want none（请求晚于结论，是新一轮复审意图）",
+			api.deletedRequests)
+	}
+}
+
+// head 锚定的核心回归：reviewer 的结论落在**旧 head** 上时不算回应了请求。
+//
+// 这是 PR #199 另一半缺陷的形状：作者推送新提交（dismiss_stale_approvals 让该
+// head 上的批准失效），reviewer 名下却留着旧 head 的结论。按「看过全部历史就算
+// 已回应」的旧规则，PR 会被标成 approved/changes-requested 而非回到评审队列，
+// 请求也会被撤回——但调度队列用的是 head 锚定口径，会把它当作待评审项入队。
+// 两份判定必须给出同一答案：进评审队列 + 保留请求。
+func TestManagerTreatsOldHeadReviewAsUnanswered(t *testing.T) {
+	repository := Repository{Owner: "acme", Name: "video"}
+	labels := completeLabels()
+	reviewLabel := labelByName(t, labels, reviewLabelName)
+	awaitingReviewerLabel := labelByName(t, labels, awaitingReviewerLabelName)
+	api := newFakeAPI(repository, labels)
+	api.pullRequests[repository.FullName()] = []PullRequest{{Index: 91}}
+	pr := mergeablePullRequest(91, nil)
+	pr.HeadSHA = "new-head"
+	pr.RequestedReviewers = []string{"ai"}
+	api.current[pullRequestKey(repository, 91)] = pr
+	reviews := []Review{
+		{ID: 1, State: ReviewStateRequestChanges, Submitted: time.Unix(10, 0), User: "ai",
+			CommitID: "old-head"},
+	}
+	api.reviews[pullRequestKey(repository, 91)] = reviews
+
+	if err := NewManager(api).Sync(t.Context()); err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	wantAdded := []labelChange{
+		{Item: 91, Label: reviewLabel.ID},
+		{Item: 91, Label: awaitingReviewerLabel.ID},
+	}
+	if !slices.Equal(api.addedLabels, wantAdded) {
+		t.Errorf("added labels = %+v, want %+v（旧 head 的结论不算回应）", api.addedLabels, wantAdded)
+	}
+	// 跨层一致性守卫：标签口径与队列口径必须同源，否则两者会再次漂移
+	if ReviewerRespondedOnHead(reviews, "ai", "new-head") {
+		t.Error("ReviewerRespondedOnHead(新 head) = true, 与队列口径矛盾")
+	}
+	if !hasUnansweredReviewRequest(pr, reviews) {
+		t.Error("hasUnansweredReviewRequest = false, 旧 head 的结论不应算已回应")
+	}
+}
+
+// dismiss 的 review 不算回应：dismiss_stale_approvals 正是「推送使旧批准失去
+// 回应效力」的机制，与 content/agents.md 的说明一致。
+func TestManagerTreatsDismissedReviewAsUnanswered(t *testing.T) {
+	repository := Repository{Owner: "acme", Name: "video"}
+	labels := completeLabels()
+	reviewLabel := labelByName(t, labels, reviewLabelName)
+	api := newFakeAPI(repository, labels)
+	api.pullRequests[repository.FullName()] = []PullRequest{{Index: 92}}
+	pr := mergeablePullRequest(92, nil)
+	pr.RequestedReviewers = []string{"ai"}
+	api.current[pullRequestKey(repository, 92)] = pr
+	reviews := []Review{
+		{ID: 1, State: ReviewStateApproved, Submitted: time.Unix(10, 0), User: "ai",
+			CommitID: pr.HeadSHA, Dismissed: true},
+	}
+	api.reviews[pullRequestKey(repository, 92)] = reviews
+
+	if err := NewManager(api).Sync(t.Context()); err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	wantAdded := []labelChange{
+		{Item: 92, Label: reviewLabel.ID},
+		{Item: 92, Label: labelByName(t, labels, awaitingReviewerLabelName).ID},
+	}
+	if !slices.Equal(api.addedLabels, wantAdded) {
+		t.Errorf("added labels = %+v, want %+v（被 dismiss 的批准不算回应）", api.addedLabels, wantAdded)
+	}
+}
+
+// 状态评审者（merge）也会出现在 requested_reviewers 中，其请求按同一规则判定：
+// 只看内容评审者的结论不足以出清 merge 的请求。
+func TestManagerConsidersStateReviewerRequest(t *testing.T) {
+	pr := mergeablePullRequest(93, nil)
+	pr.HeadSHA = "head-93"
+	pr.RequestedReviewers = []string{"ai", "merge"}
+	// 只有内容评审者回应了当前 head
+	reviews := []Review{
+		{ID: 1, State: ReviewStateApproved, Submitted: time.Unix(10, 0), User: "ai",
+			CommitID: "head-93"},
+	}
+	if !hasUnansweredReviewRequest(pr, reviews) {
+		t.Error("hasUnansweredReviewRequest = false, merge 的请求仍未回应")
+	}
+	if hasUnansweredReviewRequest(pr, append(reviews, Review{
+		ID: 2, State: ReviewStateApproved, Submitted: time.Unix(20, 0), User: "merge",
+		CommitID: "head-93",
+	})) {
+		t.Error("hasUnansweredReviewRequest = true, 双方都回应后应无未回应请求")
+	}
+}
+
+// 团队请求恒为未回应：assistant 无法判定团队里谁回应了，且 Gitea 不会因成员
+// review 清除团队请求。
+func TestManagerTreatsTeamRequestAsUnanswered(t *testing.T) {
+	pr := mergeablePullRequest(94, nil)
+	pr.HeadSHA = "head-94"
+	pr.RequestedReviewersTeams = true
+	reviews := []Review{
+		{ID: 1, State: ReviewStateApproved, Submitted: time.Unix(10, 0), User: "ai",
+			CommitID: "head-94"},
+	}
+	if !hasUnansweredReviewRequest(pr, reviews) {
+		t.Error("hasUnansweredReviewRequest = false, 团队请求应恒为未回应")
+	}
+}
+
+// 反例：请求早于最新内容结论 ⇒ 确是遗留请求，照旧撤回（否则
+// block_on_official_review_requests 门禁永久阻塞合并）。
+func TestManagerWithdrawsRequestOlderThanContentConclusion(t *testing.T) {
+	repository := Repository{Owner: "acme", Name: "video"}
+	api := newFakeAPI(repository, completeLabels())
+	api.pullRequests[repository.FullName()] = []PullRequest{{Index: 46}}
+	pr := mergeablePullRequest(46, nil)
+	pr.RequestedReviewers = []string{"ai"}
+	api.current[pullRequestKey(repository, 46)] = pr
+	api.reviews[pullRequestKey(repository, 46)] = []Review{
+		{ID: 1, State: ReviewStateApproved, Submitted: time.Unix(20, 0), User: "ai"},
+	}
+	// 请求早于结论
+	api.requestEvents[reviewerRequestKey(46, "ai")] = []time.Time{time.Unix(10, 0)}
+
+	manager := NewManager(api)
+	if err := manager.ReconcileReviewRequests(t.Context()); err != nil {
+		t.Fatalf("ReconcileReviewRequests() error = %v", err)
+	}
+	want := []reviewRequestChange{{PullRequest: 46, Reviewer: "ai"}}
+	if !slices.Equal(api.deletedRequests, want) {
+		t.Errorf("deleted requests = %+v, want %+v", api.deletedRequests, want)
+	}
+}
+
+// 评审请求时刻读取失败时不撤回（fail-open）：宁可让门禁多等一轮，也不能在
+// 判定依据缺失时误撤一轮真实请求。
+func TestManagerKeepsRequestWhenTimelineReadFails(t *testing.T) {
+	repository := Repository{Owner: "acme", Name: "video"}
+	api := newFakeAPI(repository, completeLabels())
+	api.pullRequests[repository.FullName()] = []PullRequest{{Index: 47}}
+	pr := mergeablePullRequest(47, nil)
+	pr.RequestedReviewers = []string{"ai"}
+	api.current[pullRequestKey(repository, 47)] = pr
+	api.reviews[pullRequestKey(repository, 47)] = []Review{
+		{ID: 1, State: ReviewStateApproved, Submitted: time.Unix(20, 0), User: "ai"},
+	}
+	api.timelineError = errors.New("时间线不可用")
+
+	manager := NewManager(api)
+	if err := manager.ReconcileReviewRequests(t.Context()); err != nil {
+		t.Fatalf("ReconcileReviewRequests() error = %v", err)
+	}
+	if len(api.deletedRequests) != 0 {
+		t.Errorf("deleted requests = %+v, want none（判定依据缺失时不撤回）", api.deletedRequests)
+	}
+}
+
+// 其他 reviewer 的请求事件不影响本 reviewer 的判定：只认 assignee 是自己的
+// 那些 review_request 事件。
+func TestManagerIgnoresReviewRequestForOtherReviewer(t *testing.T) {
+	repository := Repository{Owner: "acme", Name: "video"}
+	api := newFakeAPI(repository, completeLabels())
+	api.pullRequests[repository.FullName()] = []PullRequest{{Index: 48}}
+	pr := mergeablePullRequest(48, nil)
+	pr.RequestedReviewers = []string{"ai"}
+	api.current[pullRequestKey(repository, 48)] = pr
+	api.reviews[pullRequestKey(repository, 48)] = []Review{
+		{ID: 1, State: ReviewStateApproved, Submitted: time.Unix(20, 0), User: "ai"},
+	}
+	// 晚于结论的请求是发给别人的，不构成本 reviewer 的新意图
+	api.requestEvents[reviewerRequestKey(48, "bob")] = []time.Time{time.Unix(30, 0)}
+
+	manager := NewManager(api)
+	if err := manager.ReconcileReviewRequests(t.Context()); err != nil {
+		t.Fatalf("ReconcileReviewRequests() error = %v", err)
+	}
+	want := []reviewRequestChange{{PullRequest: 48, Reviewer: "ai"}}
+	if !slices.Equal(api.deletedRequests, want) {
+		t.Errorf("deleted requests = %+v, want %+v（别人的请求事件不算新意图）",
+			api.deletedRequests, want)
+	}
+}
+
 // 状态评审者的会签（merge 账号的 APPROVED）属于状态通道，不参与内容判定：
 // 只有状态会签而没有内容批准的 PR 仍是开发中，绝不会被误标为可合并。
 func TestManagerStateApprovalDoesNotDriveContentLabels(t *testing.T) {
@@ -1281,6 +1558,7 @@ func newFakeAPI(repository Repository, labels []Label) *fakeAPI {
 		issueListError: map[string]error{},
 		pullListError:  map[string]error{},
 		protectError:   map[string]error{},
+		requestEvents:  map[string][]time.Time{},
 		nextLabelID:    100,
 	}
 }
@@ -1345,6 +1623,12 @@ func draftPullRequest(index int64, labels []Label) PullRequest {
 
 func pullRequestKey(repository Repository, index int64) string {
 	return repository.FullName() + "#" + strconv.FormatInt(index, 10)
+}
+
+// reviewerRequestKey 是评审请求时刻的预置键：与仓库无关（fake 只服务单仓库
+// 测试），按 PR 编号 + reviewer 区分。
+func reviewerRequestKey(index int64, reviewer string) string {
+	return strconv.FormatInt(index, 10) + "#" + reviewer
 }
 
 // 不在规范体系内的标签会被删除：assistant 强制维护完整标签集，避免历史/手改

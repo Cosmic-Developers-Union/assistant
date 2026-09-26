@@ -20,16 +20,26 @@
 (*     （内容批准 + 状态会签）                                               *)
 (*   - 「reviewer 提交 review 后 Gitea 是否消费 requested_reviewers」实测    *)
 (*     与源码结论矛盾，建模为非确定性选择——两种行为下规约都必须成立          *)
-(*   - requested_reviewers 无时间戳，无法区分「旧请求残留」与「重新请求」；  *)
-(*     原生「请求评审」按钮会生成晚于最新内容结论的请求记录（recordFresh，  *)
-(*     实现可观测），与 requested_reviewers 的有无共同构成意图通道；记录    *)
-(*     缺失的版本/场景退化为其余通道（recordFresh 不被置位亦须成立）         *)
+(*   - 回应按 head 锚定：responded 只记录**当前 head** 上的正式回应（对应       *)
+(*     ReviewerRespondedOnHead），author push/rebase 使其清空。旧版本把        *)
+(*     responded 建为单调历史（含被 dismiss 的 review、不随作废回退），而       *)
+(*     dismiss_stale_approvals 恰恰要使推送后的旧回应失效——两者矛盾会让        *)
+(*     「推送后重新请求评审」被判为已回应而撤回请求：请求消失、分支保护门禁      *)
+(*     解绑，PR 又因缺少当前 head 的批准被 automerge 跳过（线上 PR #199 的      *)
+(*     缺陷）。标签口径与调度队列口径（ListPullRequestsRequestingReview）      *)
+(*     必须共用这一定义                                                          *)
+(*   - 请求新鲜度：requested_reviewers 本身不带时刻，但时间线的 review_request  *)
+(*     事件带 created_at 与 assignee，实现据此区分「旧请求残留」与「重新请求」  *)
+(*     （实现为 Client.ListReviewRequestEvents；读取失败时 fail-open 不撤回）；  *)
+(*     原生「请求评审」按钮另会生成晚于最新内容结论的请求记录（recordFresh，    *)
+(*     实现可观测）；记录缺失的版本/场景退化为其余通道（recordFresh 不被置位    *)
+(*     亦须成立）                                                                *)
 (*   - 团队评审请求无法按成员身份吸收（实现不知道团队里谁回应了），一律      *)
 (*     视为有效意图；且未实测 Gitea 是否会消费团队请求，保守建模为永不消费  *)
 (*   - dismiss_stale_approvals 使推送作废旧批准（内容批准与会签一并作废）；  *)
 (*     旧批准之下可能露出更早的 review，该情形归约为 none（那些状态可由     *)
-(*     其他动作序列直接到达）。responded 是单调历史（含被 dismiss 的        *)
-(*     review），不随作废回退                                                *)
+(*     其他动作序列直接到达）。responded 随之清空——回应锚定 head，旧 head   *)
+(*     上的结论不回应新请求                                                  *)
 (*   - 「status/review = 评审请求中」：评审意图（原生请求、按钮复审记录、    *)
 (*     @ai//review 提及）只由 Intent 决定标签，不再被门禁（冲突/落后/检查   *)
 (*     失败/pending）阻断——门禁只在 Merge 动作校验。此前「检查失败即自动   *)
@@ -41,9 +51,14 @@ EXTENDS TLC
 
 VARIABLES
     contentState,   \* 最新内容结论（"ai" 提交的正式 review）: "none" | "approved" | "requestChanges" | "comment"
-    requestedUsers, \* requested_reviewers 中的用户（⊆ {"ai"}；请求面向内容评审者）
+    requestedUsers, \* requested_reviewers 中的用户（⊆ {"ai","merge"}）
     requestedTeam,  \* 是否存在团队评审请求（无法按成员吸收，一律视为意图）
-    responded,      \* 提交过正式 review 的账号集合（单调历史，含被 dismiss 的）
+    responded,      \* 在**当前 head** 上提交过正式 review 的账号集合。
+                    \* 实现对应 ReviewerRespondedOnHead：只有 CommitID 为空
+                    \* （Gitea 未给提交号，保守取已回应）或等于 head 的正式
+                    \* review 才算「回应了当前请求」；被 dismiss 的不计（推送
+                    \* 使旧回应失效，正是 dismiss_stale_approvals 的语义）。
+                    \* 见 AuthorPush：推送使该集合清空。
     requestFresh,   \* ground truth: ai 的请求创建于其最新回应之后（实现无法观测，仅文档化用）
     recordFresh,    \* 最新内容结论之后存在原生按钮生成的评审请求记录（#86 实测信号）
     freshMention,   \* 最新内容结论之后的评论中存在评审意图信号：实现中是两条独立
@@ -91,9 +106,13 @@ Init ==
 
 ContentFound == contentState # "none"
 
-\* hasUnansweredReviewRequest：提交过正式 review 的 reviewer 名下请求视为
-\* 已回应；从未回应者的请求与团队请求仍构成意图。状态评审者的结论不吸收
-\* 对人员 reviewer 的请求。
+\* hasUnansweredReviewRequest：**按 head 锚定**——responded 只记录当前 head 上
+\* 的正式回应，因此「旧 head 的结论」不吸收请求。与调度队列的
+\* ListPullRequestsRequestingReview（ReviewerRespondedOnHead）共用同一定义，
+\* 两份判定必须给出同一答案，否则会出现：标签口径认为已回应而撤回请求，队列
+\* 口径却认为待评审——请求消失、分支保护门禁解绑，PR 又因缺少当前 head 的批准
+\* 被 automerge 跳过（线上 PR #199 的缺陷形状）。
+\* 团队请求恒为未回应：无法按成员身份吸收。
 HasUnansweredRequest ==
     requestedTeam \/ \E user \in requestedUsers : user \notin responded
 
@@ -177,6 +196,8 @@ AuthorMention ==
 
 \* 内容评审者提交正式 review。Gitea 是否消费其名下请求是非确定的：
 \* 源码层面会删除（世界 A），本实例实测残留（世界 B）——规约对两者都须成立。
+\* responded 记录的是「当前 head 上已回应」，本次 review 正落在当前 head，
+\* 故加入 {"ai"}；后续 AuthorPush 会清空它（旧回应随 head 前移失效）。
 ReviewerSubmit(state) ==
     /\ ~merged /\ ~quiet
     /\ state \in {"approved", "requestChanges", "comment"}
@@ -192,27 +213,32 @@ ReviewerSubmit(state) ==
 
 \* 作者推送新提交：检查重跑（pending），可能引入或解决冲突；
 \* dismiss_stale_approvals 作废旧批准——内容批准与会签一并作废（归约为
-\* none，见模块头注释）；responded 是单调历史，不随作废回退。
+\* none，见模块头注释）。**responded 随之清空**：回应锚定 head，head 前移后
+\* 旧 head 上的结论不再回应新请求（这正是 #199 缺陷的核心——旧规则把
+\* responded 当单调历史，于是重新请求评审被判为「已回应」而撤回）。
 AuthorPush ==
     /\ ~merged /\ ~quiet
     /\ contentState' = IF contentState = "approved" THEN "none" ELSE contentState
     /\ stateState' = IF stateState = "approved" THEN "none" ELSE stateState
+    /\ responded' = {}
     /\ checks' = "pending"
     /\ mergeable' \in {TRUE, FALSE}
     /\ dirty' = TRUE
-    /\ UNCHANGED <<requestedUsers, requestedTeam, responded, requestFresh, recordFresh,
+    /\ UNCHANGED <<requestedUsers, requestedTeam, requestFresh, recordFresh,
                   freshMention, behind, labels, quiet, merged>>
 
-\* 作者 rebase 到最新基础分支：消除落后与冲突，检查重跑，旧批准同样作废。
+\* 作者 rebase 到最新基础分支：消除落后与冲突，检查重跑，旧批准同样作废
+\* （head 前移：responded 随之清空，理由同 AuthorPush）。
 AuthorRebase ==
     /\ ~merged /\ ~quiet
     /\ contentState' = IF contentState = "approved" THEN "none" ELSE contentState
     /\ stateState' = IF stateState = "approved" THEN "none" ELSE stateState
+    /\ responded' = {}
     /\ behind' = FALSE
     /\ mergeable' = TRUE
     /\ checks' = "pending"
     /\ dirty' = TRUE
-    /\ UNCHANGED <<requestedUsers, requestedTeam, responded, requestFresh, recordFresh,
+    /\ UNCHANGED <<requestedUsers, requestedTeam, requestFresh, recordFresh,
                   freshMention, labels, quiet, merged>>
 
 \* 基础分支前移（他人合并了别的 PR）。
@@ -296,8 +322,14 @@ TypeOK ==
     /\ requestedUsers \subseteq {"ai"}
     /\ requestedTeam \in BOOLEAN
     /\ responded \subseteq {"ai", "merge"}
-    \* 内容结论只能来自内容评审者
-    /\ contentState # "none" => "ai" \in responded
+    \* contentState 是内容通道的最新结论（**历史**），responded 是「当前 head 上
+    \* 已回应」。两者在推送后合法地分离：旧结论仍在（contentState ≠ "none"，
+    \* 供 latestContentReview 取用），但它不回答新 head（responded 已清空）。
+    \* 因此不再断言「有结论 ⇒ 有人回应当前 head」。这里只保留仍成立的方向：
+    \* 内容评审者回应了当前 head ⇒ 必然存在内容结论（回应即写结论，见
+    \* ReviewerSubmit）。注意不能反过来对 responded 整体断言——状态评审者的
+    \* 会签（Merge）也会写入 responded，而它不产生内容结论。
+    /\ "ai" \in responded => contentState # "none"
     /\ requestFresh \in BOOLEAN
     /\ requestFresh => "ai" \in requestedUsers
     /\ recordFresh \in BOOLEAN

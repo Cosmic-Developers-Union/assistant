@@ -124,6 +124,14 @@ func (m *Manager) autoMergePullRequest(
 	if err != nil {
 		return false, err
 	}
+	// 内容评审者必须在**当前 head** 上批准（旧 head 的批准不授权合并）。
+	//
+	// 这里**故意**不检查「是否仍有未回应的官方评审请求」：那是 Gitea 自身
+	// block_on_official_review_requests 门禁的职责（setup 配置、audit 巡检），
+	// 服务端会在合并那一刻拒绝尚未出清的请求；assistant 只需保证内容与状态门禁
+	// 自身成立。反过来，assistant 也**不得**为了让 PR 进队列而提前撤回请求——
+	// 撤回会解绑该门禁，使「重新请求评审」的 PR 失去服务端保护（见
+	// syncReviewRequests 的说明）。
 	if !reviewerApprovedOnHead(reviews, m.contentReviewer, pullRequest.HeadSHA) {
 		m.disarmAutoMerge(ctx, repository, pullRequest, "内容评审者的批准不在当前 head")
 		return skip(fmt.Sprintf("内容评审者 @%s 尚未在当前 head（%.10s）上批准", m.contentReviewer, pullRequest.HeadSHA))

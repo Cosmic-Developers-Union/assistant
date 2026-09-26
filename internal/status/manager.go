@@ -475,15 +475,29 @@ func (m *Manager) reconcilePullRequestReviewRequests(ctx context.Context, reposi
 	if err != nil {
 		return err
 	}
-	return m.syncReviewRequests(ctx, repository, pullRequest, intent.contentFound, intent.freshRequest, intent.commentIntent)
+	return m.syncReviewRequests(ctx, repository, pullRequest,
+		intent.contentFound, intent.contentLatest, intent.freshRequest, intent.commentIntent)
 }
 
 // syncReviewRequests 维护 PR 的官方评审请求记录（Gitea requested_reviewers）：
 //   - 评论意图（@提及 / /review 命令）补发正式评审请求——分支保护的
 //     block_on_official_review_requests 门禁按该记录判定，命令与提及点一下
 //     就等价于原生「请求评审」；
-//   - 内容评审者已回应、且没有更新的按钮复审记录时，撤回其遗留请求：Gitea
-//     提交 review 后不消费请求记录，不撤回会让该门禁永久阻塞合并。
+//   - 已回应内容评审者的**遗留**请求才撤回：Gitea 提交 review 后不消费请求
+//     记录，不撤回会让该门禁永久阻塞合并。
+//
+// 「遗留」必须按请求自身的时刻判定，不能只看「reviewer 名下有没有结论」：
+// 后者会把新一轮复审请求一并当成遗留。作者在 reviewer 出结论之后重新请求评审
+// （按钮 / 评论 @提及）时，请求是新的、结论是旧的；按「有结论即撤回」处理会
+// 立刻抹掉请求并解绑分支保护，而该 PR 又因已有 APPROVED 被 automerge 跳过——
+// 最坏情况是**未经复审就合并**（作者推了新提交使批准失效后重新请求，请求又被
+// 撤回，批准在新 head 上生效即进入合并队列）。
+//
+// 「请求时刻」取自时间线的 review_request 事件（requested_reviewers 本身不带
+// 时刻；实测 Gitea 每次请求——含按钮与 assistant 自己补登记——都会留下该事件，
+// 且 assignee 即被请求者）。请求晚于最新内容结论即视为新一轮意图，保留待评审。
+// 事件读取失败时不撤回（fail-open）：宁可让门禁多等一轮，也不能在判定依据
+// 缺失时误撤一轮真实请求。
 //
 // 团队请求无法按成员身份吸收，保持不动。调用方必须具备选择 reviewer 的权限
 // （PR 作者或仓库管理员），见 ReconcileReviewRequests。
@@ -492,6 +506,7 @@ func (m *Manager) syncReviewRequests(
 	repository Repository,
 	pullRequest PullRequest,
 	contentFound bool,
+	contentLatest Review,
 	freshRequest bool,
 	commentIntent bool,
 ) error {
@@ -505,7 +520,18 @@ func (m *Manager) syncReviewRequests(
 			break
 		}
 	}
+	// 请求晚于最新内容结论 ⇒ 新一轮复审请求，不是遗留
+	requestFresh := false
 	if contentFound && requested && !freshRequest {
+		newer, err := m.requestNewerThanContent(ctx, repository, pullRequest, contentLatest)
+		if err != nil {
+			m.logf("%s#%d: 评审请求时刻读取失败：%v（本轮不撤回请求）",
+				repository.FullName(), pullRequest.Index, err)
+			return nil
+		}
+		requestFresh = newer
+	}
+	if contentFound && requested && !freshRequest && !requestFresh {
 		if err := m.api.DeleteReviewRequests(ctx, repository, pullRequest.Index, []string{m.contentReviewer}); err != nil {
 			return err
 		}
@@ -520,6 +546,26 @@ func (m *Manager) syncReviewRequests(
 			repository.FullName(), pullRequest.Index, m.contentReviewer)
 	}
 	return nil
+}
+
+// requestNewerThanContent 判断内容评审者的最近一次评审请求是否晚于最新内容
+// 结论。时间线读取失败时返回错误（调用方据此放弃本轮撤回）。
+func (m *Manager) requestNewerThanContent(
+	ctx context.Context,
+	repository Repository,
+	pullRequest PullRequest,
+	contentLatest Review,
+) (bool, error) {
+	events, err := m.api.ListReviewRequestEvents(ctx, repository, pullRequest.Index, m.contentReviewer)
+	if err != nil {
+		return false, err
+	}
+	for _, event := range events {
+		if event.After(contentLatest.Submitted) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func branchBehind(pullRequest PullRequest) (bool, bool) {
@@ -613,26 +659,32 @@ func (m *Manager) logf(format string, arguments ...any) {
 	}
 }
 
-// hasUnansweredReviewRequest 判断是否存在「尚未回应」的待处理评审请求：
-// 提交过正式 review（APPROVED/REQUEST_CHANGES/COMMENT，含被 dismiss 的——
-// dismiss 是批准的时效性，不代表未回应）的 reviewer，其名下请求视为已回应；
-// 从未提交过正式 review 的 requested reviewer 与任何团队请求都视为仍在等待
-// 回应。判定看全部历史而非仅最新 review：assistant 的自动驳回（gitea-actions
-// 名下）在被 reviewer 的更新 review 挤出最新位置后，仍吸收 bot 自己的残留
-// 请求，已批准的 PR 不会被打回 review 空等。
+// hasUnansweredReviewRequest 判断是否存在「尚未回应」的待处理评审请求。
+//
+// 判定**按 head 锚定**，与调度队列的 ListPullRequestsRequestingReview 共用同一
+// 定义（ReviewerRespondedOnHead）：只有落在当前 head 上的正式回应才算回应了请求。
+// 这不是可选的严格化——两份不一致的判定会直接造成缺陷：作者推送新提交后重新请求
+// 评审时（dismiss_stale_approvals 已让旧批准失效），按「看过全部历史就算已回应」
+// 会把新一轮请求误判为遗留而撤回，请求消失、分支保护的 official review request
+// 门禁随之解绑，而该 PR 又因 AutoMerge 只看当前 head 的批准而被跳过——最坏是
+// **未经复审就合并**（线上 PR #199 的形状）。
+//
+// 团队请求恒视为「未回应」：assistant 无法判定团队里谁回应了，且实测 Gitea 不会因
+// 成员 review 清除团队请求（content/agents.md 有同样说明）。
+//
+// 遍历全部 requested reviewer 而非只看内容评审者：真实 PR 上状态评审者（merge）
+// 也会出现在 requested_reviewers 中，其请求同样需要按同一规则出清。
+//
+// 为什么这样仍能吸收 assistant 自己的残留请求：bot 身份（gitea-actions，见
+// isStateAuthor）不会在新 head 上留下 review，故它在当前 head 上天然就是「未回应」，
+// 与旧规则在「同一 head 内」的结论一致；旧规则多出来的部分（跨 head 的旧结论）正是
+// 上面所述的缺陷本身。
 func hasUnansweredReviewRequest(pullRequest PullRequest, reviews []Review) bool {
 	if pullRequest.RequestedReviewersTeams {
 		return true
 	}
-	responded := make(map[string]bool, len(reviews))
-	for _, review := range reviews {
-		switch review.State {
-		case ReviewStateApproved, ReviewStateRequestChanges, ReviewStateComment:
-			responded[review.User] = true
-		}
-	}
 	for _, reviewer := range pullRequest.RequestedReviewers {
-		if !responded[reviewer] {
+		if !ReviewerRespondedOnHead(reviews, reviewer, pullRequest.HeadSHA) {
 			return true
 		}
 	}
@@ -674,11 +726,21 @@ func containsMention(body, mention string) bool {
 
 // reviewCommand 是评论中拉起评审的 slash 命令（不区分大小写）。与 @ai 提及
 // 不同，命令是刻意的祈使动作：必须独占行首，且后面只能跟空白或行尾——
-// /reviewer、/review。等写法都不算，避免正文引用误触发。
+// /reviewer、行内引用等写法都不算，避免正文引用误触发。
+//
+// 提及可以叠在命令前面（`@ai /review`）：那是一次「先点名义再下命令」的
+// 显式拉取，语义上仍是命令而不是纯提及——纯提及走后水位线的追问轮，只续聊
+// 不重跑评审协议，作者以为点了「重新评审」却拿不到正式结论。
 const reviewCommand = "/review"
 
-// hasReviewCommand 判断评论中是否存在行首 /review 命令。与 hasReviewerMention
-// 同一调用点、同一扫描窗口：只统计最新正式 review 之后的评论。
+// reviewCommandPrefixes 是允许出现在 /review 之前的提及前缀（`@<账号> ` 形式）。
+// 只放 reviewer 自己的两个账号名：任意 @xxx 都放行会让「@某位同事 请看他写的
+// /review 说明」这类正文引用重新变成命令。
+var reviewCommandPrefixes = []string{"@ai", "@reviewer"}
+
+// hasReviewCommand 判断评论中是否存在行首 /review 命令（允许前置 reviewer
+// 提及）。与 hasReviewerMention 同一调用点、同一扫描窗口：只统计最新正式
+// review 之后的评论。
 func hasReviewCommand(comments []Comment) bool {
 	for _, comment := range comments {
 		for line := range strings.Lines(strings.ToLower(comment.Body)) {
@@ -687,13 +749,29 @@ func hasReviewCommand(comments []Comment) bool {
 			// （会剥掉 \r 的是 bufio.Scanner 一类按行读取器；strings.Split
 			// 与 strings.Lines 一样保留它。）
 			line = strings.TrimRight(line, "\r\n")
-			if line == reviewCommand ||
-				strings.HasPrefix(line, reviewCommand+" ") || strings.HasPrefix(line, reviewCommand+"\t") {
+			if matchesReviewCommand(line) {
 				return true
+			}
+			// 剥掉一个提及前缀后再判定一次：`@ai /review` 与 `/review` 等价
+			for _, prefix := range reviewCommandPrefixes {
+				rest, ok := strings.CutPrefix(line, prefix)
+				if !ok || rest == "" || !isSpaceByte(rest[0]) {
+					continue
+				}
+				if matchesReviewCommand(strings.TrimLeft(rest, " \t")) {
+					return true
+				}
 			}
 		}
 	}
 	return false
+}
+
+// matchesReviewCommand 判定整行是否就是一条 /review 命令：命令后只能跟空白或
+// 行尾（`/review`、`/review 请重点看 X` 都算，`/reviewer` 不算）。
+func matchesReviewCommand(line string) bool {
+	return line == reviewCommand ||
+		strings.HasPrefix(line, reviewCommand+" ") || strings.HasPrefix(line, reviewCommand+"\t")
 }
 
 // isNameChar 判断提及后紧跟的字符是否属于用户名的一部分。非 ASCII 字节
@@ -702,6 +780,12 @@ func hasReviewCommand(comments []Comment) bool {
 func isNameChar(b byte) bool {
 	return b >= 0x80 || b == '_' || b == '-' ||
 		'0' <= b && b <= '9' || 'a' <= b && b <= 'z'
+}
+
+// isSpaceByte 判断字节是否为空白。用于「提及前缀 + 命令」的拆分：只有空白才
+// 说明提及到此结束（`@aim /review` 的提及是另一个账号，不该放行）。
+func isSpaceByte(b byte) bool {
+	return b == ' ' || b == '\t'
 }
 
 // legacyStateReviewer 是 sync 以 Actions 内置令牌提交门禁驳回的历史身份。

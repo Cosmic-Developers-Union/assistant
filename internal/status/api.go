@@ -228,6 +228,10 @@ type API interface {
 	// 门禁按它判定）。
 	CreateReviewRequests(context.Context, Repository, int64, []string) error
 	DeleteReviewRequests(context.Context, Repository, int64, []string) error
+	// ListReviewRequestEvents 返回 PR 上针对该 reviewer 的评审请求时刻（时间线
+	// 的 review_request 事件）。requested_reviewers 本身不携带时刻，判定
+	// 「请求是否晚于 reviewer 的结论」只能靠它。
+	ListReviewRequestEvents(context.Context, Repository, int64, string) ([]time.Time, error)
 	// AuthenticatedUser 返回当前令牌的账号名，供会签方解析自己的身份。
 	AuthenticatedUser(context.Context) (string, error)
 }
@@ -1076,6 +1080,94 @@ func (c *Client) DeleteReviewRequests(ctx context.Context, repository Repository
 		return fmt.Errorf("delete review requests for pull request #%d: %w", index, err)
 	}
 	return nil
+}
+
+// ListReviewRequestEvents 读取 PR 时间线里针对该 reviewer 的评审请求时刻
+// （review_request 事件，assignee 即被请求者）。
+//
+// 走原始 HTTP：gitea SDK v1.2.0 没有时间线端点。事件按时间倒序返回（Gitea
+// 对时间线的默认序），调用方只关心是否存在晚于某时刻的请求，顺序无关。
+//
+// 时间线里 assistant 自己补登记请求也会留下同样的事件，这正是所需语义——
+// 评论 @提及 / /review 命令登记请求后，其请求时刻应与按钮请求同等对待。
+func (c *Client) ListReviewRequestEvents(
+	ctx context.Context,
+	repository Repository,
+	index int64,
+	reviewer string,
+) ([]time.Time, error) {
+	var result []time.Time
+	for page := 1; ; {
+		url := fmt.Sprintf("%s/api/v1/repos/%s/%s/issues/%d/timeline?page=%d&limit=%d",
+			c.host, repository.Owner, repository.Name, index, page, pageSize)
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return nil, fmt.Errorf("list timeline for #%d: %w", index, err)
+		}
+		request.Header.Set("Authorization", "token "+c.accessToken)
+		response, err := c.httpClient.Do(request)
+		if err != nil {
+			return nil, fmt.Errorf("list timeline for #%d: %w", index, err)
+		}
+		events, err := decodeTimeline(response, index)
+		if err != nil {
+			return nil, err
+		}
+		for _, event := range events {
+			// assignee 是被请求者；团队请求（assignee_team）无法按成员身份归属，
+			// 不计入。
+			if event.Type != "review_request" || event.Assignee == nil {
+				continue
+			}
+			if event.Assignee.UserName != reviewer {
+				continue
+			}
+			if created := event.createdTime(); !created.IsZero() {
+				result = append(result, created)
+			}
+		}
+		// 原始 HTTP 路径没有 SDK 的分页元数据，按「满页即还有下一页」推进
+		// （与 nextPage 的兜底分支同一口径）
+		if len(events) < pageSize {
+			break
+		}
+		page++
+	}
+	return result, nil
+}
+
+// timelineEvent 只取判定所需的字段：类型、被请求者与时刻。时刻按 Gitea 的
+// RFC3339 字符串解码后再转换——时间戳为空或非法时该事件按「无法定位时刻」跳过，
+// 不让一条异常事件打断整轮请求维护。
+type timelineEvent struct {
+	Type     string `json:"type"`
+	Created  string `json:"created_at"`
+	Assignee *struct {
+		UserName string `json:"login"`
+	} `json:"assignee"`
+}
+
+// createdTime 返回事件的时刻；缺失或无法解析时返回零值。
+func (e timelineEvent) createdTime() time.Time {
+	created, err := time.Parse(time.RFC3339, e.Created)
+	if err != nil {
+		return time.Time{}
+	}
+	return created
+}
+
+// decodeTimeline 解析时间线响应；非 2xx 时把 Gitea 的 message 带进错误。
+func decodeTimeline(response *http.Response, index int64) ([]timelineEvent, error) {
+	defer response.Body.Close()
+	if response.StatusCode/100 != 2 {
+		return nil, fmt.Errorf("list timeline for #%d: HTTP %d: %s",
+			index, response.StatusCode, responseMessage(response.Body))
+	}
+	var events []timelineEvent
+	if err := json.NewDecoder(response.Body).Decode(&events); err != nil {
+		return nil, fmt.Errorf("list timeline for #%d: %w", index, err)
+	}
+	return events, nil
 }
 
 // AuthenticatedUser 返回当前令牌的账号名。automerge 以状态评审者令牌运行，
