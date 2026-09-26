@@ -39,6 +39,15 @@ var (
 	bareCache     = map[string]bool{}
 )
 
+// ResetProbeCaches 清空探测缓存。**为跨包测试而导出**：缓存键是传给探测函数的
+// 那个名字（doctor 用的是字面量 "claude"，不是 LookPath 的结果），所以宿主真实的
+// claude 一旦被探测过，同进程内后续用例都会命中那条缓存，测不出「读不出版本」的
+// 分支。包内测试直接调 resetProbeCaches，跨包（cmd/assistant）只能经此入口。
+// 生产不调用。
+func ResetProbeCaches() {
+	resetProbeCaches()
+}
+
 // resetProbeCaches 清空探测缓存（仅供测试：缓存按路径键控，测试之间会互相污染）。
 func resetProbeCaches() {
 	probeMu.Lock()

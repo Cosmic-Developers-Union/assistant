@@ -58,20 +58,29 @@ tempdir 里也不会失败。**已覆盖**的部分：空/非法内容被 `Valid
 | `internal/daemon` | 真实 `claude` 调用 | 经 `ChatConfig.Claude` 注入假 Runner；此前是 `RunClaude` 旁路，会绕过真实 spawn 路径，已删除 |
 | `internal/setup` | `personal_token.go` 的 `CheckRedirect` | 仅服务端返回 3xx 时调用，需真实重定向链路 |
 
-## 五、`cmd/assistant` 的剩余缺口（唯一未达阈值的包）
+## 五、`cmd/assistant` 的剩余缺口
 
-该包阈值 90%，实测 83.4%，未覆盖 544 条语句，集中在两处：
+该包阈值 90%，实测 **89.0%**（3284 条语句，未覆盖 360），**距阈值还差 32 条**。
 
 | 文件 | 未覆盖语句 | 主要形态 |
 |---|---|---|
-| `cmd/assistant/daemon.go` | 104 | `runWeixinLogin`（交互式扫码登录）、`newDaemonMCPCommand` 的分支 |
+| `cmd/assistant/daemon.go` | 104 | `runWeixinLogin`（交互式扫码登录）等 |
 | `cmd/assistant/dispatch.go` | 103 | 调度器装配后的回调路径（需真实待办与 Gitea 往返） |
-| `doctor.go` / `serve.go` / `login_*.go` / `migrate.go` / `main.go` | 各 16–39 | `auditServer` 等需真实服务端往返；`main` 需以子进程方式跑二进制 |
+| `main.go` | 25 | `main()` 全体：signal 接线 + `ExecuteContext` + `os.Exit`，无返回路径 |
+| `config.go` | 16 | `readAPIKey` 的 pty 分支、备份/写盘失败臂 |
+| `serve.go` / `login_identity.go` / `init.go` / `login.go` 等 | 各 12–15 | 注缝之外的 IO 失败臂、真 pty |
 
-结论：剩下的不是「漏测」而是**需要真实交互或真实服务端**的路径（扫码登录、serve
-起停、doctor 的在线审计、以子进程跑 main）。按 `AGENTS.md`，这类边界用可注入的缝
-把逻辑测到、真实调用交给 `make test-e2e`，**不为凑数字写无意义的测试**——因此本包
-的缺口是如实登记的，而不是被忽略。
+**注意措辞**：这些是「当前注入缝之外」的路径，不是「原则上不可达」。其中两类确有
+可达路径，只是各有代价：
+
+- `main.go` 的 25 条可用**子进程**方式驱动（`go test` 里 exec 自己编译出的二进制、
+  发信号、断言退出码），代价是引入一个真实子进程测试装置；
+- `daemon.go` / `dispatch.go` 的 207 条（占未覆盖的 57%）需要真实扫码或真实 Gitea
+  往返，只能走 `make test-e2e`。
+
+按 `AGENTS.md`：这类边界用可注入的缝把逻辑测到、真实调用交给 e2e，**不为凑数字写
+无意义的测试**。因此本包的缺口如实登记；是否需要为那 32 条引入子进程装置，是取舍
+问题而非「漏测」。
 
 ## 六、形式化规格约束的语义核
 

@@ -28,6 +28,17 @@ type serveOptions struct {
 	Token  string
 	Force  bool
 	Quiet  bool
+
+	// Rand 是随机令牌的来源，默认 crypto/rand.Read（见 randomToken）。抽出来
+	// 是为了让「取随机数失败」这条启动路径可测：它决定 serve 能不能生成访问
+	// 令牌，而随机源在真机上几乎不可能失手，只有注入才能走到那个错误分支。
+	// 生产路径不设置它。
+	Rand func([]byte) (int, error)
+
+	// Getwd 是缺省记录库目录的定位来源，默认 os.Getwd（见 defaultSessionsRoot）。
+	// 抽出来是为了让「当前目录取不出来」这条路径可测：此时 serve 继续跑会把
+	// 记录库落到一个未知位置，必须提前失败。生产路径不设置它。
+	Getwd func() (string, error)
 }
 
 // newServeCommand 是会话记录服务端：接受 `assistant session push` 上传的记录，
@@ -66,7 +77,7 @@ func newServeCommand(configFlag *string) *cobra.Command {
 func runServe(command *cobra.Command, configPath string, options *serveOptions) error {
 	root := strings.TrimSpace(options.Root)
 	if root == "" {
-		defaultRoot, err := defaultSessionsRoot()
+		defaultRoot, err := defaultSessionsRoot(options.Getwd)
 		if err != nil {
 			return err
 		}
@@ -78,7 +89,7 @@ func runServe(command *cobra.Command, configPath string, options *serveOptions) 
 	}
 	token := strings.TrimSpace(options.Token)
 	if token == "" {
-		token, err = randomToken()
+		token, err = randomToken(options.Rand)
 		if err != nil {
 			return err
 		}
@@ -92,6 +103,9 @@ func runServe(command *cobra.Command, configPath string, options *serveOptions) 
 	if err != nil {
 		return fmt.Errorf("监听 %s: %w", options.Listen, err)
 	}
+	// 监听成功后回填真实地址：`:0` 之类的写法只有 listener 知道最终端口，
+	// 测试与将来的诊断输出都需要它。
+	serveListenAddress = listener.Addr().String()
 	address := options.Listen
 	if strings.HasPrefix(options.Listen, ":") {
 		address = "127.0.0.1" + options.Listen
@@ -143,6 +157,11 @@ func runServe(command *cobra.Command, configPath string, options *serveOptions) 
 	}
 }
 
+// serveListenAddress 记录最近一次成功监听的地址（由 runServe 写、供测试读取）：
+// 监听地址写成 ":0" 时，最终端口只有 OS 知道，测试要连上去必须拿到真实地址。
+// 生产逻辑不依赖它，它只是给测试留的一个观测点。
+var serveListenAddress string
+
 // serveEndpoint 是 serve.json 的内容（本机客户端与 agent MCP 自举读取）。
 type serveEndpoint struct {
 	URL       string `json:"url"`
@@ -164,8 +183,17 @@ func writeServeEndpoint(configDir string, endpoint serveEndpoint) (string, error
 	if err := os.WriteFile(path, append(encoded, '\n'), 0o600); err != nil {
 		return "", err
 	}
+	serveEndpointWritten()
 	return path, nil
 }
+
+// serveEndpointWritten 在端点文件写成功后调用，默认是空操作。
+//
+// 这是一个**时序钩子**，不是依赖注入：它给出「文件已落盘」的确定时点，让测试能在
+// 那一刻取消 ctx，钉住「写完但没起来就退出」时端点文件必须被清掉（否则同机客户端
+// 会连到一个不存在的端口，报出来的是「连接被拒绝」，与真实原因无关）。这类时序写
+// 成 sleep 就会在慢机器上假失败。生产路径不设置它。
+var serveEndpointWritten = func() {}
 
 func serveHandler(store *sessionstore.Store, token string, logf func(string, ...any)) http.Handler {
 	mux := http.NewServeMux()
@@ -193,22 +221,7 @@ func serveHandler(store *sessionstore.Store, token string, logf func(string, ...
 		}
 		switch request.Method {
 		case http.MethodPost:
-			var batch sessionstore.Batch
-			if err := json.NewDecoder(request.Body).Decode(&batch); err != nil {
-				writeJSON(writer, http.StatusBadRequest, map[string]any{"error": "解析请求体失败：" + err.Error()})
-				return
-			}
-			stored := 0
-			for _, session := range batch.Sessions {
-				meta, err := store.Put(session)
-				if err != nil {
-					writeJSON(writer, http.StatusBadRequest, map[string]any{"error": err.Error(), "stored": stored})
-					return
-				}
-				stored++
-				logf("已存 %s（%d 行，来源 %s）", meta.Key.String(), meta.Lines, meta.Source)
-			}
-			writeJSON(writer, http.StatusOK, map[string]any{"stored": stored})
+			handleSessionPush(writer, request, store, logf)
 		case http.MethodGet:
 			metas, err := store.List(listFilter(request), intQuery(request, "limit", 0))
 			if err != nil {
@@ -271,6 +284,30 @@ func serveHandler(store *sessionstore.Store, token string, logf func(string, ...
 	return mux
 }
 
+// handleSessionPush 处理 POST /api/v1/sessions：把一批记录写进记录库。
+//
+// 与 GET 分开是为了让「写入中途失败」这条分支能被单独走到——库根被写坏时
+// store.Put 会报错，而列表/读取路径不经过它。响应里必须带上已经存下的条数：
+// 客户端据此知道要不要重推整批，退回一个没有 stored 的 400 会让它重复写入。
+func handleSessionPush(writer http.ResponseWriter, request *http.Request, store *sessionstore.Store, logf func(string, ...any)) {
+	var batch sessionstore.Batch
+	if err := json.NewDecoder(request.Body).Decode(&batch); err != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"error": "解析请求体失败：" + err.Error()})
+		return
+	}
+	stored := 0
+	for _, session := range batch.Sessions {
+		meta, err := store.Put(session)
+		if err != nil {
+			writeJSON(writer, http.StatusBadRequest, map[string]any{"error": err.Error(), "stored": stored})
+			return
+		}
+		stored++
+		logf("已存 %s（%d 行，来源 %s）", meta.Key.String(), meta.Lines, meta.Source)
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"stored": stored})
+}
+
 func listFilter(request *http.Request) sessionstore.Filter {
 	filter := sessionstore.Filter{
 		Host:         strings.TrimSpace(request.URL.Query().Get("host")),
@@ -299,24 +336,34 @@ func intQuery(request *http.Request, name string, fallback int) int {
 	return parsed
 }
 
+// writeJSON 是所有接口的唯一响应出口。先设 content-type 与状态码再编码：编码
+// 万一失手，客户端仍拿得到状态码，而不是一个没有头的半截响应（那会把排查引向
+// 网络问题而不是服务端的值）。
 func writeJSON(writer http.ResponseWriter, status int, payload any) {
 	writer.Header().Set("content-type", "application/json; charset=utf-8")
 	writer.WriteHeader(status)
 	_ = json.NewEncoder(writer).Encode(payload)
 }
 
-func randomToken() (string, error) {
+// randomToken 生成访问令牌；randSource 为 nil 时用 crypto/rand.Read。
+func randomToken(randSource func([]byte) (int, error)) (string, error) {
+	if randSource == nil {
+		randSource = rand.Read
+	}
 	buffer := make([]byte, 16)
-	if _, err := rand.Read(buffer); err != nil {
+	if _, err := randSource(buffer); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(buffer), nil
 }
 
 // defaultSessionsRoot 返回记录库缺省目录：当前目录的 data/sessions
-// （显式模式：一切产物收在配置旁边）。
-func defaultSessionsRoot() (string, error) {
-	directory, err := os.Getwd()
+// （显式模式：一切产物收在配置旁边）。getwd 为 nil 时用 os.Getwd。
+func defaultSessionsRoot(getwd func() (string, error)) (string, error) {
+	if getwd == nil {
+		getwd = os.Getwd
+	}
+	directory, err := getwd()
 	if err != nil {
 		return "", err
 	}
