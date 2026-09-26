@@ -1276,3 +1276,95 @@ func requireUnset(t *testing.T, name string) {
 		t.Skipf("%s 已在环境里定义为 %q，无法测未定义分支", name, value)
 	}
 }
+
+// SaveBytes 的 MkdirAll 失败：父路径落在普通文件之下，必须报错而不是静默丢弃
+// 内容——配置写不进去却沉默，后续 Load 会读到旧配置，排查成本极高。
+func TestSaveBytesReportsUnwritableDirectory(t *testing.T) {
+	base := t.TempDir()
+	blocker := filepath.Join(base, "blocker")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveBytes(filepath.Join(blocker, "config.json"), []byte("{}")); err == nil {
+		t.Error("父路径是文件时必须报错")
+	}
+}
+
+// stringifyEnv 只接受标量与 null：嵌套对象/数组是手写配置的常见笔误，必须报错
+// 而不是让它以 Go 的 %v 形式混进环境变量。
+func TestStringifyEnvRejectsNestedValues(t *testing.T) {
+	if _, err := stringifyEnv(map[string]any{"BASE_URL": map[string]any{"a": "b"}}); err == nil {
+		t.Error("对象值必须报错")
+	}
+	if _, err := stringifyEnv(map[string]any{"ARGS": []any{"a"}}); err == nil {
+		t.Error("数组值必须报错")
+	}
+	got, err := stringifyEnv(map[string]any{"N": float64(3), "F": float64(1.5), "B": true, "S": "x"})
+	if err != nil {
+		t.Fatalf("标量应被折叠：%v", err)
+	}
+	want := map[string]string{"N": "3", "F": "1.5", "B": "true", "S": "x"}
+	if !maps.Equal(got, want) {
+		t.Errorf("stringifyEnv = %v, want %v", got, want)
+	}
+}
+
+// Provider.MarshalJSON 保留未识别键（provider 的 additionalProperties: true），
+// 且写回已知键时必须覆盖 extra 里的同名键。
+func TestProviderMarshalJSONKeepsExtraKeys(t *testing.T) {
+	raw := `{"api_key":"k","env":{"B":"2","A":"1"},"settings":{"model":"m"},"base_url":"https://x","custom":{"deep":true}}`
+	var provider Provider
+	if err := json.Unmarshal([]byte(raw), &provider); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &out); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"api_key", "env", "settings", "base_url", "custom"} {
+		if _, ok := out[key]; !ok {
+			t.Errorf("MarshalJSON 丢掉了 %q：%s", key, encoded)
+		}
+	}
+	// extra 里的同名键不得覆盖已知字段
+	var overwritten Provider
+	if err := json.Unmarshal([]byte(`{"api_key":"real","env":{"A":"1"}}`), &overwritten); err != nil {
+		t.Fatal(err)
+	}
+	overwritten.extra = map[string]json.RawMessage{"api_key": json.RawMessage(`"stale"`)}
+	encoded, err = json.Marshal(overwritten)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"real"`) {
+		t.Errorf("已知键必须覆盖 extra 同名键：%s", encoded)
+	}
+}
+
+// Provider.normalized 清掉空白键值：空 env 值会以空字符串进环境变量，遮蔽
+// 供应商默认值，必须过滤。
+func TestProviderNormalizedEnvKeys(t *testing.T) {
+	provider := Provider{Env: map[string]string{"  BASE  ": "  https://x  ", "   ": "drop"}}
+	normalized := provider.normalized()
+	if got, want := normalized.Env["BASE"], "https://x"; got != want {
+		t.Errorf("Env[BASE] = %q, want %q", got, want)
+	}
+	if _, ok := normalized.Env[""]; ok {
+		t.Error("空键必须被清理")
+	}
+	if _, ok := normalized.Env["   "]; ok {
+		t.Error("纯空白键必须被清理")
+	}
+	// 全是空白键时回落成 nil（未写 env），而不是留一个空 map
+	if blank := (Provider{Env: map[string]string{"  ": ""}}).normalized(); blank.Env != nil {
+		t.Errorf("全空白 env 应回落 nil，得到 %v", blank.Env)
+	}
+	// 空值被保留：显式置空是「遮蔽供应商默认值」的手段，不能悄悄删掉
+	if kept := (Provider{Env: map[string]string{"KEY": ""}}).normalized(); kept.Env["KEY"] != "" {
+		t.Errorf("空值应保留，得到 %v", kept.Env)
+	}
+}
