@@ -1,0 +1,51 @@
+# 测试与覆盖率门禁：核心模块 ≥90%、一般模块 ≥80%（阈值表见 scripts/coverage.sh）。
+#
+# 与 .github/workflows/ 的分工：GitHub 侧负责 Release 与镜像发布（需要
+# registry 凭据与 tag 上下文），Gitea 侧跑仓库自身的 Actions（备份与测试），
+# 因此测试任务落在这里，与 .gitea/workflows/assistant.yml 同一个 runner 体系。
+#
+# 本仓库依赖外部 claude CLI 的端到端路径由 `make test-e2e` 覆盖（需真实 Gitea
+# 与 runner），不进这个任务：单测不依赖任何外部进程。
+name: Test
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+# 防堆积（latest-wins）：同一分支的新推送取消上一个 run 的排队/执行——测试
+# 是幂等的，旧结果对新的 head 没有意义。
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # 版本以 go.mod 为准，避免 CI 与本地工具链漂移
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        # 格式漂移不进仓库：只在 diff 为空时通过
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "以下文件未格式化，请运行 gofmt -w："
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test（含覆盖率门禁）
+        # 逐包对照阈值：核心 90% / 一般 80%，任一不达标即失败。
+        # 测试失败时门禁本身也会失败（不允许用红色测试换覆盖率数字）。
+        run: make cover
