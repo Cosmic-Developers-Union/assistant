@@ -130,8 +130,8 @@ func TestSnapshotQueueSkipsUnknownTarget(t *testing.T) {
 // TestStatusCodeIsStable 钉住 daemon 自身进程信息：PID 必须是当前进程、
 // StartedAt 非零、Now 不早于 StartedAt——状态面板靠这三项判断「daemon 是活的
 // 且跑了多久」，任一项为零值都会让面板显示错误。同时钉住空集合的 JSON 形态：
-// Targets/Queue/Sessions 是 []，而 Recent 因 slices.Clone(nil) 是 null（现状，
-// 见下方注释）。
+// 四个集合都必须是 []，而不是 null——MCP 客户端按数组解析，null 会让面板崩在
+// 「读不到 recent 的长度」上。
 func TestStatusCodeIsStable(t *testing.T) {
 	store := NewStore("v-code")
 	status := store.Snapshot()
@@ -144,23 +144,17 @@ func TestStatusCodeIsStable(t *testing.T) {
 	if status.StartedAt.IsZero() || status.Now.IsZero() || status.Now.Before(status.StartedAt) {
 		t.Errorf("StartedAt/Now 不合理：%v %v", status.StartedAt, status.Now)
 	}
-	// 无目标无队列时序列化必须是 [] 而不是 null（MCP 输出可读）。
-	// Targets/Queue/Sessions 在 Snapshot 里有显式初始化；Recent 只有
-	// slices.Clone(s.recent)，而 slices.Clone(nil) 返回 nil —— 于是空 recent
-	// 序列化成 null，MCP 客户端读到的 recent 是 null 而不是空数组。这里如实
-	// 钉住现状（不是「必须为 []」），等生产代码给 Recent 也初始化成 []Result{}
-	// 之后再改成数组断言。
+	// 无目标无队列时序列化必须是 [] 而不是 null（MCP 输出可读）。四个集合在
+	// Snapshot 里都有显式初始化，空状态必须是空数组——若哪个退化成 null，
+	// 客户端按数组解析就会失败。
 	encoded, err := json.Marshal(status)
 	if err != nil {
 		t.Fatalf("序列化状态：%v", err)
 	}
-	for _, field := range []string{`"targets":[]`, `"queue":[]`, `"sessions":[]`} {
+	for _, field := range []string{`"targets":[]`, `"queue":[]`, `"sessions":[]`, `"recent":[]`} {
 		if !strings.Contains(string(encoded), field) {
 			t.Errorf("空集合应序列化为 %s：%s", field, encoded)
 		}
-	}
-	if !strings.Contains(string(encoded), `"recent":null`) {
-		t.Errorf("现状：空 recent 序列化为 null（slices.Clone(nil)）：%s", encoded)
 	}
 }
 

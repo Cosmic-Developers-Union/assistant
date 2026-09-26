@@ -161,9 +161,9 @@ type dyingChannel struct {
 	calls atomic.Int32
 }
 
-func (d *dyingChannel) Name() string                            { return d.name }
-func (d *dyingChannel) SplitLimit() int                         { return 0 }
-func (d *dyingChannel) Allowed(string) (bool, string)           { return true, "" }
+func (d *dyingChannel) Name() string                  { return d.name }
+func (d *dyingChannel) SplitLimit() int               { return 0 }
+func (d *dyingChannel) Allowed(string) (bool, string) { return true, "" }
 func (d *dyingChannel) Receive(context.Context) (Inbound, error) {
 	d.calls.Add(1)
 	return nil, d.err

@@ -17,12 +17,12 @@ const DefaultTelegramSplitLimit = 4000
 type TelegramChannelConfig struct {
 	// Name 是通道实例键（会话映射层的 transport 键）：空 = "telegram"；多开
 	// 同平台 bot 时为 "telegram/<name>"
-	Name        string
-	BotToken    string
-	APIBaseURL  string
-	AdminUsers  []string
-	SplitLimit  int
-	HTTPClient  *http.Client
+	Name       string
+	BotToken   string
+	APIBaseURL string
+	AdminUsers []string
+	SplitLimit int
+	HTTPClient *http.Client
 }
 
 // TelegramChannel 是 Telegram 通道：getUpdates 长轮询收消息（出站连接）、

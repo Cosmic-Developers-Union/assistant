@@ -10,7 +10,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
 )
 
 // newFakeTelegram 返回最小 Bot API 服务端：第一批 getUpdates 投递一条私聊文本，

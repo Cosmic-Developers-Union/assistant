@@ -20,8 +20,8 @@ const DefaultWeixinSplitLimit = 1800
 type WeixinChannelConfig struct {
 	// Name 是通道实例键（会话映射层的 transport 键）：空 = "weixin"；多开
 	// 同平台账号时为 "weixin/<name>"
-	Name        string
-	Weixin      weixin.Config
+	Name   string
+	Weixin weixin.Config
 	// AdminUsers 是允许对话的用户白名单；空时只允许 LoginUserID；含 "*" 放开所有人
 	AdminUsers []string
 	// LoginUserID 是扫码登录的微信用户
