@@ -1648,3 +1648,189 @@ func TestManagerDeletesUnexpectedLabels(t *testing.T) {
 		t.Errorf("deleted labels = %+v, want %+v", api.deletedLabels, wantDeleted)
 	}
 }
+
+// ReconcileLabels 只补齐标签体系、不触碰 Issue/PR：setup 复用它走同一口径。
+func TestManagerReconcileLabelsCreatesMissingAndTouchesNothingElse(t *testing.T) {
+	repository := Repository{Owner: "acme", Name: "video"}
+	api := newFakeAPI(repository, nil) // 仓库上还没有任何标签
+	api.triageIssues[repository.FullName()] = []Issue{{Index: 9, Title: "待分诊"}}
+	api.pullRequests[repository.FullName()] = []PullRequest{{Index: 9}}
+
+	if err := NewManager(api).ReconcileLabels(t.Context(), repository); err != nil {
+		t.Fatalf("ReconcileLabels() error = %v", err)
+	}
+	if len(api.createdLabels) != len(labelDefinitions) {
+		t.Errorf("created labels = %d, want %d（应补齐全部规范标签）",
+			len(api.createdLabels), len(labelDefinitions))
+	}
+	// 只动标签体系：不碰 Issue/PR 的标签，也不提交 review
+	if len(api.addedLabels) != 0 || len(api.removedLabels) != 0 {
+		t.Errorf("added=%+v removed=%+v, want 无（ReconcileLabels 不触碰条目）",
+			api.addedLabels, api.removedLabels)
+	}
+	if len(api.createdReviews) != 0 {
+		t.Errorf("created reviews = %+v, want 无", api.createdReviews)
+	}
+}
+
+// latestStateReview 只看状态通道（状态评审者与历史驳回身份），内容评审者的
+// 结论不参与——两条通道的结论不可互相冒充。
+func TestManagerLatestStateReview(t *testing.T) {
+	manager := NewManager(&fakeAPI{}, WithStateReviewer("merge"))
+	reviews := []Review{
+		{ID: 1, State: ReviewStateApproved, Submitted: time.Unix(10, 0), User: "ai"},
+		{ID: 2, State: ReviewStateRequestChanges, Submitted: time.Unix(20, 0), User: "merge"},
+		{ID: 3, State: ReviewStateApproved, Submitted: time.Unix(30, 0), User: "gitea-actions"},
+	}
+
+	latest, found := manager.latestStateReview(reviews)
+	if !found {
+		t.Fatal("found = false, want 状态通道有结论")
+	}
+	if latest.ID != 3 || latest.User != "gitea-actions" {
+		t.Errorf("latest = %+v, want ID=3（较晚的历史驳回也是状态通道）", latest)
+	}
+
+	// 只有内容通道的结论时，状态通道为空
+	onlyContent := []Review{{ID: 4, State: ReviewStateApproved, Submitted: time.Unix(40, 0), User: "ai"}}
+	if _, found := manager.latestStateReview(onlyContent); found {
+		t.Error("found = true, want false（内容结论不冒充状态结论）")
+	}
+}
+
+// ReconcileReviewRequests：仓库列表读取失败直接返回；单个仓库的 PR 列表失败
+// 记语境后继续处理其余仓库（一处失败不该拖垮整轮）。
+func TestManagerReconcileReviewRequestsErrors(t *testing.T) {
+	healthy := Repository{Owner: "acme", Name: "healthy"}
+	broken := Repository{Owner: "acme", Name: "broken"}
+
+	t.Run("PR 列表失败时继续并带语境", func(t *testing.T) {
+		api := newFakeAPI(healthy, completeLabels())
+		api.repositories = []Repository{broken, healthy}
+		api.labels[broken.FullName()] = completeLabels()
+		api.pullListError[broken.FullName()] = errors.New("unavailable")
+		// healthy 上的请求应被正常维护（未被 broken 拖累）
+		pr := mergeablePullRequest(5, nil)
+		pr.RequestedReviewers = []string{"ai"}
+		api.pullRequests[healthy.FullName()] = []PullRequest{{Index: 5}}
+		api.current[pullRequestKey(healthy, 5)] = pr
+		api.reviews[pullRequestKey(healthy, 5)] = []Review{
+			{ID: 1, State: ReviewStateApproved, Submitted: time.Unix(10, 0), User: "ai"},
+		}
+		api.requestEvents[reviewerRequestKey(5, "ai")] = []time.Time{time.Unix(20, 0)}
+
+		err := NewManager(api).ReconcileReviewRequests(t.Context())
+		if err == nil || !strings.Contains(err.Error(), broken.FullName()) {
+			t.Fatalf("error = %v, want 含失败仓库名", err)
+		}
+		// healthy 的请求晚于结论 ⇒ 保留（证明该仓库确实被处理了）
+		if len(api.deletedRequests) != 0 {
+			t.Errorf("deleted = %+v, want 无（healthy 仓库应被处理且请求保留）", api.deletedRequests)
+		}
+	})
+
+	t.Run("关闭的 PR 跳过", func(t *testing.T) {
+		api := newFakeAPI(healthy, completeLabels())
+		closed := mergeablePullRequest(6, nil)
+		closed.Open = false
+		closed.RequestedReviewers = []string{"ai"}
+		api.pullRequests[healthy.FullName()] = []PullRequest{{Index: 6}}
+		api.current[pullRequestKey(healthy, 6)] = closed
+		api.reviews[pullRequestKey(healthy, 6)] = []Review{
+			{ID: 1, State: ReviewStateApproved, Submitted: time.Unix(10, 0), User: "ai"},
+		}
+
+		if err := NewManager(api).ReconcileReviewRequests(t.Context()); err != nil {
+			t.Fatalf("ReconcileReviewRequests() error = %v", err)
+		}
+		if len(api.deletedRequests) != 0 || len(api.createdRequests) != 0 {
+			t.Errorf("已关闭 PR 不应被维护请求：deleted=%+v created=%+v",
+				api.deletedRequests, api.createdRequests)
+		}
+	})
+}
+
+// 指定仓库（--repo）时只处理该仓库；令牌看不到它则直接报错（而不是静默
+// 什么也不做——那会让调用方以为「没有待办」）。
+func TestManagerWithRepositoryVisibility(t *testing.T) {
+	repository := Repository{Owner: "acme", Name: "video"}
+	other := Repository{Owner: "acme", Name: "other"}
+
+	t.Run("可见时只处理该仓库", func(t *testing.T) {
+		api := newFakeAPI(repository, completeLabels())
+		api.repositories = []Repository{other, repository}
+		api.labels[other.FullName()] = completeLabels()
+		api.labels[repository.FullName()] = completeLabels()
+		api.pullRequests[other.FullName()] = []PullRequest{{Index: 1}}
+		api.pullRequests[repository.FullName()] = []PullRequest{{Index: 2}}
+		api.current[pullRequestKey(other, 1)] = mergeablePullRequest(1, nil)
+		api.current[pullRequestKey(repository, 2)] = mergeablePullRequest(2, nil)
+
+		if err := NewManager(api, WithRepository(repository)).Sync(t.Context()); err != nil {
+			t.Fatalf("Sync() error = %v", err)
+		}
+		// 只处理指定仓库：other 的 PR 不应出现在任何标签变更里
+		for _, change := range append(append([]labelChange{}, api.addedLabels...), api.removedLabels...) {
+			if change.Item == 1 {
+				t.Errorf("其它仓库的 PR 被改动：%+v（WithRepository 应限定范围）", change)
+			}
+		}
+		// 指定仓库的 PR 按自身状态收敛（无评审意图 ⇒ 开发中/等待作者）
+		wantAdded := []labelChange{
+			{Item: 2, Label: labelByName(t, completeLabels(), inProgressLabelName).ID},
+			{Item: 2, Label: labelByName(t, completeLabels(), awaitingAuthorLabelName).ID},
+		}
+		if !slices.Equal(api.addedLabels, wantAdded) {
+			t.Errorf("added = %+v, want %+v", api.addedLabels, wantAdded)
+		}
+	})
+
+	t.Run("不可见时报错", func(t *testing.T) {
+		api := newFakeAPI(repository, completeLabels())
+		api.repositories = []Repository{other}
+
+		err := NewManager(api, WithRepository(repository)).Sync(t.Context())
+		if err == nil || !strings.Contains(err.Error(), "not visible") {
+			t.Fatalf("Sync() error = %v, want 不可见错误", err)
+		}
+	})
+}
+
+// Check 只读检索待办：三路取数任一失败都要带回语境，且不影响其它仓库的结果。
+func TestManagerCheckReportsWork(t *testing.T) {
+	repository := Repository{Owner: "acme", Name: "video"}
+	api := newFakeAPI(repository, completeLabels())
+	api.triageIssues[repository.FullName()] = []Issue{
+		{Index: 3, Title: "待分诊", HTMLURL: "u3"},
+	}
+	api.reviewPulls[repository.FullName()] = []Issue{
+		{Index: 5, Title: "待评审", HTMLURL: "u5"},
+	}
+
+	report, err := NewManager(api).Check(t.Context())
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if !report.HasWork() {
+		t.Fatal("HasWork() = false, want true")
+	}
+	if len(report.NeedsTriage) != 1 || report.NeedsTriage[0].Index != 3 {
+		t.Errorf("NeedsTriage = %+v", report.NeedsTriage)
+	}
+	if len(report.NeedsReview) != 1 || report.NeedsReview[0].Index != 5 {
+		t.Errorf("NeedsReview = %+v", report.NeedsReview)
+	}
+}
+
+// 所有可见仓库都失败时，错误要能定位到仓库（各仓库的错误用 errors.Join 汇总）。
+func TestManagerCheckJoinsRepositoryErrors(t *testing.T) {
+	repository := Repository{Owner: "acme", Name: "video"}
+	api := newFakeAPI(repository, completeLabels())
+	api.issueListError[repository.FullName()] = errors.New("boom")
+
+	if _, err := NewManager(api).Check(t.Context()); err == nil {
+		t.Fatal("Check() error = nil, want 汇总错误")
+	} else if !strings.Contains(err.Error(), repository.FullName()) {
+		t.Errorf("error = %v, want 含仓库名", err)
+	}
+}
