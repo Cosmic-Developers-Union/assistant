@@ -29,7 +29,11 @@ tempdir 里也不会失败。**已覆盖**的部分：空/非法内容被 `Valid
 | 包 | 函数 | 覆盖率 | 原因 |
 |---|---|---|---|
 | `internal/agents` | `builtin` 的 panic 守卫 | ~96% | `//go:embed` 的 `builtin.json` 损坏、缺少 main 预设——只能在构建期破坏嵌入文件触发 |
-| `internal/claudecfg` | `AssistantCommand` | ~78% | `os.Executable` / `filepath.Abs` 的错误分支需要故障注入 |
+
+`internal/claudecfg.AssistantCommand` 曾列在此（~78%）：`os.Executable` 的错误分支
+需要故障注入。现已抽出可覆盖的包级 `AssistantExecutable` var，三个分支（取不到
+路径、空路径、相对路径）都有测试，覆盖率 92.3%。同理 `ClaudeVersion` /
+`SupportsBare` 的探测改经 `Prober` 接口，失败与缓存路径不再需要造真脚本。
 
 ## 三、SDK / 标准库不会失败的返回
 
@@ -42,13 +46,34 @@ tempdir 里也不会失败。**已覆盖**的部分：空/非法内容被 `Valid
 
 ## 四、需要真实进程 / 网络 / 计时器
 
+会话执行已统一在 `internal/claude`：`Runner` 接口是唯一需要注入的执行点，生产实现
+`execRunner` 是唯一启动子进程的地方。它的错误/超时/信号路径由
+`internal/claude/runner_test.go` 用 `sh` 驱动的**真实子进程**覆盖（那是它唯一该被真实
+驱动的地方）；dispatcher 与 daemon 只注入假 Runner（`stubRunner`），不再写假可执行
+脚本。
+
 | 包 | 函数 | 处理方式 |
 |---|---|---|
-| `internal/dispatcher` | `RunSession` 真实 `claude` 调用 | 逻辑经 `Deps` 注入缝测到（`RunSession` 是 `func(SessionRequest) SessionOutcome` 字段）；真实调用交给 `make test-e2e` |
-| `internal/daemon` | `chat.go: runStreaming` | 同属会话桥接；需要的部分经注入缝覆盖，真实流式进程走 e2e |
+| `internal/dispatcher` | `RunSession` 的真实 `claude` 调用 | 逻辑经包级 `SessionRunner`（可替换，读写有锁——RunLoop 并发起会话）测到；真实调用交给 `make test-e2e` |
+| `internal/daemon` | 真实 `claude` 调用 | 经 `ChatConfig.Claude` 注入假 Runner；此前是 `RunClaude` 旁路，会绕过真实 spawn 路径，已删除 |
 | `internal/setup` | `personal_token.go` 的 `CheckRedirect` | 仅服务端返回 3xx 时调用，需真实重定向链路 |
 
-## 五、形式化规格约束的语义核
+## 五、`cmd/assistant` 的剩余缺口（唯一未达阈值的包）
+
+该包阈值 90%，实测 83.4%，未覆盖 544 条语句，集中在两处：
+
+| 文件 | 未覆盖语句 | 主要形态 |
+|---|---|---|
+| `cmd/assistant/daemon.go` | 104 | `runWeixinLogin`（交互式扫码登录）、`newDaemonMCPCommand` 的分支 |
+| `cmd/assistant/dispatch.go` | 103 | 调度器装配后的回调路径（需真实待办与 Gitea 往返） |
+| `doctor.go` / `serve.go` / `login_*.go` / `migrate.go` / `main.go` | 各 16–39 | `auditServer` 等需真实服务端往返；`main` 需以子进程方式跑二进制 |
+
+结论：剩下的不是「漏测」而是**需要真实交互或真实服务端**的路径（扫码登录、serve
+起停、doctor 的在线审计、以子进程跑 main）。按 `AGENTS.md`，这类边界用可注入的缝
+把逻辑测到、真实调用交给 `make test-e2e`，**不为凑数字写无意义的测试**——因此本包
+的缺口是如实登记的，而不是被忽略。
+
+## 六、形式化规格约束的语义核
 
 按 `AGENTS.md`：`internal/dispatcher` 的循环守卫/去重与 `internal/status/verify.go`
 （对应 `formal/Dispatcher.lean` 的 `completeOk`）无论包整体百分比起伏都应接近
