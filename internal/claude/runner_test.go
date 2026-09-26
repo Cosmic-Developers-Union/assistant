@@ -3,10 +3,10 @@ package claude
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -381,43 +381,40 @@ type errReader struct{}
 
 func (errReader) Read([]byte) (int, error) { return 0, errBoom }
 
-// terminateContainer 的缺省路径真的执行 `docker kill <name>`：用一个假 docker
-// 放进 PATH 验证命令行形态（不依赖宿主是否装了 docker）。
-func TestTerminateContainerDefaultShellsOutToDocker(t *testing.T) {
-	requireShell(t)
-	dir := t.TempDir()
-	logFile := dir + "/docker-args"
-	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + logFile + "\n"
-	if err := os.WriteFile(dir+"/docker", []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+// terminateContainer 把容器名交给 killContainer 钩子（不给钩子时才自己 exec
+// docker）。两条分支都不该碰进程环境——这里只验分派。
+func TestTerminateContainerDispatchesToHook(t *testing.T) {
+	var got string
+	runner := execRunner{killContainer: func(name string) error { got = name; return nil }}
 
-	execRunner{}.terminateContainer(Spec{Container: "assistant-review-1"})
-
-	recorded, err := os.ReadFile(logFile)
-	if err != nil {
-		t.Fatalf("假 docker 未被调用：%v", err)
+	runner.terminateContainer(Spec{Container: "assistant-review-1"})
+	if got != "assistant-review-1" {
+		t.Errorf("killContainer 收到 %q", got)
 	}
-	// --rm/-i 那种 docker run 前缀不应出现：这里只发 kill <name>
-	if got := strings.TrimSpace(string(recorded)); got != "kill\nassistant-review-1" {
-		t.Errorf("docker 参数 = %q, want kill + 容器名", got)
+
+	// 容器名为空：不调用钩子（非容器形态不引入一次无谓的 kill）
+	got = ""
+	runner.terminateContainer(Spec{})
+	if got != "" {
+		t.Errorf("容器名为空时不应调用 killContainer：%q", got)
 	}
 }
 
-// 容器名为空不碰 docker（非容器形态不引入一次无谓的 exec）。
-func TestTerminateContainerNoopWhenEmpty(t *testing.T) {
-	dir := t.TempDir()
-	record := dir + "/called"
-	script := "#!/bin/sh\ntouch " + record + "\n"
-	if err := os.WriteFile(dir+"/docker", []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+// 缺省 killContainer 真的执行 `docker kill <name>`。断言命令行的构造，用注入的
+// exec 替身而不是改 PATH——改 PATH 是进程级状态，会与并发跑的其它测试互相干扰。
+func TestTerminateContainerDefaultCommandShape(t *testing.T) {
+	original := dockerKillCommand
+	t.Cleanup(func() { dockerKillCommand = original })
 
-	execRunner{}.terminateContainer(Spec{})
-	if _, err := os.Stat(record); err == nil {
-		t.Error("容器名为空时不应调用 docker")
+	var recorded []string
+	dockerKillCommand = func(name string, args ...string) error {
+		recorded = append([]string{name}, args...)
+		return nil
+	}
+
+	execRunner{}.terminateContainer(Spec{Container: "assistant-review-1"})
+	if len(recorded) != 3 || recorded[0] != "docker" || recorded[1] != "kill" || recorded[2] != "assistant-review-1" {
+		t.Errorf("docker 命令行 = %v, want [docker kill assistant-review-1]", recorded)
 	}
 }
 
@@ -493,21 +490,225 @@ func TestExecRunnerKillGraceEscalatesToKill(t *testing.T) {
 	}
 }
 
-// stdout 读失败（非 EOF、非「管道已关」）必须作为错误上报，不能静默当成功——
-// 否则调用方会把一次读挂掉的会话当正常结束。
-func TestExecRunnerPropagatesReadError(t *testing.T) {
-	// 子进程被 kill -9 后管道的读端行为由内核决定，不稳定；这里直接驱动 Run 的
-	// 那条分支不可行，改断言 isClosedPipe 只认 os.ErrClosed：其他错误一律上报。
-	if isClosedPipe(errBoom) {
-		t.Error("任意错误不应被当作「管道已关」")
+// describeExit 的三条出口：正退出码给数字、被信号终止给信号名、其余说明异常终止。
+//
+// 前两条由 TestProcessSignaled 用真实进程覆盖；这里只补「非正退出码且拿不到信号
+// 信息」的那条——用一个真实的、非 signaled 的退出状态（state.Sys() 是
+
+// ---- follower：跟随 stdout 的读侧逻辑 ----
+//
+// 它值几行专门的测试：整个「不丢行」的保证都落在这里，且它能脱离子进程独立驱动
+// （给一个文件、往里追加、断言交付的行）。
+
+// 每次追加后只交付完整行；未成行的尾部留到 finish（无换行结尾的末行必须交付）。
+func TestFollowerDeliversCompleteLinesOnly(t *testing.T) {
+	path := t.TempDir() + "/out"
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !isClosedPipe(os.ErrClosed) {
-		t.Error("os.ErrClosed 应被判为「管道已关」")
+	defer file.Close()
+
+	var lines []string
+	follow := newFollower(file, func(line []byte) { lines = append(lines, string(line)) })
+
+	// 写半行：不该交付
+	if _, err := file.WriteString(`{"partial"`); err != nil {
+		t.Fatal(err)
 	}
-	if !isClosedPipe(fmt.Errorf("wrapped: %w", os.ErrClosed)) {
-		t.Error("包装后的 os.ErrClosed 也应被识别（错误链）")
+	follow.drain()
+	if len(lines) != 0 {
+		t.Fatalf("半行不应交付：%v", lines)
 	}
-	if isClosedPipe(nil) {
-		t.Error("nil 不应被判为「管道已关」")
+
+	// 补齐这一行并再加一整行
+	if _, err := file.WriteString("}\n{\"second\":1}\n"); err != nil {
+		t.Fatal(err)
+	}
+	follow.drain()
+	if len(lines) != 2 || lines[0] != `{"partial"}` || lines[1] != `{"second":1}` {
+		t.Fatalf("交付 = %v", lines)
+	}
+
+	// 追加一行不带换行结尾：drain 不交付，finish 交付
+	if _, err := file.WriteString(`{"tail"}`); err != nil {
+		t.Fatal(err)
+	}
+	follow.drain()
+	if len(lines) != 2 {
+		t.Errorf("未成行的尾部不该被 drain 交付：%v", lines)
+	}
+	follow.finish()
+	if len(lines) != 3 || lines[2] != `{"tail"}` {
+		t.Errorf("finish 应交付无换行结尾的末行：%v", lines)
+	}
+}
+
+// 空行与纯空白行不交付（不产出无意义的进度）。
+func TestFollowerSkipsBlankLines(t *testing.T) {
+	path := t.TempDir() + "/out"
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := file.WriteString("a\n\n   \n\t\nb\n"); err != nil {
+		t.Fatal(err)
+	}
+	var lines []string
+	follow := newFollower(file, func(line []byte) { lines = append(lines, string(line)) })
+	follow.drain()
+	if len(lines) != 2 || lines[0] != "a" || lines[1] != "b" {
+		t.Errorf("空行应跳过：%v", lines)
+	}
+}
+
+// 行尾 \r 被去掉（日志不该带上 Windows 换行残留）。
+func TestFollowerTrimsCarriageReturn(t *testing.T) {
+	path := t.TempDir() + "/out"
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := file.WriteString("line\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	var lines []string
+	follow := newFollower(file, func(line []byte) { lines = append(lines, string(line)) })
+	follow.drain()
+	if len(lines) != 1 || lines[0] != "line" {
+		t.Errorf("应去掉 \\r：%q", lines)
+	}
+}
+
+// 单行超过一个读取块（followChunk）时不丢内容：跨块的行要能拼接起来。
+func TestFollowerJoinsAcrossChunks(t *testing.T) {
+	path := t.TempDir() + "/out"
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	// 写两倍块大小的内容，末尾无换行
+	payload := strings.Repeat("x", followChunk*2)
+	if _, err := file.WriteString(payload); err != nil {
+		t.Fatal(err)
+	}
+	var lines []string
+	follow := newFollower(file, func(line []byte) { lines = append(lines, string(line)) })
+	follow.drain()
+	follow.finish()
+	if len(lines) != 1 {
+		t.Fatalf("应拼成一行：%d 行", len(lines))
+	}
+	if lines[0] != payload {
+		t.Errorf("跨块内容被截断：%d 字节，want %d", len(lines[0]), len(payload))
+	}
+}
+
+// onLine 为 nil 时不 panic。
+func TestFollowerNilOnLine(t *testing.T) {
+	path := t.TempDir() + "/out"
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := file.WriteString("a\n"); err != nil {
+		t.Fatal(err)
+	}
+	follow := newFollower(file, nil)
+	follow.drain()
+	follow.finish()
+}
+
+// 进程为 nil 时 run 立刻收尾并交付残余（不阻塞）。
+func TestFollowerRunWithNilProcess(t *testing.T) {
+	path := t.TempDir() + "/out"
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := file.WriteString("residual"); err != nil {
+		t.Fatal(err)
+	}
+	var lines []string
+	follow := newFollower(file, func(line []byte) { lines = append(lines, string(line)) })
+	done := make(chan struct{})
+	go func() { defer close(done); follow.run(nil) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("进程为 nil 时 run 不应阻塞")
+	}
+	if len(lines) != 1 || lines[0] != "residual" {
+		t.Errorf("交付 = %v", lines)
+	}
+}
+
+// 跟随一个真实进程：边跑边交付，退出后残余也交付（实时进度的核心保证）。
+func TestFollowerTracksRunningProcess(t *testing.T) {
+	requireShell(t)
+	path := t.TempDir() + "/out"
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+
+	command := exec.Command("sh", "-c", `printf 'first\n'; sleep 0.15; printf 'second\nlast-no-newline'`)
+	command.Stdout = file
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var lines []string
+	follow := newFollower(file, func(line []byte) {
+		mu.Lock()
+		lines = append(lines, string(line))
+		mu.Unlock()
+	})
+	done := make(chan struct{})
+	go func() { defer close(done); follow.run(command.Process) }()
+	_ = command.Wait()
+	<-done
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"first", "second", "last-no-newline"}
+	if len(lines) != len(want) {
+		t.Fatalf("交付 = %v, want %v", lines, want)
+	}
+	for index, value := range want {
+		if lines[index] != value {
+			t.Errorf("第 %d 行 = %q, want %q", index, lines[index], value)
+		}
+	}
+}
+
+// drain 的读错误路径：文件不可读时记录下来（交给 Run 上报），而不是静默当读完。
+func TestFollowerRecordsReadFailure(t *testing.T) {
+	path := t.TempDir() + "/out"
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString("content\n"); err != nil {
+		t.Fatal(err)
+	}
+	follow := newFollower(file, nil)
+	_ = file.Close() // 关掉底层文件：后续 ReadAt 报错
+
+	follow.drain()
+	if follow.err() == nil {
+		t.Error("读失败应被记录")
+	}
+	// 已失败后 drain 不再重复尝试（幂等，不 panic）
+	follow.drain()
+	if follow.err() == nil {
+		t.Error("失败状态应保持")
 	}
 }

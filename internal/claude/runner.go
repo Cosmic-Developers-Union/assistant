@@ -19,6 +19,7 @@ package claude
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -94,23 +95,34 @@ type execRunner struct {
 func NewExecRunner() Runner { return execRunner{} }
 
 // Run 实现 Runner：启动子进程、逐行消费 stdout、按退出状态归类错误。
+//
+// stdout 与 stderr **都落进真实临时文件**，再由一个跟随 goroutine 边写边读
+// stdout 交付给 onLine。为什么不直接用管道（StdoutPipe / io.Writer）：
+//
+//   - command.Stdout 给 io.Writer 时，os/exec 会另起 goroutine 拷贝，而 Wait()
+//     要等那份拷贝读到 EOF；
+//   - StdoutPipe 的读端由 Wait() 关闭，机器有负载时 Wait 会赶在 reader 取完内核
+//     缓冲之前关掉它，于是丢行——最后一条 result 消息正是判会话结论的依据。
+//
+// 两处都栽在同一件事上：子进程常把写端交给后代（`sh -c "sleep 10"` 里的 sleep
+// 就继承了它），于是「等 EOF」等的是后代退出，超时终止掉直接子进程也解不开——
+// 超时形同虚设。给 *os.File 时 exec 直接把 fd 交给子进程、不起拷贝 goroutine，
+// Wait 只等进程本身；文件内容一直留到我们读完为止，一行都不会丢。
 func (r execRunner) Run(ctx context.Context, spec Spec, onLine func([]byte)) error {
 	command := exec.CommandContext(ctx, spec.Bin, spec.Args...)
 	command.Dir = spec.Dir
 	if len(spec.Env) > 0 {
 		command.Env = append(os.Environ(), spec.Env...)
 	}
-	stdout, err := command.StdoutPipe()
+
+	stdoutFile, err := os.CreateTemp("", "claude-stdout-*")
 	if err != nil {
-		return fmt.Errorf("获取 stdout 管道: %w", err)
+		return fmt.Errorf("创建 stdout 暂存文件: %w", err)
 	}
-	// stderr 落进临时文件而不是内存 writer：**必须是 *os.File**。
-	//
-	// os/exec 对非 *os.File 的 Stderr 会另建管道并起 goroutine 拷贝，而 Wait() 要
-	// 等那份拷贝读到 EOF。子进程把写端交给后代时（`sh -c "sleep 10"` 里的 sleep
-	// 就继承了它），EOF 要等后代退出才到——超时终止掉进程后 Wait 仍会挂满整个
-	// sleep 时长，超时形同虚设。给 *os.File 时 exec 直接把 fd 交给子进程，Wait
-	// 只等进程本身。
+	defer func() {
+		_ = stdoutFile.Close()
+		_ = os.Remove(stdoutFile.Name())
+	}()
 	stderrFile, err := os.CreateTemp("", "claude-stderr-*")
 	if err != nil {
 		return fmt.Errorf("创建 stderr 暂存文件: %w", err)
@@ -119,7 +131,9 @@ func (r execRunner) Run(ctx context.Context, spec Spec, onLine func([]byte)) err
 		_ = stderrFile.Close()
 		_ = os.Remove(stderrFile.Name())
 	}()
+	command.Stdout = stdoutFile
 	command.Stderr = stderrFile
+
 	if err := command.Start(); err != nil {
 		return fmt.Errorf("启动 %s: %w", spec.Bin, err)
 	}
@@ -127,6 +141,9 @@ func (r execRunner) Run(ctx context.Context, spec Spec, onLine func([]byte)) err
 	var timedOut atomic.Bool
 	var timer *time.Timer
 	if spec.Timeout > 0 {
+		// 在进超时闭包前读一次 KillGrace：闭包跑在自己的 goroutine 上，直接读包级
+		// 变量会与「测试替换它」形成数据竞争（-race 可复现）。
+		grace := KillGrace
 		timer = time.AfterFunc(spec.Timeout, func() {
 			timedOut.Store(true)
 			r.terminateContainer(spec)
@@ -139,26 +156,29 @@ func (r execRunner) Run(ctx context.Context, spec Spec, onLine func([]byte)) err
 			if kill == nil {
 				kill = func(process *os.Process) error { return process.Kill() }
 			}
-			time.AfterFunc(KillGrace, func() { _ = kill(command.Process) })
+			time.AfterFunc(grace, func() { _ = kill(command.Process) })
 		})
 	}
 
-	// stdout 必须在**独立 goroutine** 里读：读管道的调用只在写端全部关闭才返回，
-	// 而子进程可能把写端交给了后代（`sh -c "sleep 10"` 里的 sleep 就继承了它）。
-	// 若在主 goroutine 里读到 EOF 再 Wait，超时终止掉进程后仍会挂着等那些后代
-	// 退出——超时形同虚设。放到 goroutine 后 Wait 能立刻返回，残余的读在管道写端
-	// 关闭后自行结束。
-	scanDone := make(chan error, 1)
-	go func() { scanDone <- scanLines(stdout, onLine) }()
+	// 跟随 stdout：进程运行期间持续交付新增行（保持实时进度），进程退出后收尾。
+	// 与 Wait 互不阻塞——两边读的是同一个文件，谁先谁后都不丢数据。
+	follow := newFollower(stdoutFile, onLine)
+	followDone := make(chan struct{})
+	go func() {
+		defer close(followDone)
+		follow.run(command.Process)
+	}()
+
 	waitErr := command.Wait()
 	if timer != nil {
 		timer.Stop()
 	}
-	scanErr := <-scanDone
+	<-followDone
+	readErr := follow.err()
 
 	switch {
-	case scanErr != nil && !errors.Is(scanErr, io.EOF) && !isClosedPipe(scanErr):
-		return fmt.Errorf("读取 %s 输出: %w", spec.Bin, scanErr)
+	case readErr != nil:
+		return fmt.Errorf("读取 %s 输出: %w", spec.Bin, readErr)
 	case waitErr != nil && command.ProcessState == nil:
 		// 进程未正常跑起来（如 ctx 取消打断 Start→Wait 之间）
 		return waitErr
@@ -175,6 +195,108 @@ func (r execRunner) Run(ctx context.Context, spec Spec, onLine func([]byte)) err
 	}
 	return nil
 }
+
+// followInterval 是跟随 stdout 的轮询间隔。文件读写没有事件通知，只能轮询；
+// 20ms 兼顾实时感（进度行看起来是「正在发生」）与代价（一轮会话几十分钟，
+// 每秒 50 次很小的 ReadAt）。
+const followInterval = 20 * time.Millisecond
+
+// followChunk 是单次读取的块大小。
+const followChunk = 64 * 1024
+
+// follower 跟随一个正被写入的文件，把新增内容按行交付。
+//
+// 为什么不用管道：见 Run 的注释——管道要么让 Wait 阻塞在后代持有的写端上，要么
+// 被 Wait 关掉读端而丢行。文件没有这两个问题：进程死后内容仍在，可以从容读完；
+// 跟随只是为了让进度保持实时。
+type follower struct {
+	file    *os.File
+	onLine  func([]byte)
+	offset  int64
+	partial []byte
+	failure error
+}
+
+func newFollower(file *os.File, onLine func([]byte)) *follower {
+	return &follower{file: file, onLine: onLine}
+}
+
+// run 循环交付新增内容，直到进程退出；退出后再读一轮把残余（含无换行结尾的
+// 末行）交付完。
+func (f *follower) run(process *os.Process) {
+	for {
+		f.drain()
+		if process != nil && processExited(process) {
+			f.drain()
+			f.finish()
+			return
+		}
+		if process == nil {
+			f.finish()
+			return
+		}
+		time.Sleep(followInterval)
+	}
+}
+
+// drain 读走自上次以来新增的全部内容，按行交付；未成行的尾部留待 finish。
+func (f *follower) drain() {
+	if f.failure != nil {
+		return
+	}
+	buffer := make([]byte, followChunk)
+	for {
+		count, err := f.file.ReadAt(buffer, f.offset)
+		if count > 0 {
+			f.offset += int64(count)
+			f.consume(buffer[:count])
+		}
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				f.failure = err
+			}
+			return
+		}
+		if count < len(buffer) {
+			return
+		}
+	}
+}
+
+// consume 按换行切分新内容：完整行立即交付，剩余部分留作下次。
+func (f *follower) consume(chunk []byte) {
+	f.partial = append(f.partial, chunk...)
+	for {
+		index := bytes.IndexByte(f.partial, '\n')
+		if index < 0 {
+			return
+		}
+		f.emit(f.partial[:index])
+		f.partial = f.partial[index+1:]
+	}
+}
+
+// finish 交付没有换行结尾的末行：CLI 的 result 消息可能不带换行，丢了它调用方
+// 就看不到会话结论。
+func (f *follower) finish() {
+	if len(f.partial) > 0 {
+		f.emit(f.partial)
+		f.partial = nil
+	}
+}
+
+// emit 交付一行；空行与纯空白行跳过（不产出无意义的进度）。
+func (f *follower) emit(line []byte) {
+	trimmed := bytes.TrimRight(line, "\r")
+	if len(bytes.TrimSpace(trimmed)) == 0 {
+		return
+	}
+	if f.onLine != nil {
+		f.onLine(trimmed)
+	}
+}
+
+func (f *follower) err() error { return f.failure }
 
 // readTail 读文件尾部至多 limit 字节（stderr 的尾部才是诊断要点，整段会把日志
 // 淹掉；完整输出在会话文本记录里）。
@@ -195,6 +317,13 @@ func readTail(file *os.File, limit int) string {
 	return string(buffer)
 }
 
+// dockerKillCommand 执行 `docker kill <name>`；单独抽成 var 是为了让
+// terminateContainer 的缺省路径可在测试里断言命令行（否则要么真去调 docker、
+// 要么改 PATH——后者是进程级状态，会干扰并发跑的其它测试）。生产不修改。
+var dockerKillCommand = func(name string, args ...string) error {
+	return exec.Command(name, args...).Run()
+}
+
 // terminateContainer 在容器形态下按名终止容器；失败不影响其余收尾（容器可能
 // 已自行退出）。
 func (r execRunner) terminateContainer(spec Spec) {
@@ -204,22 +333,13 @@ func (r execRunner) terminateContainer(spec Spec) {
 	kill := r.killContainer
 	if kill == nil {
 		kill = func(name string) error {
-			return exec.Command("docker", "kill", name).Run()
+			return dockerKillCommand("docker", "kill", name)
 		}
 	}
 	_ = kill(spec.Container)
 }
 
-// isClosedPipe 报告错误是否只是「管道已被 Wait 关掉」（os.ErrClosed）。
-//
-// 进程死亡后 Wait 会关闭自己那侧的管道，此时正在读的 goroutine 会拿到
-// os.ErrClosed 而不是 io.EOF。那不是读取失败——我们本来就要在这一刻收手——所以
-// 不能让它掩盖真正的原因（退出码、超时）。
-func isClosedPipe(err error) bool {
-	return errors.Is(err, os.ErrClosed)
-}
-
-// scanLines 逐行交付 stdout；返回读取错误（含 io.EOF）。
+// scanLines 逐行交付一个 reader；返回读取错误（含 io.EOF）。
 //
 // 末行没有换行符时也要交付：CLI 的 result 消息是最后一行，且在流被中断时可能
 // 不带换行——丢了它调用方就看不到会话结论。

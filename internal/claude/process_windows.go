@@ -16,3 +16,11 @@ func ProcessSignaled(*os.ProcessState) (bool, string) {
 
 // terminateProcess 是 execRunner 的缺省终止动作。
 func terminateProcess(process *os.Process) error { return TerminateProcess(process) }
+
+// processExited 报告进程是否已退出（跟随 stdout 的收尾条件）。
+func processExited(process *os.Process) bool {
+	if process == nil {
+		return true
+	}
+	return process.Signal(os.Interrupt) != nil
+}

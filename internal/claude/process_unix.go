@@ -3,6 +3,7 @@
 package claude
 
 import (
+	"errors"
 	"os"
 	"syscall"
 )
@@ -39,3 +40,15 @@ func signalName(signal syscall.Signal) string {
 
 // terminateProcess 是 execRunner 的缺省终止动作。
 func terminateProcess(process *os.Process) error { return TerminateProcess(process) }
+
+// processExited 报告进程是否已退出（跟随 stdout 的收尾条件）。
+//
+// 用 Signal(0) 探测：进程已死时返回 os.ErrProcessDone；仍在运行返回 nil（对无
+// 权限的进程可能返回 EPERM，那也说明它活着）。
+func processExited(process *os.Process) bool {
+	if process == nil {
+		return true
+	}
+	err := process.Signal(syscall.Signal(0))
+	return errors.Is(err, os.ErrProcessDone)
+}
