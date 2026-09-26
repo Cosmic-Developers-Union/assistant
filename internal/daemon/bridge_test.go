@@ -79,9 +79,7 @@ func TestWeixinChannelRepliesToLoginUser(t *testing.T) {
 	chat, err := NewChat(ChatConfig{
 		StateDir:   t.TempDir(),
 		SessionDir: t.TempDir(),
-		RunClaude: func(_ context.Context, _ string, _ []string, _ string, _ []string) ([]byte, error) {
-			return []byte(`{"subtype":"success","is_error":false,"result":"当前 1 个评审会话"}`), nil
-		},
+		Claude:     runnerSuccess("当前 1 个评审会话"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -123,7 +121,7 @@ func TestWeixinChannelIgnoresOtherUsers(t *testing.T) {
 	chat, err := NewChat(ChatConfig{
 		StateDir:   t.TempDir(),
 		SessionDir: t.TempDir(),
-		RunClaude:  func(context.Context, string, []string, string, []string) ([]byte, error) { return nil, nil },
+		Claude:     &stubRunner{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -194,9 +192,7 @@ func TestWeixinChannelDropsBotMessages(t *testing.T) {
 	chat, err := NewChat(ChatConfig{
 		StateDir:   t.TempDir(),
 		SessionDir: t.TempDir(),
-		RunClaude: func(context.Context, string, []string, string, []string) ([]byte, error) {
-			return nil, nil
-		},
+		Claude:     &stubRunner{},
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -25,8 +26,10 @@ type stubChannel struct {
 	limit   int
 
 	startErr error
-	started  int
-	closed   int
+	// started / closed 由生产 goroutine（RunChannel）自增、测试在另一 goroutine
+	// 里读（含轮询等待），必须是原子的——裸 int 会被 -race 判为数据竞争。
+	started atomic.Int32
+	closed  atomic.Int32
 }
 
 func (s *stubChannel) Name() string { return s.name }
@@ -45,11 +48,11 @@ func (s *stubChannel) Receive(ctx context.Context) (Inbound, error) {
 func (s *stubChannel) SplitLimit() int { return s.limit }
 
 func (s *stubChannel) Start(context.Context) error {
-	s.started++
+	s.started.Add(1)
 	return s.startErr
 }
 
-func (s *stubChannel) Close(context.Context) { s.closed++ }
+func (s *stubChannel) Close(context.Context) { s.closed.Add(1) }
 
 // stubInbound 是可注入的错误入站消息：Reply 可按序号返回错误，Typing 记账。
 type stubInbound struct {
@@ -97,7 +100,7 @@ func TestRunChannelRejectsMissingDependencies(t *testing.T) {
 func TestRunChannelStartFailureAndCloser(t *testing.T) {
 	chat, _, _ := startChat(t, ChatConfig{})
 	ctx, cancel := context.WithCancel(context.Background())
-	var logs []string
+	logs := &logSink{}
 	channel := &stubChannel{
 		name:     "stub",
 		startErr: errors.New("上线通知被拒"),
@@ -110,12 +113,12 @@ func TestRunChannelStartFailureAndCloser(t *testing.T) {
 	go func() {
 		done <- RunChannel(ctx, channel, ChannelConfig{
 			Chat: chat,
-			Log:  func(format string, arguments ...any) { logs = append(logs, format) },
+			Log:  logs.Log,
 		})
 	}()
 	// 等 Start 的日志落袋，再取消
 	deadline := time.Now().Add(3 * time.Second)
-	for channel.started == 0 && time.Now().Before(deadline) {
+	for channel.started.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	cancel()
@@ -124,14 +127,14 @@ func TestRunChannelStartFailureAndCloser(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("RunChannel 未退出")
 	}
-	if channel.started != 1 {
-		t.Errorf("Start 应调用一次：%d", channel.started)
+	if channel.started.Load() != 1 {
+		t.Errorf("Start 应调用一次：%d", channel.started.Load())
 	}
-	if channel.closed != 1 {
-		t.Errorf("Close 应调用一次：%d", channel.closed)
+	if channel.closed.Load() != 1 {
+		t.Errorf("Close 应调用一次：%d", channel.closed.Load())
 	}
-	if !strings.Contains(strings.Join(logs, "\n"), "上线通知失败（忽略）") {
-		t.Errorf("Start 失败应记日志但不阻断：%v", logs)
+	if !strings.Contains(logs.joined(), "上线通知失败（忽略）") {
+		t.Errorf("Start 失败应记日志但不阻断：%v", logs.all())
 	}
 }
 
@@ -144,9 +147,9 @@ func TestRunChannelStartFailureAndCloser(t *testing.T) {
 // 这四条各自的漏判后果都不同：不重试=通道假死，不跳 nil=panic，
 // 不跳白名单=越权对话，不跳空白=claude 收到空提问。
 func TestRunChannelReceiveRetriesAndSkips(t *testing.T) {
-	chat, _, calls := startChat(t, ChatConfig{})
+	chat, _, stub := startChat(t, ChatConfig{})
 	ctx, cancel := context.WithCancel(context.Background())
-	var logs []string
+	logs := &logSink{}
 	attempts := 0
 	channel := &stubChannel{
 		name: "stub",
@@ -179,11 +182,11 @@ func TestRunChannelReceiveRetriesAndSkips(t *testing.T) {
 	go func() {
 		done <- RunChannel(ctx, channel, ChannelConfig{
 			Chat: chat,
-			Log:  func(format string, arguments ...any) { logs = append(logs, format) },
+			Log:  logs.Log,
 		})
 	}()
 	deadline := time.Now().Add(5 * time.Second)
-	for len(*calls) == 0 && time.Now().Before(deadline) {
+	for stub.callCount() == 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	cancel()
@@ -192,16 +195,16 @@ func TestRunChannelReceiveRetriesAndSkips(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("RunChannel 未退出")
 	}
-	if got := *calls; len(got) != 1 {
+	if got := stub.callsSnapshot(); len(got) != 1 {
 		t.Errorf("只有合法消息应进 Chat：%v", got)
 	}
-	joined := strings.Join(logs, "\n")
+	joined := logs.joined()
 	// Log 注入的是「格式串」，不是渲染后的文本：断言必须比对格式串本身
 	if !strings.Contains(joined, "通道 %s 接收失败：%v（%s 后重试）") {
-		t.Errorf("非致命错误应走退避重试分支：%v", logs)
+		t.Errorf("非致命错误应走退避重试分支：%v", logs.all())
 	}
 	if !strings.Contains(joined, "通道 %s 忽略用户 %s 的消息：%s") {
-		t.Errorf("白名单外用户应被忽略并记日志：%v", logs)
+		t.Errorf("白名单外用户应被忽略并记日志：%v", logs.all())
 	}
 }
 
@@ -220,8 +223,8 @@ func TestRunChannelFatalErrorStopsWithStarterError(t *testing.T) {
 	if err == nil || err.Error() != "凭据被拒绝" {
 		t.Errorf("致命错误应上抛：%v", err)
 	}
-	if channel.closed != 1 {
-		t.Errorf("致命退出也必须 Close：%d", channel.closed)
+	if channel.closed.Load() != 1 {
+		t.Errorf("致命退出也必须 Close：%d", channel.closed.Load())
 	}
 }
 
@@ -241,14 +244,12 @@ func TestHandleInboundFailurePaths(t *testing.T) {
 			t.Fatal(err)
 		}
 		chat, _, _ := startChat(t, ChatConfig{})
-		var logs []string
+		logs := &logSink{}
 		config := ChannelConfig{Chat: chat, Log: func(format string, arguments ...any) {
-			logs = append(logs, format)
+			logs.Log(format)
 		}}
 		message := &stubInbound{user: "u1", text: "你好"}
-		chat.config.RunClaude = func(context.Context, string, []string, string, []string) ([]byte, error) {
-			return []byte(`{"subtype":"success","is_error":false,"result":"OK"}`), nil
-		}
+		chat.config.Claude = runnerSuccess("OK")
 		// 破坏映射表落点之后再把工作目录指向干净目录
 		chat.config.StateDir = filepath.Join(blocker, "chat")
 		workspaceRoot := t.TempDir()
@@ -257,16 +258,14 @@ func TestHandleInboundFailurePaths(t *testing.T) {
 		if len(message.replies) != 1 || message.replies[0] != "OK" {
 			t.Errorf("映射失败仍应完成对话：%v", message.replies)
 		}
-		if !strings.Contains(strings.Join(logs, "\n"), "会话映射失败（%s），退回通道用户 id：%v") {
-			t.Errorf("映射失败应记日志：%v", logs)
+		if !strings.Contains(logs.joined(), "会话映射失败（%s），退回通道用户 id：%v") {
+			t.Errorf("映射失败应记日志：%v", logs.all())
 		}
 	})
 
 	// 对话失败：错误文本发回给用户
 	t.Run("对话失败回发错误", func(t *testing.T) {
-		chat, _, _ := startChat(t, ChatConfig{RunClaude: func(context.Context, string, []string, string, []string) ([]byte, error) {
-			return nil, errors.New("claude 崩了")
-		}})
+		chat, _, _ := startChat(t, ChatConfig{Claude: runnerFailure(errors.New("claude 崩了"))})
 		message := &stubInbound{user: "u1", text: "你好"}
 		handleInbound(context.Background(), &stubChannel{name: "stub"},
 			ChannelConfig{Chat: chat, Log: t.Logf}, message, "你好")
@@ -278,9 +277,7 @@ func TestHandleInboundFailurePaths(t *testing.T) {
 
 	// 空回复：补「（无回复）」
 	t.Run("空回复占位", func(t *testing.T) {
-		chat, _, _ := startChat(t, ChatConfig{RunClaude: func(context.Context, string, []string, string, []string) ([]byte, error) {
-			return []byte(`{"subtype":"success","is_error":false,"result":"   "}`), nil
-		}})
+		chat, _, _ := startChat(t, ChatConfig{Claude: runnerSuccess("   ")})
 		message := &stubInbound{user: "u1", text: "你好"}
 		handleInbound(context.Background(), &stubChannel{name: "stub"},
 			ChannelConfig{Chat: chat, Log: t.Logf}, message, "你好")
@@ -290,34 +287,25 @@ func TestHandleInboundFailurePaths(t *testing.T) {
 	})
 }
 
-// stubLogCollector 收集 config.Log 的格式串（调用方取实际渲染后的日志时可用
-// 参数，这里只比对格式串里的关键词）。
-func stubLogCollector() *[]string {
-	logs := &[]string{}
-	return logs
-}
-
 // TestHandleInboundReplyFailureAbortsChunks 钉住发送失败的短路：第一块发送失败
 // 后必须停止后续切块（不 return 的话会连打一串注定失败的请求，把平台限流配额
 // 全烧光），并且失败必须进日志（否则「用户收不到回复」在运维侧完全不可见）。
 func TestHandleInboundReplyFailureAbortsChunks(t *testing.T) {
-	chat, channel, _ := startChat(t, ChatConfig{RunClaude: func(context.Context, string, []string, string, []string) ([]byte, error) {
-		return []byte(`{"subtype":"success","is_error":false,"result":"第一行\n第二行内容很长"}`), nil
-	}})
-	logs := stubLogCollector()
+	chat, channel, _ := startChat(t, ChatConfig{Claude: runnerSuccess("第一行\n第二行内容很长")})
+	logs := &logSink{}
 	message := &stubInbound{
 		user: "u1", text: "你好",
 		replyErr: func(int) error { return errors.New("平台限流") },
 	}
 	handleInbound(context.Background(), splitLimitChannel{channel}, ChannelConfig{
 		Chat: chat,
-		Log:  func(format string, arguments ...any) { *logs = append(*logs, format) },
+		Log:  logs.Log,
 	}, message, "你好")
 	if len(message.replies) != 1 {
 		t.Errorf("首块失败后不应继续发送：%v", message.replies)
 	}
-	if !strings.Contains(strings.Join(*logs, "\n"), "发送回复失败") {
-		t.Errorf("发送失败应记日志：%v", *logs)
+	if !strings.Contains(logs.joined(), "发送回复失败") {
+		t.Errorf("发送失败应记日志：%v", logs.all())
 	}
 	if channel.replies() != nil && len(channel.replies()) != 0 {
 		t.Errorf("fake 通道不应收到回复：%v", channel.replies())
@@ -372,9 +360,7 @@ func TestHandleChatCommandResetAndTyping(t *testing.T) {
 
 	// Typing 成对：handleInbound 处理一条普通消息
 	message := &stubInbound{user: "u1", text: "你好"}
-	chat.config.RunClaude = func(context.Context, string, []string, string, []string) ([]byte, error) {
-		return []byte(`{"subtype":"success","is_error":false,"result":"好的"}`), nil
-	}
+	chat.config.Claude = runnerSuccess("好的")
 	handleInbound(context.Background(), &stubChannel{name: "stub"}, config, message, "你好")
 	if message.typingOn != 2 {
 		t.Errorf("Typing 应成对调用（开/关）：%d", message.typingOn)

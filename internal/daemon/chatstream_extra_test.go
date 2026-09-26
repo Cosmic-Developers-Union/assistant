@@ -3,57 +3,7 @@ package daemon
 import (
 	"strings"
 	"testing"
-	"time"
 )
-
-// TestFeedThinkingTokensResetAndThrottle 钉住「思考中」进度的两条此前零覆盖的分支：
-// 计数回退（新一輪思考从更小的 estimated_tokens 重新计数，必须重置播报节流状态，
-// 否则整轮都不会再播报）与时间窗节流（窗口内的事件必须被吞掉，thinking_tokens
-// 每几十毫秒一条，不节流会刷屏把日志冲掉）。这里直接替换 chatClock，不依赖真实时间。
-func TestFeedThinkingTokensResetAndThrottle(t *testing.T) {
-	now := time.Unix(1700000000, 0)
-	originalClock, originalInterval := chatClock, thinkingProgressInterval
-	chatClock = func() time.Time { return now }
-	thinkingProgressInterval = 10 * time.Second
-	t.Cleanup(func() {
-		chatClock = originalClock
-		thinkingProgressInterval = originalInterval
-	})
-
-	var lines []string
-	collect := func(line string) { lines = append(lines, line) }
-
-	outcome := chatOutcome{}
-	// 首次播报带增量
-	feedThinkingTokens(&outcome, chatStreamEvent{EstimatedTokens: 100, EstimatedTokensDelta: 40}, collect)
-	if len(lines) != 1 || !strings.Contains(lines[0], "约 100 tokens，+40") {
-		t.Fatalf("首次应播报带增量：%v", lines)
-	}
-
-	// 时间窗内：不播报
-	now = now.Add(3 * time.Second)
-	feedThinkingTokens(&outcome, chatStreamEvent{EstimatedTokens: 150}, collect)
-	if len(lines) != 1 {
-		t.Errorf("时间窗内不应再播报：%v", lines)
-	}
-	if outcome.ThinkingTokens != 150 {
-		t.Errorf("计数应更新到 150，实际 %d", outcome.ThinkingTokens)
-	}
-
-	// 计数回退 → 重置节流：即便仍在时间窗内也必须重新播报
-	now = now.Add(3 * time.Second)
-	feedThinkingTokens(&outcome, chatStreamEvent{EstimatedTokens: 20}, collect)
-	if len(lines) != 2 || !strings.Contains(lines[1], "约 20 tokens") {
-		t.Errorf("计数回退后应重新播报：%v", lines)
-	}
-
-	// estimated_tokens 非正数：直接忽略（不能被当成「回退到 0」）
-	now = now.Add(30 * time.Second)
-	feedThinkingTokens(&outcome, chatStreamEvent{EstimatedTokens: 0, EstimatedTokensDelta: 5}, collect)
-	if len(lines) != 2 {
-		t.Errorf("非正数不应播报：%v", lines)
-	}
-}
 
 // TestChatOutcomeFailureMessageBranches 钉住失败原因的择优顺序：API 层错误（401/
 // 超时）优先于 result 的 errors，errors 优先于 subtype——「发消息没反应」时回复里
@@ -78,77 +28,77 @@ func TestChatOutcomeFailureMessageBranches(t *testing.T) {
 	}
 }
 
-// TestApplyChatResultAccumulates 钉住 result 事件的归集规则：会话 id 只在事件给出时
-// 覆盖（空值不能把已解析出的 id 抹掉，续聊靠它）、errors 追加而非替换、以及
-// result 里的 error.message 只在 outcome 尚无 APIError 时兜底——api_error 事件带上
-// 的 HTTP 状态码比 result 里的裸文案更有诊断价值。
-func TestApplyChatResultAccumulates(t *testing.T) {
-	outcome := chatOutcome{SessionID: "sess-from-stream", Errors: []string{"先来的"}}
-	applyChatResult(&outcome, chatStreamEvent{
-		Subtype:   "error_during_execution",
-		IsError:   true,
-		Result:    "失败了",
-		NumTurns:  7,
-		CostUSD:   0.25,
-		SessionID: "",
-		Errors:    []string{"后来的", "还有一条"},
-		Error: struct {
-			Message string `json:"message"`
-			Status  int    `json:"status"`
-		}{Message: "result 里的兜底原因"},
-	})
+// TestChatResultAccumulates 钉住 result 帧在 daemon 这层的归集规则：errors 追加而
+// 非替换，subtype/is_error/num_turns/cost 全部落到 chatOutcome。
+//
+// 注意两点与老实现不同（老断言钉的语义已随实现消失，不能照搬）：
+//   - result 帧不再把 error.message 兜底进 outcome.APIError：现在只有 api_error
+//     事件写 APIError（见 TestChatOutcomeFailureMessageBranches 的择优顺序）；
+//   - result 帧给的 session_id 直接覆盖，不再区分「缺席」与「空串」。
+func TestChatResultAccumulates(t *testing.T) {
+	var outcome chatOutcome
+	feedChatStreamLine(&outcome, []byte(`{"type":"system","subtype":"init","session_id":"sess-from-stream"}`), nil)
+	feedChatStreamLine(&outcome, []byte(`{"type":"result","subtype":"error_during_execution","is_error":true,`+
+		`"result":"失败了","num_turns":7,"total_cost_usd":0.25,`+
+		`"errors":["后来的","还有一条"],`+
+		`"error":{"message":"result 里的兜底原因"}}`), nil)
+
 	if outcome.SessionID != "sess-from-stream" {
-		t.Errorf("空 session_id 不应抹掉已有值：%q", outcome.SessionID)
+		t.Errorf("result 未给 session_id 时应保留 init 的值：%q", outcome.SessionID)
 	}
-	if len(outcome.Errors) != 3 {
-		t.Errorf("errors 应追加：%v", outcome.Errors)
+	if len(outcome.Errors) != 2 {
+		t.Errorf("errors 应归集：%v", outcome.Errors)
 	}
 	if outcome.Subtype != "error_during_execution" || !outcome.IsError || outcome.NumTurns != 7 || outcome.CostUSD != 0.25 {
 		t.Errorf("result 字段应全部归集：%+v", outcome)
 	}
-	if outcome.APIError != "result 里的兜底原因" {
-		t.Errorf("无 APIError 时应兜底取 error.message：%q", outcome.APIError)
+	if outcome.APIError != "" {
+		t.Errorf("APIError 只由 api_error 事件写入，result 不该写它：%q", outcome.APIError)
 	}
-
-	// 已有 APIError（api_error 事件更完整）时不能被 result 覆盖
-	existing := chatOutcome{APIError: "HTTP 401 invalid api key"}
-	applyChatResult(&existing, chatStreamEvent{Error: struct {
-		Message string `json:"message"`
-		Status  int    `json:"status"`
-	}{Message: "后来的兜底"}})
-	if existing.APIError != "HTTP 401 invalid api key" {
-		t.Errorf("已有 APIError 不应被覆盖：%q", existing.APIError)
+	// api_error 事件才是 APIError 的唯一来源
+	feedChatStreamLine(&outcome, []byte(`{"type":"system","subtype":"api_error","error":{"status":401,"message":"invalid api key"}}`), nil)
+	if outcome.APIError != "HTTP 401 invalid api key" {
+		t.Errorf("api_error 事件应写入带状态码的 APIError：%q", outcome.APIError)
 	}
 }
 
-// TestToolUseLinesAndToolResultTextForms 钉住工具调用/结果的两种输入形态：入参不是
-// JSON 时必须退化成单行截断（claude 有时给的是已经是字符串的入参），结果是内容块
-// 数组时取各块 text 拼接（空块忽略）。这两条分支此前零覆盖，出错会让日志里出现
-// 空行或整段 raw JSON。
-func TestToolUseLinesAndToolResultTextForms(t *testing.T) {
-	if got := toolUseLines("Bash", nil); got != "🔧 Bash" {
-		t.Errorf("空入参只应给名称一行：%q", got)
+// 真实 CLI 在 API 层失败时的 result 帧（实测 --model 不存在时抓到的原样载荷）：
+// is_error=true、subtype 仍是 success、具体原因只在 result 文本里，没有独立
+// api_error 事件、也没有 error 字段。用户必须能看到那句具体原因。
+func TestRealAPIFailureReachesUser(t *testing.T) {
+	var outcome chatOutcome
+	line := `{"duration_api_ms":0,"session_id":"5e364317","total_cost_usd":0,"is_error":true,` +
+		`"num_turns":1,"subtype":"success","api_error_status":400,` +
+		`"result":"API Error: 400 没有匹配的模型路由：nonexistent-model-xyz","type":"result"}`
+	if !feedChatStreamLine(&outcome, []byte(line), nil) {
+		t.Fatal("应识别为 result")
 	}
-	broken := toolUseLines("Bash", []byte("不是 JSON 的入参"))
-	if !strings.HasPrefix(broken, "🔧 Bash\n  ") || !strings.Contains(broken, "不是 JSON 的入参") {
-		t.Errorf("坏 JSON 入参应退化成缩进的单行：%q", broken)
+	if !outcome.IsError {
+		t.Error("is_error=true 应判为失败")
 	}
-	valid := toolUseLines("Bash", []byte(`{"command":"ls"}`))
-	if !strings.Contains(valid, `"command"`) {
-		t.Errorf("合法 JSON 入参应展开成缩进 JSON：%q", valid)
+	if !strings.Contains(outcome.Result, "没有匹配的模型路由") {
+		t.Errorf("具体原因必须保留在 Result：%q", outcome.Result)
 	}
+	// daemon 的回复优先级：IsError 时先回 result 文本，否则 FailureMessage
+	reply := strings.TrimSpace(outcome.Result)
+	if reply == "" || !strings.Contains(reply, "没有匹配的模型路由") {
+		t.Errorf("用户应看到具体原因，实际回：%q（或泛化的 FailureMessage=%q）", reply, outcome.FailureMessage())
+	}
+}
 
-	if got := toolResultText(nil); got != "" {
-		t.Errorf("空内容应返回空串：%q", got)
+// 失败会话里模型给出的说明文本：daemon 在 result.IsError 时优先回给用户
+// （chat.go:303）。若归集把它丢掉，用户只能看到泛化的 FailureMessage。
+func TestFailedSessionKeepsResultText(t *testing.T) {
+	var outcome chatOutcome
+	line := `{"type":"result","subtype":"error_max_turns","is_error":true,"result":"已达回合上限，未完成审查","num_turns":50}`
+	done := feedChatStreamLine(&outcome, []byte(line), nil)
+	if !done {
+		t.Fatal("应识别为 result")
 	}
-	if got := toolResultText([]byte(`"直接是字符串"`)); got != "直接是字符串" {
-		t.Errorf("字符串内容应原样返回：%q", got)
+	if !outcome.IsError {
+		t.Error("应判为失败")
 	}
-	blocks := []byte(`[{"type":"text","text":"第一段"},{"type":"text","text":""},{"type":"text","text":"第二段"}]`)
-	if got := toolResultText(blocks); got != "第一段 第二段" {
-		t.Errorf("内容块数组应取非空 text 拼接：%q", got)
-	}
-	if got := toolResultText([]byte(`{"既不是字符串":"也不是数组"}`)); got != `{"既不是字符串":"也不是数组"}` {
-		t.Errorf("两种形态都不是时应回退原始文本：%q", got)
+	if outcome.Result != "已达回合上限，未完成审查" {
+		t.Errorf("失败会话的说明文本被丢弃：Result = %q（用户会只看到泛化的 FailureMessage）", outcome.Result)
 	}
 }

@@ -72,9 +72,7 @@ func newTelegramChannelForTest(t *testing.T, server *httptest.Server, adminUsers
 	chat, err := NewChat(ChatConfig{
 		StateDir:   t.TempDir(),
 		SessionDir: t.TempDir(),
-		RunClaude: func(_ context.Context, _ string, _ []string, _ string, _ []string) ([]byte, error) {
-			return []byte(`{"subtype":"success","is_error":false,"result":"好的"}`), nil
-		},
+		Claude:     runnerSuccess("好的"),
 	})
 	if err != nil {
 		t.Fatal(err)

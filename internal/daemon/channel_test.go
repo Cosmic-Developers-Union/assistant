@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -127,23 +126,27 @@ func (m *fakeInbound) Reply(_ context.Context, text string) error {
 
 func (m *fakeInbound) Typing(context.Context, bool) {}
 
-// startChat 起一个带 RunClaude 注入的 Chat 与 fake 通道。
-func startChat(t *testing.T, config ChatConfig) (*Chat, *fakeChannel, *[][]string) {
+// startChat 起一个带 Runner 注入的 Chat 与 fake 通道。返回的 stubRunner 记录每次
+// 调用的 argv / 工作目录 / 环境，调用方按调用次序读它的 Calls / Dirs / Envs；测试
+// 自带 Runner 时在 config.Claude 里传一个 *stubRunner，此时返回值就是它。
+func startChat(t *testing.T, config ChatConfig) (*Chat, *fakeChannel, *stubRunner) {
 	t.Helper()
-	var calls [][]string
-	if config.RunClaude == nil {
-		config.RunClaude = func(_ context.Context, _ string, args []string, _ string, _ []string) ([]byte, error) {
-			calls = append(calls, args2copy(args))
-			return []byte(`{"subtype":"success","is_error":false,"result":"好的"}`), nil
+	runner := runnerSuccess("好的")
+	if config.Claude != nil {
+		injected, ok := config.Claude.(*stubRunner)
+		if !ok {
+			t.Fatalf("startChat 的 Claude 需要 *stubRunner 才能回读 argv，实际 %T", config.Claude)
 		}
+		runner = injected
 	}
+	config.Claude = runner
 	config.StateDir = t.TempDir()
 	config.SessionDir = t.TempDir()
 	chat, err := NewChat(config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return chat, newFakeChannel("fake"), &calls
+	return chat, newFakeChannel("fake"), runner
 }
 
 // fatalStubError 模拟通道层自报的致命错误（如 QQ 凭据被平台拒绝）。
@@ -193,7 +196,7 @@ func TestRunChannelStopsOnFatalError(t *testing.T) {
 // 通用桥端到端：普通对话进 Chat（由主 agent 接待）、控制命令不进 Chat、
 // 白名单外用户被忽略。
 func TestRunChannelEndToEnd(t *testing.T) {
-	chat, channel, calls := startChat(t, ChatConfig{
+	chat, channel, stub := startChat(t, ChatConfig{
 		MainAgent: AgentRuntime{Name: "main", Model: "m-main"},
 	})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -205,11 +208,11 @@ func TestRunChannelEndToEnd(t *testing.T) {
 	channel.push("user-1", "你好")
 	channel.waitReplies(t, 1)
 	channel.stop(t, cancel)
-	if len(*calls) != 1 {
-		t.Fatalf("普通对话应进 Chat：calls=%d", len(*calls))
+	if stub.callCount() != 1 {
+		t.Fatalf("普通对话应进 Chat：calls=%d", stub.callCount())
 	}
-	if !contains((*calls)[0], "--model") || argumentAfter((*calls)[0], "--model") != "m-main" {
-		t.Errorf("主 agent 模型应生效：%v", (*calls)[0])
+	if !contains(stub.lastArgs(), "--model") || argumentAfter(stub.lastArgs(), "--model") != "m-main" {
+		t.Errorf("主 agent 模型应生效：%v", stub.lastArgs())
 	}
 }
 
@@ -225,7 +228,7 @@ func chatConversationIDForTest(t *testing.T, chat *Chat, channel *fakeChannel, u
 
 // 白名单外用户：不回复、不建会话。
 func TestRunChannelDeniesUser(t *testing.T) {
-	chat, channel, calls := startChat(t, ChatConfig{})
+	chat, channel, stub := startChat(t, ChatConfig{})
 	channel.allow = func(user string) bool { return user == "user-1" }
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -234,14 +237,14 @@ func TestRunChannelDeniesUser(t *testing.T) {
 	channel.push("intruder", "你好")
 	time.Sleep(150 * time.Millisecond)
 	channel.stop(t, cancel)
-	if len(channel.replies()) != 0 || len(*calls) != 0 {
-		t.Errorf("白名单外用户不应触发对话：replies=%v calls=%d", channel.replies(), len(*calls))
+	if len(channel.replies()) != 0 || stub.callCount() != 0 {
+		t.Errorf("白名单外用户不应触发对话：replies=%v calls=%d", channel.replies(), stub.callCount())
 	}
 }
 
 // /help 回复命令一览；命令不进 Chat；普通聊天不误触命令。
 func TestRunChannelCommands(t *testing.T) {
-	chat, channel, calls := startChat(t, ChatConfig{})
+	chat, channel, stub := startChat(t, ChatConfig{})
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		channel.runDone <- RunChannel(ctx, channel, ChannelConfig{Chat: chat, Log: t.Logf})
@@ -257,15 +260,15 @@ func TestRunChannelCommands(t *testing.T) {
 	channel.push("user-1", "重新开始吧，但先回答我")
 	channel.waitReplies(t, 3)
 	channel.stop(t, cancel)
-	if len(*calls) != 1 {
-		t.Errorf("命令不应进 Chat，普通聊天应进：%v", calls)
+	if stub.callCount() != 1 {
+		t.Errorf("命令不应进 Chat，普通聊天应进：%v", stub.callsSnapshot())
 	}
 }
 
 // 子代理注入：配置 Subagents 后 claude 参数带 --agents JSON（含 description/
 // prompt/model），子代理 MCP 并入会话 mcp.json。
 func TestRunChannelInjectsSubagents(t *testing.T) {
-	chat, channel, calls := startChat(t, ChatConfig{
+	chat, channel, stub := startChat(t, ChatConfig{
 		MainAgent: AgentRuntime{Name: "main"},
 		Subagents: []SubagentDefinition{
 			{Name: "ops", Description: "查状态", Prompt: "你是运维。", Model: "m-ops",
@@ -279,18 +282,18 @@ func TestRunChannelInjectsSubagents(t *testing.T) {
 	channel.push("user-1", "你好")
 	channel.waitReplies(t, 1)
 	channel.stop(t, cancel)
-	if len(*calls) != 1 {
-		t.Fatalf("calls = %d", len(*calls))
+	if stub.callCount() != 1 {
+		t.Fatalf("calls = %d", stub.callCount())
 	}
-	if !contains((*calls)[0], "--agents") {
-		t.Fatalf("应注入 --agents：%v", (*calls)[0])
+	if !contains(stub.lastArgs(), "--agents") {
+		t.Fatalf("应注入 --agents：%v", stub.lastArgs())
 	}
 	var agents map[string]struct {
 		Description string `json:"description"`
 		Prompt      string `json:"prompt"`
 		Model       string `json:"model"`
 	}
-	if err := json.Unmarshal([]byte(argumentAfter((*calls)[0], "--agents")), &agents); err != nil {
+	if err := json.Unmarshal([]byte(argumentAfter(stub.lastArgs(), "--agents")), &agents); err != nil {
 		t.Fatalf("--agents JSON 解析失败：%v", err)
 	}
 	ops, ok := agents["ops"]
@@ -330,10 +333,7 @@ func TestRunChannelSplitsLongReply(t *testing.T) {
 	chat, channel, _ := startChat(t, ChatConfig{})
 	config := ChannelConfig{Chat: chat, Log: t.Logf}
 	message := &fakeInbound{channel: channel, user: "user-1"}
-	text := "第一行\n第二行内容很长"
-	chat.config.RunClaude = func(context.Context, string, []string, string, []string) ([]byte, error) {
-		return []byte(fmt.Sprintf(`{"subtype":"success","is_error":false,"result":%q}`, text)), nil
-	}
+	chat.config.Claude = runnerSuccess("第一行\n第二行内容很长")
 	handleInbound(context.Background(), splitLimitChannel{channel}, config, message, "你好")
 	replies := channel.replies()
 	if len(replies) < 2 || replies[0] != "第一行" {

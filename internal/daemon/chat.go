@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,13 +8,13 @@ import (
 	"fmt"
 	"maps"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	builtinagents "github.com/Cosmic-Developers-Union/assistant/internal/agents"
+	"github.com/Cosmic-Developers-Union/assistant/internal/claude"
 	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
 	"github.com/Cosmic-Developers-Union/assistant/internal/conversations"
 	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
@@ -116,8 +115,11 @@ type ChatConfig struct {
 	// （ASSISTANT_CONFIG），会话内的 assistant MCP（daemon/gitea）解析到同一份
 	// 配置与端点文件，而不是靠 cwd 猜
 	AssistantConfig string
-	// RunClaude 可覆盖 claude 调用（测试注入）；env 是额外进程环境变量；返回 stdout
-	RunClaude func(ctx context.Context, bin string, args []string, dir string, env []string) ([]byte, error)
+	// Claude 执行 claude 调用；缺省 claude.NewExecRunner()。测试注入假实现
+	// （喂预置 stream-json 行或注入 spawn/超时失败）——此前这里是 RunClaude
+	// 旁路，测试绕过了真实的 spawn 路径；只认 Runner 接口后，被测的就是生产的
+	// 同一条路径。
+	Claude claude.Runner
 	// Log 输出
 	Log func(string, ...any)
 }
@@ -653,58 +655,29 @@ func chatSessionTitle(conversationID string) string {
 	return "chat-" + hex.EncodeToString(sum[:4])
 }
 
-// run 执行一轮 claude 会话：默认逐行消费 stdout（实时进度进日志）；测试注入的
-// RunClaude 返回整段输出时按行折叠，两者归集结果一致。
+// run 执行一轮 claude 会话：经 claude.Runner 启动，stdout 逐行解析为可读进度
+// （会话实况/思考/文本/工具/结果/API 错误），返回归集结果。
+//
+// 失败语义与退出状态一致：Runner 在无法启动、非零退出、被信号终止或超时时返回
+// 错误；「进程跑完但没有结果行」在这里单独判定——否则「没反应」会被当成一句空
+// 回复发出去。
 func (c *Chat) run(ctx context.Context, bin string, args []string, dir string, onProgress func(string)) (chatOutcome, error) {
-	if c.config.RunClaude != nil {
-		output, err := c.config.RunClaude(ctx, bin, args, dir, c.sessionEnv())
-		if err != nil {
-			return chatOutcome{}, fmt.Errorf("%s: %s", bin, truncate(err.Error(), 400))
-		}
-		return parseChatStream(output, onProgress)
+	runner := c.config.Claude
+	if runner == nil {
+		runner = claude.NewExecRunner()
 	}
-	return c.runStreaming(ctx, bin, args, dir, onProgress)
-}
-
-// runStreaming 启动 claude 并逐行解析 stream-json：assistant 文本、工具调用与
-// API 错误实时进日志（--debug 时连原始事件也写），最后返回归集结果。
-func (c *Chat) runStreaming(ctx context.Context, bin string, args []string, dir string, onProgress func(string)) (chatOutcome, error) {
-	command := exec.CommandContext(ctx, bin, args...)
-	command.Dir = dir
-	if env := c.sessionEnv(); len(env) > 0 {
-		command.Env = append(os.Environ(), env...)
-	}
-	stdout, err := command.StdoutPipe()
-	if err != nil {
-		return chatOutcome{}, err
-	}
-	stderr := &tailBuffer{limit: 4096}
-	command.Stderr = stderr
-	if err := command.Start(); err != nil {
-		return chatOutcome{}, fmt.Errorf("启动 %s: %w", bin, err)
-	}
+	// 逐行经 feedChatStreamLine 折叠：生产与测试走同一条归集路径（该函数也由
+	// chatstream_test.go 直接驱动，不是只在这一处被间接覆盖）。
 	var outcome chatOutcome
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
-	for scanner.Scan() {
-		// 只输出解析后的可读事件行（会话实况/思考/文本/工具/结果/API 错误）；
-		// 需要原始 stream-json 时看文本记录，不在日志里堆 JSON
-		feedChatStreamLine(&outcome, scanner.Bytes(), onProgress)
-	}
-	scanErr := scanner.Err()
-	waitErr := command.Wait()
-	if waitErr != nil && outcome.Subtype == "" && outcome.Result == "" && outcome.APIError == "" {
-		message := strings.TrimSpace(stderr.String())
-		if message == "" {
-			message = waitErr.Error()
-		}
-		return outcome, fmt.Errorf("%s: %s", bin, truncate(message, 400))
-	}
-	if scanErr != nil {
-		return outcome, fmt.Errorf("读取会话输出: %w", scanErr)
+	spec := claude.Spec{Bin: bin, Args: args, Dir: dir, Env: c.sessionEnv()}
+	err := runner.Run(ctx, spec, func(line []byte) {
+		feedChatStreamLine(&outcome, line, onProgress)
+	})
+	if err != nil {
+		return outcome, err
 	}
 	if outcome.Subtype == "" && outcome.Result == "" && outcome.APIError == "" {
-		return outcome, fmt.Errorf("会话没有返回结果（stderr：%s）", truncate(strings.TrimSpace(stderr.String()), 300))
+		return outcome, fmt.Errorf("会话没有返回结果")
 	}
 	return outcome, nil
 }
@@ -748,12 +721,18 @@ func (c *Chat) pushSession(sessionID string) {
 
 // sessionEnv 组装会话进程的额外环境变量：托管的 CLAUDE_CONFIG_DIR + 显式的
 // ASSISTANT_CONFIG（会话内 assistant MCP 解析同一份配置与 daemon 端点）。
+// sessionEnv 组装注入会话进程的环境。
+//
+// 对话会话**不钉** CLAUDE_CODE_PROJECT_DIR_NAME（claude.SessionEnv 的
+// PinProjectDir=false）：文本记录要落在 cwd 对应的项目目录下，用户在该工作目录
+// 里 `claude --continue` 才能接上最近的会话。评审会话反过来必须钉（见 dispatcher）。
 func (c *Chat) sessionEnv() []string {
-	env := claudecfg.ConfigDirEnv(c.config.SessionDir)
-	if path := strings.TrimSpace(c.config.AssistantConfig); path != "" {
-		env = append(env, "ASSISTANT_CONFIG="+path)
-	}
-	return env
+	return claude.SessionEnv(claude.EnvConfig{
+		ConfigDir: c.config.SessionDir,
+		Extra: []claude.EnvVar{
+			{Key: "ASSISTANT_CONFIG", Value: c.config.AssistantConfig},
+		},
+	})
 }
 
 // progressLogger 把会话进度写进 daemon 日志：一行一条，便于 grep「用户在问什么、

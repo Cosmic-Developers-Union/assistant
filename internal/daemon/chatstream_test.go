@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Cosmic-Developers-Union/assistant/internal/claude"
 )
 
 // stream-json 逐行解析：assistant 文本、工具调用、API 错误都实时产出进度行，最终
@@ -59,33 +61,52 @@ func TestChatOutcomeFailureMessagePrefersAPIError(t *testing.T) {
 	}
 }
 
-// 老格式（--output-format json 的单对象）仍能被折叠出来。
-func TestParseChatStreamSingleObject(t *testing.T) {
-	outcome, err := parseChatStream([]byte(`{"subtype":"success","is_error":false,"result":"好的"}`), nil)
-	if err != nil {
-		t.Fatalf("parseChatStream: %v", err)
+// 老格式（--output-format json 的单对象，没有 type 字段）仍能被识别成 result；
+// 没有任何结果行则不算成功（Chat.run 据此报「会话没有返回结果」）。
+func TestFeedChatStreamSingleObject(t *testing.T) {
+	var outcome chatOutcome
+	if done := feedChatStreamLine(&outcome, []byte(`{"subtype":"success","is_error":false,"result":"好的"}`), nil); !done {
+		t.Error("单对象输出应被识别成 result")
 	}
 	if outcome.Result != "好的" {
 		t.Errorf("outcome = %+v", outcome)
 	}
-	if _, err := parseChatStream([]byte("not json"), nil); err == nil {
-		t.Error("没有 result 时应报错")
+	var noise chatOutcome
+	if done := feedChatStreamLine(&noise, []byte("not json"), nil); done {
+		t.Error("非 JSON 行不该被识别成 result")
+	}
+	if noise.Subtype != "" || noise.Result != "" {
+		t.Errorf("噪音行不该归集出结果：%+v", noise)
 	}
 }
 
 // thinking_tokens：字段名是 estimated_tokens / estimated_tokens_delta（会话 id 键是
-// session_id），按时间窗播报（默认 2s）避免刷屏；坏行静默忽略，不影响整轮会话。
+// session_id），按时间窗播报避免刷屏；坏行静默忽略，不影响整轮会话。
+//
+// 节流确实是 internal/claude 的职责（那里有自己的节流测试）。这里只钉「daemon 这层
+// 把 thinking 事件正确归集进 chatOutcome」以及「同一时间窗内的后续帧被吞掉」——
+// 时间窗与时钟都由 claude 包暴露（claude.Now / claude.ThinkingProgressInterval）。
+// 节流水位是进程级全局（跨测试共享且包外不可重置），因此断言前先播报一帧、以该帧
+// 为基准，不依赖「从零水位开始」。
 func TestFeedChatStreamThinkingTokens(t *testing.T) {
 	now := time.Unix(0, 0)
-	chatClock = func() time.Time { return now }
-	thinkingProgressInterval = 2 * time.Second
-	t.Cleanup(func() { chatClock = time.Now })
+	originalNow, originalInterval := claude.Now, claude.ThinkingProgressInterval
+	claude.Now = func() time.Time { return now }
+	claude.ThinkingProgressInterval = 2 * time.Second
+	t.Cleanup(func() {
+		claude.Now = originalNow
+		claude.ThinkingProgressInterval = originalInterval
+	})
 
 	var progress []string
 	var outcome chatOutcome
 	report := func(text string) { progress = append(progress, text) }
+	// 先播报一帧建立水位：无论此前别的测试留下什么水位，这一帧都会把 reportedAt
+	// 推到 now、reported 推到 89；后面的窗口内断言才不受全局状态影响。
+	feedChatStreamLine(&outcome, []byte(`{"type":"system","subtype":"thinking_tokens","estimated_tokens":89,"estimated_tokens_delta":2,"session_id":"7931f2be-66b6-4070-a86e-01e60124e3cc"}`), report)
+	progress = nil
+
 	lines := []string{
-		`{"type":"system","subtype":"thinking_tokens","estimated_tokens":89,"estimated_tokens_delta":2,"session_id":"7931f2be-66b6-4070-a86e-01e60124e3cc"}`,
 		`{"type":"system","subtype":"thinking_tokens","estimated_tokens":110,"estimated_tokens_delta":21}`,
 		`{"type":"system","subtype":"thinking_tokens","estimated_tokens":180,"estimated_tokens_delta":70}`,
 	}
@@ -100,13 +121,10 @@ func TestFeedChatStreamThinkingTokens(t *testing.T) {
 	feedChatStreamLine(&outcome, []byte(`{"type":"result","subtype":"success","is_error":false,"result":"好了"}`), report)
 
 	joined := strings.Join(progress, "\n")
-	if !strings.Contains(joined, "思考中…（约 89 tokens，+2）") {
-		t.Errorf("首条 thinking_tokens 应播报：%s", joined)
-	}
-	if strings.Contains(joined, "约 110 tokens") || strings.Contains(joined, "约 180 tokens") {
+	if strings.Contains(joined, "约 110 词元") || strings.Contains(joined, "约 180 词元") {
 		t.Errorf("时间窗内不该重复播报：%s", joined)
 	}
-	if !strings.Contains(joined, "思考中…（约 420 tokens，+240）") {
+	if !strings.Contains(joined, "思考中…（约 420 词元）") {
 		t.Errorf("过了时间窗应再报：%s", joined)
 	}
 	if !strings.Contains(joined, "事件 system/compact_boundary") {
@@ -118,9 +136,9 @@ func TestFeedChatStreamThinkingTokens(t *testing.T) {
 	if outcome.ThinkingTokens != 420 {
 		t.Errorf("ThinkingTokens = %d", outcome.ThinkingTokens)
 	}
-	if outcome.SessionID != "7931f2be-66b6-4070-a86e-01e60124e3cc" {
-		t.Errorf("应从 thinking 事件取到 session id：%q", outcome.SessionID)
-	}
+	// 注意：旧实现会从 thinking_tokens 事件里取 session_id，新实现只在 init / result
+	// 事件里取（见 internal/claude 的 applyInit / applyResult）——这里不再断言 thinking
+	// 能带出会话 id，会话身份由 init 或 result 提供。
 	if outcome.Result != "好了" {
 		t.Errorf("坏行不该影响后续解析：%+v", outcome)
 	}
@@ -144,10 +162,9 @@ func TestFeedChatStreamInitReportsConfigAndBrokenMCP(t *testing.T) {
 		"  claude = 2.1.270",
 		"  认证 = ANTHROPIC_AUTH_TOKEN",
 		"  权限 = auto",
-		"  cwd = /home/ge/.config/Cosmic-Developers-Union/assistant/chat/chat-940d3155",
-		"  工具 = 4 个（内建 2，MCP 2）",
-		"  MCP.daemon = connected",
-		"  MCP.MiniMax = failed",
+		"  工作目录 = /home/ge/.config/Cosmic-Developers-Union/assistant/chat/chat-940d3155",
+		"  工具 = 4 个",
+		"  MCP = daemon=connected MiniMax=failed",
 		"⚠ MCP 服务未就绪：MiniMax=failed",
 	} {
 		if !strings.Contains(joined, want) {

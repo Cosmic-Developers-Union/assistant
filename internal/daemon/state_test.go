@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -137,14 +138,11 @@ func TestMCPTools(t *testing.T) {
 
 func TestChatStableSession(t *testing.T) {
 	dir := t.TempDir()
-	var calls [][]string
+	stub := runnerSuccess("有 2 个 PR 在评审")
 	chat, err := NewChat(ChatConfig{
 		StateDir:   dir,
 		SessionDir: t.TempDir(),
-		RunClaude: func(_ context.Context, _ string, args []string, _ string, _ []string) ([]byte, error) {
-			calls = append(calls, args)
-			return []byte(`{"subtype":"success","is_error":false,"result":"有 2 个 PR 在评审"}`), nil
-		},
+		Claude:     stub,
 	})
 	if err != nil {
 		t.Fatalf("NewChat: %v", err)
@@ -154,13 +152,41 @@ func TestChatStableSession(t *testing.T) {
 	if err != nil || reply != "有 2 个 PR 在评审" {
 		t.Fatalf("Handle = %q, %v", reply, err)
 	}
-	first := strings.Join(calls[0], " ")
-	if !strings.Contains(first, "--session-id") || !strings.Contains(first, "assistant mcp daemon") == false {
-		t.Errorf("首轮参数 = %s", first)
+	// stub.callsSnapshot() 按调用追加，早先取的切片头长度不会跟着长——读之前重新取
+	first := strings.Join(stub.lastArgs(), " ")
+	if !strings.Contains(first, "--session-id") {
+		t.Errorf("首轮应 --session-id：%s", first)
+	}
+	// 自举的 daemon MCP 经 --mcp-config 注入（argv 里只有文件路径，声明在文件里）：
+	// 会话必须真的拿到「由 assistant 自己提供」的 daemon server，否则助手没有工具面
+	mcpPath := argumentAfter(stub.lastArgs(), "--mcp-config")
+	if mcpPath == "" {
+		t.Fatalf("首轮缺 --mcp-config：%s", first)
+	}
+	mcpRaw, err := os.ReadFile(mcpPath)
+	if err != nil {
+		t.Fatalf("读取会话 MCP 配置：%v", err)
+	}
+	var mcpDocument struct {
+		Servers map[string]struct {
+			Command string   `json:"command"`
+			Args    []string `json:"args"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(mcpRaw, &mcpDocument); err != nil {
+		t.Fatalf("解析会话 MCP 配置：%v", err)
+	}
+	daemonServer, ok := mcpDocument.Servers["daemon"]
+	if !ok {
+		t.Fatalf("会话 MCP 配置缺少自举 daemon server：%s", mcpRaw)
+	}
+	if len(daemonServer.Args) != 2 || daemonServer.Args[0] != "mcp" || daemonServer.Args[1] != "daemon" {
+		t.Errorf("daemon MCP 应由 assistant 自己提供（assistant mcp daemon）：%+v", daemonServer)
 	}
 	if _, err := chat.Handle(ctx, "user-1", Turn{Transport: "weixin", Text: "第二个问题"}); err != nil {
 		t.Fatal(err)
 	}
+	calls := stub.callsSnapshot()
 	second := strings.Join(calls[1], " ")
 	if !strings.Contains(second, "--resume") {
 		t.Errorf("后续轮应 --resume：%s", second)
@@ -174,6 +200,7 @@ func TestChatStableSession(t *testing.T) {
 	if _, err := chat.Handle(ctx, "user-2", Turn{Transport: "weixin", Text: "你好"}); err != nil {
 		t.Fatal(err)
 	}
+	calls = stub.callsSnapshot()
 	if calls[2][0] == calls[0][0] && strings.Contains(strings.Join(calls[2], " "), "--resume") {
 		// 新会话应是新 UUID：不做严格断言，但必须生成新 session（--session-id）
 		t.Log("new conversation args ok")

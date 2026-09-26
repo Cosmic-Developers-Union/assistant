@@ -130,17 +130,12 @@ func argumentAfter(args []string, flag string) string {
 // 对话会话：稳定标题（--name）+ 固定文本记录项目目录名（跨轮 --resume 同一 ID）。
 func TestChatSessionTitleAndProjectEnv(t *testing.T) {
 	stateDir := t.TempDir()
-	var gotArgs, gotEnv []string
-	turns := 0
+	stub := runnerSuccess("好的")
 	chat, err := NewChat(ChatConfig{
 		StateDir:   stateDir,
 		SessionDir: filepath.Join(stateDir, "claude"),
 		MainAgent:  AgentRuntime{ClaudeBin: "claude"},
-		RunClaude: func(_ context.Context, _ string, args []string, _ string, env []string) ([]byte, error) {
-			gotArgs, gotEnv = args, env
-			turns++
-			return []byte(`{"subtype":"success","is_error":false,"result":"好的"}`), nil
-		},
+		Claude:     stub,
 	})
 	if err != nil {
 		t.Fatalf("NewChat: %v", err)
@@ -150,6 +145,9 @@ func TestChatSessionTitleAndProjectEnv(t *testing.T) {
 	if err != nil || reply != "好的" {
 		t.Fatalf("Handle: reply=%q err=%v", reply, err)
 	}
+	// 每次 Run 的 argv/环境都按调用次序追加在同一份记录里；断言取最近一次（新一轮）
+	gotEnv := stub.lastEnv()
+	gotArgs := stub.callsSnapshot()[stub.callCount()-1]
 	title := chatSessionTitle(conversation)
 	if argumentAfter(gotArgs, "--name") != title {
 		t.Errorf("--name = %q, want %q", argumentAfter(gotArgs, "--name"), title)
@@ -181,13 +179,14 @@ func TestChatSessionTitleAndProjectEnv(t *testing.T) {
 	if _, err := chat.Handle(context.Background(), conversation, Turn{Transport: "weixin", Text: "再问一句"}); err != nil {
 		t.Fatal(err)
 	}
+	gotArgs = stub.callsSnapshot()[stub.callCount()-1]
 	if got := argumentAfter(gotArgs, "--resume"); got != firstID {
 		t.Errorf("--resume = %q, want %q", got, firstID)
 	}
 	if argumentAfter(gotArgs, "--name") != title {
 		t.Errorf("标题应跨轮稳定：%q", argumentAfter(gotArgs, "--name"))
 	}
-	if turns != 2 {
+	if turns := stub.callCount(); turns != 2 {
 		t.Errorf("turns = %d", turns)
 	}
 }

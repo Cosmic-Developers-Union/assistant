@@ -1,8 +1,8 @@
 package daemon
 
 import (
-	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -144,122 +144,28 @@ func TestProgressLoggerSplitsLinesAndTruncates(t *testing.T) {
 	}
 }
 
-// TestChatRunInjectedFailureAndBadStream 钉住注入式 RunClaude 的两条失败路径：
-// 进程返回错误时错误信息必须点名二进制并带上原因（截断 400），以及整段输出里
-// 没有 result 事件时 parseChatStream 必须报「没有 result 事件」——否则上层会把
-// 空结果当成「claude 沉默」而不是解析失败。
+// TestChatRunInjectedFailureAndBadStream 钉住注入式 Runner 的两条失败路径：
+// Runner 返回错误时 Chat.run 必须原样上抛（错误的格式化——「<bin>: <原因>」与
+// 截断——已下沉到 internal/claude 的 execRunner，见那里的 runner_test.go），
+// 以及整轮输出里没有 result 行时 Chat.run 必须报「会话没有返回结果」——否则上层
+// 会把空结果当成「claude 沉默」而不是解析失败。
 func TestChatRunInjectedFailureAndBadStream(t *testing.T) {
 	chat, err := NewChat(ChatConfig{
 		StateDir:   t.TempDir(),
 		SessionDir: t.TempDir(),
-		RunClaude: func(context.Context, string, []string, string, []string) ([]byte, error) {
-			return nil, fmt.Errorf("%s", strings.Repeat("认证失败", 200))
-		},
+		Claude:     runnerFailure(errClaudeStub),
 	})
 	if err != nil {
 		t.Fatalf("NewChat: %v", err)
 	}
-	if _, err := chat.run(t.Context(), "claude-alt", nil, t.TempDir(), nil); err == nil ||
-		!strings.Contains(err.Error(), "claude-alt: ") || !strings.Contains(err.Error(), "…") {
-		t.Errorf("应报「<bin>: <截断原因>」：%v", err)
+	if _, err := chat.run(t.Context(), "claude-alt", nil, t.TempDir(), nil); !errors.Is(err, errClaudeStub) {
+		t.Errorf("Runner 的错误应原样上抛：%v", err)
 	}
 
-	chat.config.RunClaude = func(context.Context, string, []string, string, []string) ([]byte, error) {
-		return []byte("这不是 stream-json\n"), nil
-	}
+	chat.config.Claude = runnerOutput("这不是 stream-json\n")
 	if _, err := chat.run(t.Context(), "claude", nil, t.TempDir(), nil); err == nil ||
-		!strings.Contains(err.Error(), "没有 result 事件") {
-		t.Errorf("无 result 事件应报解析失败：%v", err)
-	}
-}
-
-// writeFakeClaude 写一个假 claude 可执行脚本（#!/bin/sh），把输出固定成 want、
-// stderr 固定成 stderr、退出码固定成 exitCode——用来覆盖 runStreaming 的真实进程
-// 路径而不需要装 claude。
-func writeFakeClaude(t *testing.T, want, stderr string, exitCode int) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "claude-fake")
-	script := "#!/bin/sh\ncat > /dev/null\n" +
-		"printf '%s' '" + want + "'\n" +
-		"printf '%s' '" + stderr + "' >&2\n" +
-		fmt.Sprintf("exit %d\n", exitCode)
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
-// TestChatRunStreamingRealProcess 钉住 runStreaming 的真实进程路径（用假 claude
-// 脚本走 exec）：正常 stream 要归集出 result 并把 assistant 文本透进进度日志；
-// 非 JSON 噪音行必须被忽略而不是让整轮失败（stdio 上混日志是常态）。
-func TestChatRunStreamingRealProcess(t *testing.T) {
-	var lines []string
-	chat, err := NewChat(ChatConfig{
-		StateDir:   t.TempDir(),
-		SessionDir: t.TempDir(),
-		Log:        func(format string, arguments ...any) { lines = append(lines, fmt.Sprintf(format, arguments...)) },
-	})
-	if err != nil {
-		t.Fatalf("NewChat: %v", err)
-	}
-	output := strings.Join([]string{
-		`日志噪音：这不是 JSON`,
-		`{"type":"assistant","message":{"content":[{"type":"text","text":"正在处理"}]}}`,
-		`{"type":"result","subtype":"success","is_error":false,"result":"好了","session_id":"sess-1","num_turns":2}`,
-	}, "\n") + "\n"
-
-	outcome, err := chat.runStreaming(t.Context(), writeFakeClaude(t, output, "", 0), nil, t.TempDir(), chat.progressLogger("sess-1"))
-	if err != nil {
-		t.Fatalf("runStreaming: %v", err)
-	}
-	if outcome.Result != "好了" || outcome.SessionID != "sess-1" || outcome.NumTurns != 2 || outcome.IsError {
-		t.Errorf("应归集出 result：%+v", outcome)
-	}
-	joined := strings.Join(lines, "\n")
-	if !strings.Contains(joined, "claude: 正在处理") {
-		t.Errorf("assistant 文本应进进度日志：%v", lines)
-	}
-}
-
-// TestChatRunStreamingFailurePaths 钉住 runStreaming 的三条失败路径：非零退出且
-// stderr 有内容时错误必须带 stderr 尾巴（编译/认证错误在那里）；stderr 为空时退化成
-// 退出状态文案；进程正常退出但没有任何 result 事件时报「没有返回结果」并把 stderr
-// 附上（诊断「claude 什么都没说」）。
-func TestChatRunStreamingFailurePaths(t *testing.T) {
-	chat, err := NewChat(ChatConfig{StateDir: t.TempDir(), SessionDir: t.TempDir()})
-	if err != nil {
-		t.Fatalf("NewChat: %v", err)
-	}
-	workspace := t.TempDir()
-
-	_, err = chat.runStreaming(t.Context(), writeFakeClaude(t, "", "致命错误：配置无效", 3), nil, workspace, nil)
-	if err == nil || !strings.Contains(err.Error(), "claude-fake: ") || !strings.Contains(err.Error(), "配置无效") {
-		t.Errorf("非零退出应带 stderr 尾巴：%v", err)
-	}
-
-	_, err = chat.runStreaming(t.Context(), writeFakeClaude(t, "", "", 3), nil, workspace, nil)
-	if err == nil || !strings.Contains(err.Error(), "exit status 3") {
-		t.Errorf("stderr 为空时应退化报退出状态：%v", err)
-	}
-
-	_, err = chat.runStreaming(t.Context(), writeFakeClaude(t, "", "只打印了日志", 0), nil, workspace, nil)
-	if err == nil || !strings.Contains(err.Error(), "会话没有返回结果") || !strings.Contains(err.Error(), "只打印了日志") {
-		t.Errorf("无 result 事件应报「会话没有返回结果」并附 stderr：%v", err)
-	}
-}
-
-// TestChatRunStreamingStartFailure 钉住启动失败分支：二进制不可执行时必须报
-// 「启动 <bin>: <原因>」——daemon 启动脚本靠这句话区分「没装 claude」与
-// 「claude 跑了但失败」。用空 PATH 让 exec 必然找不到可执行文件。
-func TestChatRunStreamingStartFailure(t *testing.T) {
-	t.Setenv("PATH", "/nonexistent-assistant-test")
-	chat, err := NewChat(ChatConfig{StateDir: t.TempDir(), SessionDir: t.TempDir()})
-	if err != nil {
-		t.Fatalf("NewChat: %v", err)
-	}
-	_, err = chat.runStreaming(t.Context(), "claude-不存在", nil, t.TempDir(), nil)
-	if err == nil || !strings.Contains(err.Error(), "启动 claude-不存在") {
-		t.Errorf("找不到二进制应报「启动 <bin>」：%v", err)
+		!strings.Contains(err.Error(), "会话没有返回结果") {
+		t.Errorf("无 result 行应报解析失败：%v", err)
 	}
 }
 

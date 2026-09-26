@@ -112,14 +112,11 @@ func contains(values []string, want string) bool {
 // 留下 session.json（会话 id / 模型 / 续聊路径），这就是「持久化在一个目录中」。
 func TestChatWorkspaceStableAndIsolated(t *testing.T) {
 	stateDir := t.TempDir()
-	var dirs []string
+	stub := runnerSuccess("好的")
 	chat, err := NewChat(ChatConfig{
 		StateDir:   stateDir,
 		SessionDir: t.TempDir(),
-		RunClaude: func(_ context.Context, _ string, _ []string, dir string, _ []string) ([]byte, error) {
-			dirs = append(dirs, dir)
-			return []byte(`{"subtype":"success","is_error":false,"result":"好的"}`), nil
-		},
+		Claude:     stub,
 	})
 	if err != nil {
 		t.Fatalf("NewChat: %v", err)
@@ -133,6 +130,7 @@ func TestChatWorkspaceStableAndIsolated(t *testing.T) {
 	if _, err := chat.Handle(ctx, "user-2", Turn{Transport: "weixin", Text: "你好"}); err != nil {
 		t.Fatal(err)
 	}
+	dirs := stub.dirsSnapshot()
 	if len(dirs) != 3 || dirs[0] != dirs[1] {
 		t.Fatalf("同一会话的工作目录应稳定：%v", dirs)
 	}
@@ -163,14 +161,11 @@ func TestChatWorkspaceStableAndIsolated(t *testing.T) {
 
 // 用户明确「重新开始」：下一条消息用新的 --session-id，而不是 --resume 老会话。
 func TestChatResetStartsFreshSession(t *testing.T) {
-	var args [][]string
+	stub := runnerSuccess("好的")
 	chat, err := NewChat(ChatConfig{
 		StateDir:   t.TempDir(),
 		SessionDir: t.TempDir(),
-		RunClaude: func(_ context.Context, _ string, runArgs []string, _ string, _ []string) ([]byte, error) {
-			args = append(args, args2copy(runArgs))
-			return []byte(`{"subtype":"success","is_error":false,"result":"好的"}`), nil
-		},
+		Claude:     stub,
 	})
 	if err != nil {
 		t.Fatalf("NewChat: %v", err)
@@ -179,9 +174,9 @@ func TestChatResetStartsFreshSession(t *testing.T) {
 	if _, err := chat.Handle(ctx, "user-1", Turn{Transport: "weixin", Text: "第一句"}); err != nil {
 		t.Fatal(err)
 	}
-	first := argumentAfter(args[0], "--session-id")
+	first := argumentAfter(stub.lastArgs(), "--session-id")
 	if first == "" {
-		t.Fatalf("首轮缺 --session-id：%v", args[0])
+		t.Fatalf("首轮缺 --session-id：%v", stub.lastArgs())
 	}
 	if err := chat.Reset("user-1"); err != nil {
 		t.Fatalf("Reset: %v", err)
@@ -189,6 +184,8 @@ func TestChatResetStartsFreshSession(t *testing.T) {
 	if _, err := chat.Handle(ctx, "user-1", Turn{Transport: "weixin", Text: "重新开始后第一句"}); err != nil {
 		t.Fatal(err)
 	}
+	// 每次都重新读 stub.callsSnapshot()：它是按调用追加的切片，早先取的切片头长度不会跟着长
+	args := stub.callsSnapshot()
 	second := argumentAfter(args[1], "--session-id")
 	if second == "" || second == first {
 		t.Errorf("重置后应是新会话：first=%q second=%q args=%v", first, second, args[1])
@@ -196,13 +193,6 @@ func TestChatResetStartsFreshSession(t *testing.T) {
 	if argumentAfter(args[1], "--resume") != "" {
 		t.Errorf("重置后不该 --resume 老会话：%v", args[1])
 	}
-}
-
-// args2copy 复制参数切片（注入的 RunClaude 会被复用同一个底层数组）。
-func args2copy(args []string) []string {
-	out := make([]string, len(args))
-	copy(out, args)
-	return out
 }
 
 // 「重新开始」的触发词：斜杠命令与直白说法都认，普通聊天不受影响。
@@ -259,10 +249,8 @@ func TestChatLogsEffectiveConfigWithMaskedSecrets(t *testing.T) {
 				"env": map[string]any{"MINIMAX_API_KEY": "sk-cp-abcdefghijklmn"},
 			}},
 		}},
-		Log: func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
-		RunClaude: func(_ context.Context, _ string, _ []string, _ string, _ []string) ([]byte, error) {
-			return []byte(`{"subtype":"success","is_error":false,"result":"好的"}`), nil
-		},
+		Log:    func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+		Claude: runnerSuccess("好的"),
 	})
 	if err != nil {
 		t.Fatalf("NewChat: %v", err)
@@ -304,15 +292,12 @@ func TestChatConversationMappingAndSessionsMCP(t *testing.T) {
 		[]byte(`{"o9cq80-user":"s-legacy"}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	var lastArgs []string
+	stub := runnerSuccess("好的")
 	chat, err := NewChat(ChatConfig{
 		StateDir:   stateDir,
 		SessionDir: sessionDir,
 		Remote:     sessionstore.RemoteConfig{URL: "http://127.0.0.1:1", Token: "tok"},
-		RunClaude: func(_ context.Context, _ string, runArgs []string, _ string, _ []string) ([]byte, error) {
-			lastArgs = args2copy(runArgs)
-			return []byte(`{"subtype":"success","is_error":false,"result":"好的"}`), nil
-		},
+		Claude:     stub,
 	})
 	if err != nil {
 		t.Fatalf("NewChat: %v", err)
@@ -348,6 +333,7 @@ func TestChatConversationMappingAndSessionsMCP(t *testing.T) {
 	if _, err := chat.Handle(context.Background(), first, Turn{Transport: "weixin", Text: "在吗"}); err != nil {
 		t.Fatal(err)
 	}
+	lastArgs := stub.callsSnapshot()[stub.callCount()-1]
 	if argumentAfter(lastArgs, "--resume") != "s-legacy" {
 		t.Errorf("迁移后应续接旧会话：%v", lastArgs)
 	}
