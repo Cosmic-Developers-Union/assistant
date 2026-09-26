@@ -205,11 +205,17 @@ func RunLoop(ctx context.Context, deps Deps) error {
 	}
 	defer ReleaseLock(config.LockFile)
 
-	// 启动横幅：一眼确认「谁在跑、写哪里、按什么规则」
+	// 启动横幅：一眼确认「谁在跑、写哪里、按什么规则」。账户查询失败时仍要打
+	// 出横幅（退化成不带账户的那一行）——「服务起来了但账户没查到」与「服务
+	// 根本没起来」是两种完全不同的故障，只报失败原因会让操作者无法区分。
 	if deps.CurrentLogin != nil {
 		account, err := deps.CurrentLogin(ctx)
 		if err != nil {
 			deps.Log(fmt.Sprintf("账户查询失败：%v", err))
+			deps.Log(
+				fmt.Sprintf("dispatcher 启动：host=%s repo=%s reviewer=%s 并发=%d 检测间隔=%dms",
+					config.Host, config.Repository.FullName(), config.Reviewer, config.Concurrency, mentionPollInterval(config.Interval).Milliseconds()),
+			)
 		} else {
 			deps.Log(
 				fmt.Sprintf("dispatcher 启动：host=%s repo=%s 账户=@%s reviewer=%s 并发=%d 检测间隔=%dms",
@@ -283,7 +289,10 @@ func RunLoop(ctx context.Context, deps Deps) error {
 	for range config.Concurrency {
 		workerWG.Go(worker)
 	}
-	defer close(workChannel)
+	// workChannel 由退出路径显式关闭（见函数末尾）：worker 用 range 收尾，
+	// 关闭必须发生在 workerWG.Wait() **之前**——若挂成 defer，defer 只在
+	// RunLoop 返回时执行，而 Wait 就在返回路径上，于是 worker 永远等不到
+	// 关闭、Wait 永不返回、循环永不退出（部署形态表现为 SIGINT 后进程不结束）。
 
 	mentionInterval := mentionPollInterval(config.Interval)
 	detect := func() {
@@ -344,8 +353,9 @@ func RunLoop(ctx context.Context, deps Deps) error {
 			detect()
 		}
 	}
-	// 退出：detector 停止后等在跑的会话处理完（channel 已 close，worker 自然
-	// 收尾）
+	// 退出：先关闭派发通道让 worker 的 range 收尾（在跑的会话处理完后自然
+	// 退出），再等它们结束。顺序不能反——反了就是死锁。
+	close(workChannel)
 	workerWG.Wait()
 	deps.Log("已退出主循环")
 	return nil
