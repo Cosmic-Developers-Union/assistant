@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/Cosmic-Developers-Union/assistant/internal/claude"
 )
 
 // SessionOptions.Config 里 Config 字段的取值来源是 dispatcher 的 Config——
@@ -25,14 +27,14 @@ func TestSessionCommandDockerSessionDirAndProject(t *testing.T) {
 		Cwd:           "/tmp/worktrees/pr-9",
 		MCPConfigPath: "/tmp/worktrees/pr-9/.mcp.json",
 	}
-	_, args, _ := sessionCommand(options)
-	joined := strings.Join(args, " ")
+	spec := runSessionSpec(options)
+	joined := strings.Join(spec.Args, " ")
 	for _, want := range []string{
 		"-e CLAUDE_CONFIG_DIR=/var/lib/assistant/claude",
 		"-e CLAUDE_CODE_PROJECT_DIR_NAME=worktrees-pr-9",
 	} {
 		if !strings.Contains(joined, want) {
-			t.Errorf("docker args 缺 %q：%v", want, args)
+			t.Errorf("docker args 缺 %q：%v", want, spec.Args)
 		}
 	}
 }
@@ -60,10 +62,10 @@ func TestReadReviewConventionsEmptyBranches(t *testing.T) {
 	}
 }
 
-// feedStreamEvent 的 tool_use 分支在 onProgress 为 nil 时不得 panic：会话归档
+// claude.FeedEvent 的 tool_use 分支在 onProgress 为 nil 时不得 panic：会话归档
 // （无控制台订阅者）也要能跑完。这条守卫是「nil 回调不得崩」的唯一证据。
-func TestFeedStreamEventNilProgressTolerated(t *testing.T) {
-	outcome := NewSessionOutcome()
+func TestFeedEventNilProgressTolerated(t *testing.T) {
+	outcome := claude.NewOutcome()
 	events := []string{
 		`{"type":"system","subtype":"init","session_id":"s-1"}`,
 		`{"type":"assistant","message":{"content":[{"type":"text","text":"结论"}]}}`,
@@ -72,11 +74,7 @@ func TestFeedStreamEventNilProgressTolerated(t *testing.T) {
 		`{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}`,
 	}
 	for _, line := range events {
-		var event streamEvent
-		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			t.Fatalf("unmarshal %s: %v", line, err)
-		}
-		if isResult := feedStreamEvent(&outcome, &event, nil); isResult {
+		if isResult := claude.Feed(&outcome, []byte(line), claude.ProgressTerse, nil); isResult {
 			t.Errorf("非 result 事件不得报 true：%s", line)
 		}
 	}
@@ -91,14 +89,14 @@ func TestFeedStreamEventNilProgressTolerated(t *testing.T) {
 // describeStreamEvent 的未标注类型出口：JSON 对象但 type/subtype 都缺席时给出
 // 「（未标注类型）」，好过在时间线里留一行空白。
 func TestDescribeStreamEventUnlabelledType(t *testing.T) {
-	event, ok := parseStreamEvent(`{"level":"info"}`)
+	event, ok := claude.ParseLine([]byte(`{"level":"info"}`))
 	if !ok {
 		t.Fatal("合法 JSON 应解析成功")
 	}
 	if got := describeStreamEvent(event, ok, `{"level":"info"}`); got != "（未标注类型）" {
 		t.Errorf("describeStreamEvent = %q, want （未标注类型）", got)
 	}
-	onlySubtype, ok := parseStreamEvent(`{"subtype":"thinking_tokens"}`)
+	onlySubtype, ok := claude.ParseLine([]byte(`{"subtype":"thinking_tokens"}`))
 	if !ok {
 		t.Fatal("合法 JSON 应解析成功")
 	}
@@ -107,12 +105,12 @@ func TestDescribeStreamEventUnlabelledType(t *testing.T) {
 	}
 }
 
-// describeToolResult 的空内容出口：既没有 Text 也没有 Content 时是「（完成）」
-// 而不是「（返回 0 字）」。这条差异影响日志可读性，值得钉住。
+// claude.DescribeToolResult 的空内容出口：既没有 Text 也没有 Content 时是
+// 「（完成）」而不是「（返回 0 字）」。这条差异影响日志可读性，值得钉住。
 func TestDescribeToolResultEmptyContent(t *testing.T) {
-	block := streamContentBlock{Content: json.RawMessage{}, Text: ""}
-	if got, want := describeToolResult(&block), "（完成）"; got != want {
-		t.Errorf("describeToolResult = %q, want %q", got, want)
+	block := claude.ContentBlock{Content: json.RawMessage{}, Text: ""}
+	if got, want := claude.DescribeToolResult(&block), "（完成）"; got != want {
+		t.Errorf("DescribeToolResult = %q, want %q", got, want)
 	}
 }
 
@@ -131,16 +129,16 @@ func TestSessionCommandDockerMountsAllDirs(t *testing.T) {
 		MCPConfigPath: "/var/lib/assistant/claude/mcp.json",
 		SettingsPath:  "/var/lib/assistant/claude/settings.json",
 	}
-	_, args, _ := sessionCommand(options)
-	joined := strings.Join(args, " ")
+	spec := runSessionSpec(options)
+	joined := strings.Join(spec.Args, " ")
 	if !strings.Contains(joined, "-w /tmp/worktrees/pr-3") {
-		t.Errorf("工作目录未钉定：%v", args)
+		t.Errorf("工作目录未钉定：%v", spec.Args)
 	}
 	// Cwd 必须挂载，否则容器内 /tmp/worktrees/pr-3 是空目录
 	if !strings.Contains(joined, "-v /tmp/worktrees/pr-3:/tmp/worktrees/pr-3") {
-		t.Errorf("worktree 未挂载：%v", args)
+		t.Errorf("worktree 未挂载：%v", spec.Args)
 	}
-	if !slices.Contains(args, "assistant-review:dev") {
-		t.Errorf("镜像名应作为最后一个位置参数前出现：%v", args)
+	if !slices.Contains(spec.Args, "assistant-review:dev") {
+		t.Errorf("镜像名应作为最后一个位置参数前出现：%v", spec.Args)
 	}
 }

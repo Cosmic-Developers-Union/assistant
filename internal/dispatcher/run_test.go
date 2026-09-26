@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Cosmic-Developers-Union/assistant/internal/claude"
 	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
 )
 
@@ -71,12 +72,13 @@ func TestBuildPromptTruncatesLongTitleByRunes(t *testing.T) {
 	}
 }
 
-func TestFeedStreamLineInit(t *testing.T) {
-	outcome := NewSessionOutcome()
+func TestFeedInit(t *testing.T) {
+	outcome := claude.NewOutcome()
 	var progress []string
-	isResult := FeedStreamLine(
+	isResult := claude.Feed(
 		&outcome,
-		`{"type":"system","subtype":"init","session_id":"s-1","model":"claude-x"}`,
+		[]byte(`{"type":"system","subtype":"init","session_id":"s-1","model":"claude-x"}`),
+		claude.ProgressTerse,
 		func(line string) { progress = append(progress, line) },
 	)
 	if isResult {
@@ -90,21 +92,24 @@ func TestFeedStreamLineInit(t *testing.T) {
 	}
 }
 
-func TestFeedStreamLineAssistant(t *testing.T) {
-	outcome := NewSessionOutcome()
+func TestFeedAssistant(t *testing.T) {
+	outcome := claude.NewOutcome()
 	var progress []string
-	FeedStreamLine(
+	claude.Feed(
 		&outcome,
-		`{"type":"assistant","message":{"content":[`+
+		[]byte(`{"type":"assistant","message":{"content":[`+
 			`{"type":"thinking","thinking":"…"},`+
 			`{"type":"text","text":" 读取 PR diff\n"},`+
-			`{"type":"tool_use","name":"mcp__gitea__pull_request_read"}]}}`,
+			`{"type":"tool_use","name":"mcp__gitea__pull_request_read"}]}}`),
+		claude.ProgressTerse,
 		func(line string) { progress = append(progress, line) },
 	)
 	if outcome.NumTurns != 1 {
 		t.Errorf("NumTurns = %d, want 1", outcome.NumTurns)
 	}
-	want := []string{"读取 PR diff", "🔧 mcp__gitea__pull_request_read"}
+	// 紧凑形态下思考块也报一行摘要（迁移到 claude.Feed 后的行为，见
+	// claude.TestFeedAssistantThinking）：评审日志里能看出模型「在想什么」
+	want := []string{"思考: …", "读取 PR diff", "🔧 mcp__gitea__pull_request_read"}
 	if len(progress) != len(want) {
 		t.Fatalf("progress = %v, want %v", progress, want)
 	}
@@ -117,29 +122,29 @@ func TestFeedStreamLineAssistant(t *testing.T) {
 
 // 工具调用没有可摘要的入参（无 input / 摘要为空）时只报工具名；tool_result 帧
 // 折成一行回执（含错误标记），二者共同构成会话时间线的「当前步在干什么」。
-func TestFeedStreamLineToolUseWithoutDetailAndToolResult(t *testing.T) {
-	outcome := NewSessionOutcome()
+func TestFeedToolUseWithoutDetailAndToolResult(t *testing.T) {
+	outcome := claude.NewOutcome()
 	var progress []string
 	collect := func(line string) { progress = append(progress, line) }
 
-	FeedStreamLine(&outcome,
-		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"mcp__gitea__issue_read"}]}}`,
-		collect)
-	FeedStreamLine(&outcome,
-		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Task","input":{}}]}}`,
-		collect)
-	FeedStreamLine(&outcome,
-		`{"type":"user","message":{"content":[`+
+	claude.Feed(&outcome,
+		[]byte(`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"mcp__gitea__issue_read"}]}}`),
+		claude.ProgressTerse, collect)
+	claude.Feed(&outcome,
+		[]byte(`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Task","input":{}}]}}`),
+		claude.ProgressTerse, collect)
+	claude.Feed(&outcome,
+		[]byte(`{"type":"user","message":{"content":[`+
 			`{"type":"tool_result","content":"读取成功"},`+
 			`{"type":"tool_result","is_error":true,"content":"mcp\n拒绝"},`+
 			`{"type":"tool_result","text":"裸文本回执"},`+
 			`{"type":"tool_result"},`+
-			`{"type":"text","text":"不是工具回执"}]}}`,
-		collect)
+			`{"type":"text","text":"不是工具回执"}]}}`),
+		claude.ProgressTerse, collect)
 	want := []string{
 		"🔧 mcp__gitea__issue_read", "🔧 Task",
 		"  ↳ （返回 14 字）",   // Content 原文按字节计数（"读取成功" 12 字节 + 引号）
-		`  ↳ ✗ "mcp\n拒绝"`, // 错误回执用 Content 原文，转义序列的 \n 不展开
+		`  ↳ ✗ "mcp\n拒绝"`, // 错误回执用 Content 原文，转义序列不展开（字面 \n）
 		"  ↳ （返回 5 字）",    // 无 Content 时退回 Text，按字符计数
 		"  ↳ （完成）",        // 两者皆无
 	}
@@ -152,16 +157,18 @@ func TestFeedStreamLineToolUseWithoutDetailAndToolResult(t *testing.T) {
 		}
 	}
 	// 无 onProgress（--debug 关闭）时不得 panic
-	FeedStreamLine(&outcome, `{"type":"user","message":{"content":[{"type":"tool_result"}]}}`, nil)
+	claude.Feed(&outcome, []byte(`{"type":"user","message":{"content":[{"type":"tool_result"}]}}`),
+		claude.ProgressTerse, nil)
 }
 
-func TestFeedStreamLineResultSuccess(t *testing.T) {
-	outcome := NewSessionOutcome()
-	isResult := FeedStreamLine(
+func TestFeedResultSuccess(t *testing.T) {
+	outcome := claude.NewOutcome()
+	isResult := claude.Feed(
 		&outcome,
-		`{"type":"result","subtype":"success","is_error":false,"num_turns":7,`+
+		[]byte(`{"type":"result","subtype":"success","is_error":false,"num_turns":7,`+
 			`"total_cost_usd":0.42,"duration_ms":12345,"session_id":"s-2",`+
-			`"result":"已提交 APPROVED","permission_denials":[{},{}]}`,
+			`"result":"已提交 APPROVED","permission_denials":[{},{}]}`),
+		claude.ProgressTerse,
 		nil,
 	)
 	if !isResult {
@@ -178,9 +185,12 @@ func TestFeedStreamLineResultSuccess(t *testing.T) {
 	}
 }
 
-func TestFeedStreamLineResultFallback(t *testing.T) {
-	outcome := NewSessionOutcome()
-	FeedStreamLine(&outcome, `{"type":"result","subtype":"error_during_execution","errors":["x"]}`, nil)
+// result 帧缺少 is_error 时按失败回退：把未明确成功的会话当成功，会让完成判定
+// 在错误结论上放行。
+func TestFeedResultFallback(t *testing.T) {
+	outcome := claude.NewOutcome()
+	claude.Feed(&outcome, []byte(`{"type":"result","subtype":"error_during_execution","errors":["x"]}`),
+		claude.ProgressTerse, nil)
 	if !outcome.IsError || outcome.CostUSD != 0 || outcome.Result != "" {
 		t.Errorf("outcome = %+v, want failure fallback", outcome)
 	}
@@ -189,12 +199,12 @@ func TestFeedStreamLineResultFallback(t *testing.T) {
 	}
 }
 
-func TestFeedStreamLineIgnoresNoise(t *testing.T) {
-	outcome := NewSessionOutcome()
+func TestFeedIgnoresNoise(t *testing.T) {
+	outcome := claude.NewOutcome()
 	var progress []string
 	onProgress := func(line string) { progress = append(progress, line) }
 	for _, line := range []string{"not-json", `{"type":"user"}`, ""} {
-		if FeedStreamLine(&outcome, line, onProgress) {
+		if claude.Feed(&outcome, []byte(line), claude.ProgressTerse, onProgress) {
 			t.Errorf("line %q should be ignored", line)
 		}
 	}
@@ -209,23 +219,28 @@ func TestRunSessionDrivesClaudeAndCollectsStream(t *testing.T) {
 	if err := os.WriteFile(mcpConfigPath, []byte(`{"mcpServers":{}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	argsFile := filepath.Join(dir, "args.txt")
-	sessionMCPCopy := filepath.Join(dir, "session-mcp.json")
-	bin := fakeClaude(t, dir, fmt.Sprintf(
-		`printf '%%s\n' "$@" > '%s'
-prev=""
-for arg in "$@"; do
-  if [ "$prev" = "--mcp-config" ]; then cp "$arg" '%s'; fi
-  prev="$arg"
-done
-printf '%%s\n' '{"type":"system","subtype":"init","session_id":"s-9","model":"fake"}'
-printf '%%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"读取 diff"},{"type":"tool_use","name":"mcp__gitea__pull_request_read"}]}}'
-printf '%%s\n' '{"type":"result","subtype":"success","is_error":false,"num_turns":3,"total_cost_usd":1.5,"duration_ms":900,"session_id":"s-9","result":"评审完成"}'`,
-		argsFile, sessionMCPCopy,
-	))
+	// 生成的会话 MCP 配置落在会话临时配置目录里，RunSession 返回前就清理了——
+	// 只能在 Runner 被调用的那一刻读走它的内容（这也正是会话进程会读到的时刻）。
+	var sessionMCPDocument map[string]any
+	runner := &fakeRunner{
+		lines: []string{
+			`{"type":"system","subtype":"init","session_id":"s-9","model":"fake"}`,
+			`{"type":"assistant","message":{"content":[{"type":"text","text":"读取 diff"},{"type":"tool_use","name":"mcp__gitea__pull_request_read"}]}}`,
+			`{"type":"result","subtype":"success","is_error":false,"num_turns":3,"total_cost_usd":1.5,"duration_ms":900,"session_id":"s-9","result":"评审完成"}`,
+		},
+		onRun: func(spec claude.Spec) {
+			index := slices.Index(spec.Args, "--mcp-config")
+			if index < 0 || index+1 >= len(spec.Args) {
+				return
+			}
+			sessionMCPDocument = readMCPDocument(spec.Args[index+1])
+		},
+	}
+	useFakeRunner(t, runner)
+
 	var progress []string
 	outcome := RunSession(SessionOptions{
-		Config:        testConfig(func(config *Config) { config.ClaudeBin = bin }),
+		Config:        testConfig(func(config *Config) { config.ClaudeBin = "claude" }),
 		Prompt:        "review pr #64",
 		Cwd:           dir,
 		MCPConfigPath: mcpConfigPath,
@@ -241,11 +256,8 @@ printf '%%s\n' '{"type":"result","subtype":"success","is_error":false,"num_turns
 		!strings.Contains(strings.Join(progress, "\n"), "🔧 mcp__gitea__pull_request_read") {
 		t.Errorf("progress = %v", progress)
 	}
-	raw, err := os.ReadFile(argsFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	args := strings.Split(string(raw), "\n")
+	spec := runner.lastSpec(t)
+	args := spec.Args
 	for _, flag := range []string{
 		"--permission-mode", "auto",
 		"--autocompact", "auto",
@@ -256,36 +268,49 @@ printf '%%s\n' '{"type":"result","subtype":"success","is_error":false,"num_turns
 			t.Errorf("missing arg %q in %v", flag, args)
 		}
 	}
-	// -mcp-config 指向生成的会话配置（assistant 注入的 gitea server），不再是仓库文件
+	// --mcp-config 指向生成的会话配置（assistant 注入的 gitea server），不再是仓库文件
 	index := slices.Index(args, "--mcp-config")
 	if index < 0 || index+1 >= len(args) {
 		t.Fatalf("missing --mcp-config in %v", args)
 	}
-	if sessionMCP := args[index+1]; sessionMCP == mcpConfigPath {
+	sessionMCP := args[index+1]
+	if sessionMCP == mcpConfigPath {
 		t.Errorf("--mcp-config 应指向生成的会话配置，而不是仓库 .mcp.json：%v", args)
-	} else if _, ok := readMCPServers(t, sessionMCPCopy)[claudecfg.MCPServerGitea]; !ok {
-		t.Errorf("会话 MCP 配置缺少 gitea server：%s", sessionMCPCopy)
 	}
-	// --append-system-prompt 带上 assistant 内置的评审协议（不依赖仓库里的 skill 文件；
-	// 多行提示词在参数文件里被拆成多行，所以按整体内容断言）
-	if !strings.Contains(string(raw), "--append-system-prompt") ||
-		!strings.Contains(string(raw), "PR 审查协议") ||
-		!strings.Contains(string(raw), "标签体系") {
-		t.Errorf("附加 system 提示词缺少内置评审协议：%s", raw)
+	servers, _ := sessionMCPDocument["mcpServers"].(map[string]any)
+	if _, ok := servers[claudecfg.MCPServerGitea]; !ok {
+		t.Errorf("会话 MCP 配置缺少 gitea server：%v", sessionMCPDocument)
+	}
+	// --append-system-prompt 带上 assistant 内置的评审协议（不依赖仓库里的 skill 文件）
+	index = slices.Index(args, "--append-system-prompt")
+	if index < 0 || index+1 >= len(args) {
+		t.Fatalf("missing --append-system-prompt in %v", args)
+	}
+	prompt := args[index+1]
+	if !strings.Contains(prompt, "PR 审查协议") || !strings.Contains(prompt, "标签体系") {
+		t.Errorf("附加 system 提示词缺少内置评审协议：%s", prompt)
 	}
 	if !containsString(args, "review pr #64") {
 		t.Errorf("prompt missing in %v", args)
 	}
+	if spec.Dir != dir {
+		t.Errorf("Spec.Dir = %q, want %q", spec.Dir, dir)
+	}
 }
 
-func TestRunSessionFlushesTrailingLineWithoutNewline(t *testing.T) {
+// RunSession 现在把执行交给 claude.Runner，Runner 的契约是「按行交付，含无换行
+// 结尾的末行」——这里用假 Runner 直接交付一条不带换行的 result 行，钉住
+// dispatcher 不会因为缺换行而丢掉会话结论。
+func TestRunSessionCollectsTrailingLineWithoutNewline(t *testing.T) {
 	dir := t.TempDir()
-	bin := fakeClaude(t, dir,
-		`printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-7","model":"fake"}'
-printf '%s' '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"total_cost_usd":0.3,"duration_ms":400,"session_id":"s-7","result":"残行结果"}'`,
-	)
+	runner := &fakeRunner{lines: []string{
+		`{"type":"system","subtype":"init","session_id":"s-7","model":"fake"}`,
+		`{"type":"result","subtype":"success","is_error":false,"num_turns":2,"total_cost_usd":0.3,"duration_ms":400,"session_id":"s-7","result":"残行结果"}`,
+	}}
+	useFakeRunner(t, runner)
+
 	outcome := RunSession(SessionOptions{
-		Config:        testConfig(func(config *Config) { config.ClaudeBin = bin }),
+		Config:        testConfig(func(config *Config) { config.ClaudeBin = "claude" }),
 		Prompt:        "review pr #64",
 		Cwd:           dir,
 		MCPConfigPath: filepath.Join(dir, ".mcp.json"),
@@ -293,13 +318,20 @@ printf '%s' '{"type":"result","subtype":"success","is_error":false,"num_turns":2
 	if outcome.SessionID != "s-7" || outcome.Result != "残行结果" {
 		t.Errorf("outcome = %+v, want trailing line parsed", outcome)
 	}
+	if outcome.IsError {
+		t.Errorf("收到 result 后不该判失败：%+v", outcome.Errors)
+	}
 }
 
-func TestRunSessionNonZeroExitCollectsErrors(t *testing.T) {
+// Runner 报错（进程非零退出、被信号终止或超时）时错误原样进 outcome.Errors；
+// 「流结束但没有 result 消息」由 dispatcher 单独追加——完成判定依赖这一条。
+func TestRunSessionRunnerErrorCollectsErrors(t *testing.T) {
 	dir := t.TempDir()
-	bin := fakeClaude(t, dir, "echo 'mcp handshake failed' >&2\nexit 3")
+	runner := &fakeRunner{err: fmt.Errorf("claude 退出码 3：mcp handshake failed")}
+	useFakeRunner(t, runner)
+
 	outcome := RunSession(SessionOptions{
-		Config:        testConfig(func(config *Config) { config.ClaudeBin = bin }),
+		Config:        testConfig(func(config *Config) { config.ClaudeBin = "claude" }),
 		Prompt:        "p",
 		Cwd:           dir,
 		MCPConfigPath: filepath.Join(dir, ".mcp.json"),
@@ -313,16 +345,21 @@ func TestRunSessionNonZeroExitCollectsErrors(t *testing.T) {
 			t.Errorf("errors = %v, want %q", outcome.Errors, want)
 		}
 	}
+	if outcome.Subtype != "error_during_execution" {
+		t.Errorf("Subtype = %q, want 失败回退值", outcome.Subtype)
+	}
 }
 
+// 超时归因由 claude.Runner 给出（execRunner 的超时路径在 internal/claude 里
+// 用真实进程测）：这里钉 dispatcher 把它原样透出，并且 Spec 带上配置的超时值。
 func TestRunSessionTimeout(t *testing.T) {
 	dir := t.TempDir()
-	// exec 让 sh 把自己替换成 sleep，SIGTERM 直接命中
-	bin := fakeClaude(t, dir, "exec sleep 30")
-	startedAt := time.Now()
+	runner := &fakeRunner{err: fmt.Errorf("会话超时（>200ms），已 SIGTERM 终止")}
+	useFakeRunner(t, runner)
+
 	outcome := RunSession(SessionOptions{
 		Config: testConfig(func(config *Config) {
-			config.ClaudeBin = bin
+			config.ClaudeBin = "claude"
 			config.SessionTimeout = 200 * time.Millisecond
 		}),
 		Prompt:        "p",
@@ -335,8 +372,8 @@ func TestRunSessionTimeout(t *testing.T) {
 	if !strings.Contains(strings.Join(outcome.Errors, "\n"), "超时") {
 		t.Errorf("errors = %v, want 超时", outcome.Errors)
 	}
-	if elapsed := time.Since(startedAt); elapsed > 15*time.Second {
-		t.Errorf("elapsed = %v, want < 15s", elapsed)
+	if spec := runner.lastSpec(t); spec.Timeout != 200*time.Millisecond {
+		t.Errorf("Spec.Timeout = %v, want 200ms", spec.Timeout)
 	}
 }
 
@@ -358,9 +395,10 @@ func TestSessionCommandBare(t *testing.T) {
 		SessionID:     "11111111-2222-4333-8444-555555555555",
 		Title:         "review acme/repo#1",
 	}
-	bin, args, container := sessionCommand(options)
-	if bin != "claude" || container != "" {
-		t.Fatalf("bin=%q container=%q, want claude/bare", bin, container)
+	spec := runSessionSpec(options)
+	args := spec.Args
+	if spec.Bin != "claude" || spec.Container != "" {
+		t.Fatalf("bin=%q container=%q, want claude/bare", spec.Bin, spec.Container)
 	}
 	for _, want := range []string{
 		"-p", "review pr #1", "--model", "sonnet", "--mcp-config", "/repo/.mcp.json",
@@ -382,7 +420,7 @@ func TestSessionCommandBare(t *testing.T) {
 	// 已存在文本记录时改为 --resume 续接
 	resumed := options
 	resumed.SessionResume = true
-	_, args, _ = sessionCommand(resumed)
+	args = runSessionSpec(resumed).Args
 	if !containsString(args, "--resume") || containsString(args, "--session-id") {
 		t.Errorf("resume 形态参数错误：%v", args)
 	}
@@ -477,9 +515,10 @@ func TestSessionCommandDocker(t *testing.T) {
 		MCPConfigPath: "/srv/repo/.mcp.json",
 		SettingsPath:  "/tmp/settings/settings.json",
 	}
-	bin, args, container := sessionCommand(options)
-	if bin != "docker" || container == "" {
-		t.Fatalf("bin=%q container=%q, want docker/named", bin, container)
+	spec := runSessionSpec(options)
+	args, container := spec.Args, spec.Container
+	if spec.Bin != "docker" || container == "" {
+		t.Fatalf("bin=%q container=%q, want docker/named", spec.Bin, container)
 	}
 	joined := strings.Join(args, " ")
 	for _, want := range []string{
@@ -511,14 +550,13 @@ func TestSessionInjectsGiteaIdentityEnv(t *testing.T) {
 	t.Setenv("GITEA_ACCESS_TOKEN", "ambient-token")
 	t.Setenv("ASSISTANT_CONFIG", "/ambient/config.json")
 	dir := t.TempDir()
-	envFile := filepath.Join(dir, "env.txt")
-	bin := fakeClaude(t, dir, fmt.Sprintf(
-		`printf '%%s|%%s|%%s\n' "$GITEA_HOST" "$GITEA_ACCESS_TOKEN" "$ASSISTANT_CONFIG" > '%s'
-printf '%%s\n' '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"session_id":"s-1","result":"ok"}'`,
-		envFile,
-	))
+	runner := &fakeRunner{lines: []string{
+		`{"type":"result","subtype":"success","is_error":false,"num_turns":1,"session_id":"s-1","result":"ok"}`,
+	}}
+	useFakeRunner(t, runner)
+
 	config := testConfig(func(config *Config) {
-		config.ClaudeBin = bin
+		config.ClaudeBin = "claude"
 		config.Host = "https://gitea.example.com"
 		config.AccessToken = "reviewer-token"
 		config.ConfigPath = "/etc/assistant/config.json"
@@ -532,13 +570,16 @@ printf '%%s\n' '{"type":"result","subtype":"success","is_error":false,"num_turns
 	if outcome.IsError {
 		t.Fatalf("outcome = %+v, want success", outcome)
 	}
-	raw, err := os.ReadFile(envFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := strings.TrimSpace(string(raw))
-	if got != "https://gitea.example.com|reviewer-token|/etc/assistant/config.json" {
-		t.Fatalf("会话环境 = %q（应钉定 reviewer 身份与 config 路径）", got)
+	spec := runner.lastSpec(t)
+	for key, want := range map[string]string{
+		"GITEA_HOST":         "https://gitea.example.com",
+		"GITEA_ACCESS_TOKEN": "reviewer-token",
+		"ASSISTANT_CONFIG":   "/etc/assistant/config.json",
+	} {
+		if got, ok := claude.EnvValue(spec.Env, key); !ok || got != want {
+			t.Errorf("Spec.Env[%s] = %q（ok=%v），want %q（应钉定 reviewer 身份与 config 路径）",
+				key, got, ok, want)
+		}
 	}
 }
 
@@ -574,9 +615,9 @@ func TestSessionCredentialEnv(t *testing.T) {
 	docker.DockerImage = "assistant-review:dev"
 	docker.ClaudeBin = "claude"
 	t.Setenv("GITEA_ACCESS_TOKEN", "reviewer-token")
-	_, args, _ := sessionCommand(SessionOptions{
+	args := runSessionSpec(SessionOptions{
 		Config: docker, Prompt: "review pr #1", Cwd: "/w", MCPConfigPath: "/w/.mcp.json",
-	})
+	}).Args
 	joined := strings.Join(args, " ")
 	for _, key := range []string{"-e GITEA_HOST", "-e GITEA_ACCESS_TOKEN", "-e ASSISTANT_CONFIG"} {
 		if !strings.Contains(joined, key) {
@@ -597,14 +638,13 @@ func TestRunSessionInjectsReviewConventions(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	argsFile := filepath.Join(dir, "args.txt")
-	bin := fakeClaude(t, dir, fmt.Sprintf(
-		`printf '%%s\n' "$@" > '%s'
-printf '%%s\n' '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"session_id":"s-1","result":"ok"}'`,
-		argsFile,
-	))
+	runner := &fakeRunner{lines: []string{
+		`{"type":"result","subtype":"success","is_error":false,"num_turns":1,"session_id":"s-1","result":"ok"}`,
+	}}
+	useFakeRunner(t, runner)
+
 	outcome := RunSession(SessionOptions{
-		Config:        testConfig(func(config *Config) { config.ClaudeBin = bin }),
+		Config:        testConfig(func(config *Config) { config.ClaudeBin = "claude" }),
 		Prompt:        "review pr #9",
 		Cwd:           dir,
 		ProjectDir:    dir,
@@ -613,14 +653,13 @@ printf '%%s\n' '{"type":"result","subtype":"success","is_error":false,"num_turns
 	if outcome.IsError {
 		t.Fatalf("outcome = %+v, want success", outcome)
 	}
-	raw, err := os.ReadFile(argsFile)
-	if err != nil {
-		t.Fatal(err)
+	args := runner.lastSpec(t).Args
+	index := slices.Index(args, "--append-system-prompt")
+	if index < 0 || index+1 >= len(args) {
+		t.Fatalf("缺少 --append-system-prompt：%v", args)
 	}
-	// 约定内容含换行，按整段原文匹配（printf 每参数一行会把它拆开）
-	if !strings.Contains(string(raw), "--append-system-prompt") ||
-		!strings.Contains(string(raw), "必须检查目录边界") {
-		t.Errorf("args = %q, 缺少附加 system 提示词", raw)
+	if !strings.Contains(args[index+1], "必须检查目录边界") {
+		t.Errorf("附加 system 提示词缺少项目约定：%q", args[index+1])
 	}
 }
 
@@ -678,10 +717,9 @@ func int64Ptr(v int64) *int64 { return &v }
 // 其余事件的时间线保持原样。
 func TestStreamWriterAggregatesThinkingTokenFrames(t *testing.T) {
 	var progress []string
-	outcome := NewSessionOutcome()
+	outcome := newSessionOutcome()
 	collect := func(line string) { progress = append(progress, line) }
-	stream := &streamWriter{outcome: &outcome, onProgress: collect, debug: true,
-		thinking: thinkingTracker{onProgress: collect, debug: true}}
+	stream := newSessionStream(&outcome, collect, true)
 	lines := []string{
 		`{"type":"system","subtype":"init","session_id":"s-1"}`,
 		`{"type":"system","subtype":"thinking_tokens","estimated_tokens":10,"estimated_tokens_delta":10}`,
@@ -692,9 +730,7 @@ func TestStreamWriterAggregatesThinkingTokenFrames(t *testing.T) {
 		`{"type":"result","subtype":"success"}`,
 	}
 	for _, line := range lines {
-		if _, err := stream.Write([]byte(line + "\n")); err != nil {
-			t.Fatal(err)
-		}
+		stream.consume([]byte(line))
 	}
 	stream.thinking.finish()
 
@@ -724,15 +760,12 @@ func TestStreamWriterAggregatesThinkingTokenFrames(t *testing.T) {
 // 流以 thinking 帧结尾（如超时截断）时，收尾冲刷仍会报出段汇总与合计。
 func TestThinkingTrackerFlushesTrailingBurst(t *testing.T) {
 	var progress []string
-	outcome := NewSessionOutcome()
+	outcome := newSessionOutcome()
 	collect := func(line string) { progress = append(progress, line) }
-	stream := &streamWriter{outcome: &outcome, onProgress: collect, debug: true,
-		thinking: thinkingTracker{onProgress: collect, debug: true}}
+	stream := newSessionStream(&outcome, collect, true)
 	for i := 0; i < 3; i++ {
 		line := `{"type":"system","subtype":"thinking_tokens","estimated_tokens":7,"estimated_tokens_delta":7}`
-		if _, err := stream.Write([]byte(line + "\n")); err != nil {
-			t.Fatal(err)
-		}
+		stream.consume([]byte(line))
 	}
 	stream.thinking.finish()
 
@@ -754,30 +787,32 @@ func TestThinkingTrackerFlushesTrailingBurst(t *testing.T) {
 func TestThinkingTrackerFallsBackToCumulative(t *testing.T) {
 	var progress []string
 	tracker := thinkingTracker{onProgress: func(line string) { progress = append(progress, line) }, debug: true}
-	tracker.observe(streamEvent{EstimatedTokens: int64Ptr(10)})
-	tracker.observe(streamEvent{EstimatedTokens: int64Ptr(25)})
+	tracker.observe(claude.Event{EstimatedTokens: int64Ptr(10)})
+	tracker.observe(claude.Event{EstimatedTokens: int64Ptr(25)})
 	tracker.flush()
 	if len(progress) != 1 || !strings.Contains(progress[0], "15 tokens") {
 		t.Fatalf("progress = %v, want 汇总含 15 tokens（25-10 基线差值）", progress)
 	}
 }
 
-// RunSession 的 debug 归档与三条收尾出口：debug 打开时归档原始 stream-json
-// 并逐项打点（会话命令 / 文本记录 / 配置根 / MCP 声明 / 结束汇总），
-// 归档文件必须是可内省的完整帧而非折叠后的摘要。这里同时走一遍会话配置
-// 落盘失败（SessionDir 落在普通文件下）与 spawn 失败两条出口——它们都在
-// RunSession 内、不依赖真实 claude。
+// RunSession 的 debug 归档与收尾出口：debug 打开时归档原始 stream-json 并逐项
+// 打点（会话命令 / 文本记录 / 配置根 / MCP 声明 / 结束汇总），归档文件必须是
+// 可内省的完整帧而非折叠后的摘要；另外两条出口（会话配置根创建失败、Runner
+// 无法启动）都在 RunSession 内，不依赖真实 claude。
 func TestRunSessionDebugArchiveAndConfigFailures(t *testing.T) {
 	t.Run("debug 打点与归档", func(t *testing.T) {
 		dir := t.TempDir()
 		archiveDir := filepath.Join(dir, "archive")
-		bin := fakeClaude(t, dir, `printf '%s\n' '{"type":"system","subtype":"init","session_id":"s-arc","model":"fake"}'
-printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.2,"duration_ms":300,"session_id":"s-arc","result":"归档结果"}'`,
-		)
+		runner := &fakeRunner{lines: []string{
+			`{"type":"system","subtype":"init","session_id":"s-arc","model":"fake"}`,
+			`{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.2,"duration_ms":300,"session_id":"s-arc","result":"归档结果"}`,
+		}}
+		useFakeRunner(t, runner)
+
 		var progress []string
 		outcome := RunSession(SessionOptions{
 			Config: testConfig(func(config *Config) {
-				config.ClaudeBin = bin
+				config.ClaudeBin = "claude"
 				config.Debug = true
 				config.SessionArchiveDir = archiveDir
 			}),
@@ -815,7 +850,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"num_turns"
 		writeFile(t, blocker, "占位\n")
 		outcome := RunSession(SessionOptions{
 			Config: testConfig(func(config *Config) {
-				config.ClaudeBin = fakeClaude(t, dir, "exit 0")
+				config.ClaudeBin = "claude"
 				config.SessionDir = filepath.Join(blocker, "session")
 			}),
 			Prompt:        "p",
@@ -827,8 +862,9 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"num_turns"
 		}
 	})
 
-	t.Run("ClaudeBin 不存在：spawn 失败即退出", func(t *testing.T) {
+	t.Run("Runner 启动失败：错误进 outcome 且不 panic", func(t *testing.T) {
 		dir := t.TempDir()
+		useFakeRunner(t, &fakeRunner{err: fmt.Errorf("启动 /absent/bin: 没有那个文件或目录")})
 		outcome := RunSession(SessionOptions{
 			Config: testConfig(func(config *Config) {
 				config.ClaudeBin = filepath.Join(dir, "absent-bin")
@@ -838,19 +874,19 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"num_turns"
 			MCPConfigPath: filepath.Join(dir, ".mcp.json"),
 		})
 		if !outcome.IsError || len(outcome.Errors) == 0 {
-			t.Errorf("outcome = %+v, want spawn 失败", outcome)
+			t.Errorf("outcome = %+v, want 启动失败", outcome)
 		}
 	})
 }
 
-// 退出码为负且未被信号终止时的「异常终止」出口：用 exec 崩溃的 shell
-// （自身收到 SIGSEGV）走 processSignaled 的 false 分支，钉住错误文案。
+// Runner 的退出归因（被信号终止 / 异常终止 / 非零退出）由 claude 包产出，本包
+// 原样透出且必须带上 claude 前缀的收尾文案——完成判定与运维排障都读这一行。
 func TestRunSessionAbnormalExit(t *testing.T) {
 	dir := t.TempDir()
-	bin := fakeClaude(t, dir, "kill -SEGV $$")
+	useFakeRunner(t, &fakeRunner{err: fmt.Errorf("claude 被信号 SIGSEGV 终止")})
 	outcome := RunSession(SessionOptions{
 		Config: testConfig(func(config *Config) {
-			config.ClaudeBin = bin
+			config.ClaudeBin = "claude"
 			config.SessionTimeout = 20 * time.Second
 		}),
 		Prompt:        "p",
@@ -861,7 +897,6 @@ func TestRunSessionAbnormalExit(t *testing.T) {
 		t.Fatalf("outcome = %+v, want error", outcome)
 	}
 	joined := strings.Join(outcome.Errors, "\n")
-	// 无论落到「被信号 X 终止」还是「异常终止」，都必须是 claude 前缀的收尾错误
 	if !strings.Contains(joined, "claude ") {
 		t.Errorf("errors = %v, want claude 退出归因", outcome.Errors)
 	}

@@ -4,39 +4,51 @@
 // result 的 permission_denials 落日志可观测质量）、`--autocompact auto`（长
 // 评审会话自动压缩上下文）。会话配置独立于操作者：claudecfg 生成临时
 // `--settings`（环境变量与权限放行），`--setting-sources project` 只加载项目级
-// 设置（不读也不写 ~/.claude 用户配置），`--no-session-persistence` 不落会话
-// 历史。与手工命令的差异，均为无人值守必需：
+// 设置（不读也不写 ~/.claude 用户配置）。与手工命令的差异，均为无人值守必需：
 //   - `--strict-mcp-config` + `--mcp-config` 显式注入宿主仓库的 gitea MCP：评审
 //     要提交 Pull Request Review，而 worktree 是新路径，项目级 MCP 授权状态不可依赖；
 //   - `--max-turns` 给 runaway 会话兜底（超时之外的第二道闸）；
 //   - stdout 按 stream-json 逐行解析，assistant 文本与工具调用（🔧 名称）实时写
 //     待办日志。
 //
-// 超时两段式：SIGTERM 优雅退出，宽限期后 SIGKILL。stderr 只在失败时留尾部。
+// 与 CLI 的全部交互（argv/env 组装、进程启动、逐行交付、超时两段式终止、结果
+// 归集）都在 internal/claude：本文件只负责「这次会话要传什么」，以及「收到的行
+// 对评审语义意味着什么」。
 package dispatcher
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
-	"sync/atomic"
-	"syscall"
+	"sync"
 	"time"
 
 	builtinagents "github.com/Cosmic-Developers-Union/assistant/internal/agents"
+	"github.com/Cosmic-Developers-Union/assistant/internal/claude"
 	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
 	"github.com/Cosmic-Developers-Union/assistant/internal/provider"
 	"github.com/Cosmic-Developers-Union/assistant/skills"
 )
 
-// SessionOutcome 是一次 claude 会话的归集结果。
+// sessionOutcome 是一次 claude 会话的归集结果。
+//
+// 为什么内嵌 claude.Outcome：归集字段（subtype/is_error/轮次/花费/结论/错误）
+// 的解析归 claude 包，本包只补两个本地字段，避免同一份语义在两处各写一遍。
+type sessionOutcome struct {
+	claude.Outcome
+	// TranscriptPath 是持久化的文本记录路径（未持久化时为空）——本地探测所得，
+	// 不来自 CLI 输出
+	TranscriptPath string `json:"transcriptPath,omitempty"`
+}
+
+// SessionOutcome 是对外（cmd/assistant、statestore）暴露的归集结果：字段名与
+// JSON tag 已定型，因此保留独立类型与显式转换（sessionOutcomeOf），不直接把
+// claude.Outcome 外泄——CLI 侧字段增删不该自动改变对外契约。
 type SessionOutcome struct {
 	// Subtype 是 success 或 error_max_turns / error_during_execution 等
 	Subtype    string  `json:"subtype"`
@@ -70,11 +82,9 @@ type PromptContext struct {
 // MaxTurns 是 runaway 会话的回合上限。
 const MaxTurns = 300
 
-// killGrace 是超时 SIGTERM 后的优雅退出窗口，超此改 SIGKILL。
-const killGrace = 5 * time.Second
-
-// stderrTailChars 是失败诊断保留的 stderr 尾部长度。
-const stderrTailChars = 2_000
+// 超时两段式终止（SIGTERM → 宽限期后 SIGKILL）、stderr 尾部长度与容器按名兜底
+// 都在 claude 包（claude.KillGrace / claude.StderrTailChars）：执行点只有一个，
+// 超时与诊断行为不该有两处定义。
 
 var whitespaceRun = regexp.MustCompile(`\s+`)
 
@@ -122,216 +132,18 @@ func BuildPrompt(kind string, number int64, ctx PromptContext) string {
 		"结论按附加提示词里的标签规则落标签并评论。", number, subject)
 }
 
-// NewSessionOutcome 返回按失败回退的初始归集。
-func NewSessionOutcome() SessionOutcome {
-	return SessionOutcome{
-		Subtype: "error_during_execution",
-		IsError: true,
-		Errors:  []string{},
-	}
+// newSessionOutcome 返回按失败回退的初始归集：会话还没跑出结论之前，任何提前
+// 退出（配置生成失败、spawn 失败）都必须归到「执行期错误」而不是留空 subtype
+// ——留空会被上层当成「没有结论」而丢失失败归因。
+func newSessionOutcome() sessionOutcome {
+	outcome := claude.NewOutcome()
+	outcome.Subtype = "error_during_execution"
+	outcome.IsError = true
+	return sessionOutcome{Outcome: outcome}
 }
 
-// streamEvent 是 stream-json 单条消息的松弛视图：未知字段忽略，缺省字段由
-// 消费端回退。指针字段用于区分「未出现」与「零值」。
-type streamEvent struct {
-	Type              *string           `json:"type"`
-	Subtype           *string           `json:"subtype"`
-	SessionID         *string           `json:"session_id"`
-	Model             *string           `json:"model"`
-	IsError           *bool             `json:"is_error"`
-	NumTurns          *int              `json:"num_turns"`
-	TotalCostUSD      *float64          `json:"total_cost_usd"`
-	DurationMS        *int64            `json:"duration_ms"`
-	Result            *string           `json:"result"`
-	Errors            []string          `json:"errors"`
-	PermissionDenials []json.RawMessage `json:"permission_denials"`
-	Message           *struct {
-		Content []streamContentBlock `json:"content"`
-	} `json:"message"`
-	// thinking_tokens 帧载荷：EstimatedTokens 是本段思考的累计估计词元，
-	// EstimatedTokensDelta 是相对上一帧的增量（二选一出现；词元数是 CLI 的
-	// 估计值，非计费精确值）。
-	EstimatedTokens      *int64 `json:"estimated_tokens"`
-	EstimatedTokensDelta *int64 `json:"estimated_tokens_delta"`
-}
-
-// streamContentBlock 是 message.content 里的一个块：assistant 消息（text /
-// tool_use）与 user 消息里的 tool_result 共用此视图。
-type streamContentBlock struct {
-	Type  string          `json:"type"`
-	Text  string          `json:"text"`
-	Name  string          `json:"name"`
-	ID    string          `json:"id"`
-	Input json.RawMessage `json:"input"`
-	// tool_result 块
-	ToolUseID string          `json:"tool_use_id"`
-	Content   json.RawMessage `json:"content"`
-	IsError   *bool           `json:"is_error"`
-}
-
-// describeToolInput 提炼工具调用入参里最有判断价值的一段（路径/编号/命令/
-// 标题等），让日志读者不打开原始记录也能感知「这一步在干什么」。只取摘要，
-// 长值截断，密钥类字段打码。
-func describeToolInput(name string, raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
-	}
-	var input map[string]any
-	if err := json.Unmarshal(raw, &input); err != nil {
-		return ""
-	}
-	// 按工具常见的关键字段优先取；取不到就汇总前两个键
-	keys := []string{"command", "file_path", "path", "pattern", "url", "query", "description",
-		"repository", "repo", "owner", "number", "index", "title", "body", "state", "name", "prompt"}
-	var parts []string
-	for _, key := range keys {
-		value, ok := input[key]
-		if !ok {
-			continue
-		}
-		text := strings.TrimSpace(fmt.Sprintf("%v", value))
-		if text == "" {
-			continue
-		}
-		text = strings.ReplaceAll(text, "\n", " ")
-		if runes := []rune(text); len(runes) > 120 {
-			text = string(runes[:120]) + "…"
-		}
-		switch key {
-		case "body", "prompt":
-			// 长文本只报长度语义，不刷屏
-			parts = append(parts, fmt.Sprintf("%s(%d 字)", key, len([]rune(text))))
-		default:
-			parts = append(parts, text)
-		}
-		if len(parts) >= 3 {
-			break
-		}
-	}
-	if len(parts) == 0 {
-		return ""
-	}
-	return strings.Join(parts, " · ")
-}
-
-// describeToolResult 折叠 tool_result：错误要显出来，长输出只报规模。
-func describeToolResult(block *streamContentBlock) string {
-	if block.IsError != nil && *block.IsError {
-		text := strings.TrimSpace(block.Text)
-		if text == "" && len(block.Content) > 0 {
-			text = strings.TrimSpace(string(block.Content))
-		}
-		text = strings.ReplaceAll(text, "\n", " ")
-		if runes := []rune(text); len(runes) > 160 {
-			text = string(runes[:160]) + "…"
-		}
-		return "✗ " + text
-	}
-	if len(block.Content) > 0 {
-		return fmt.Sprintf("（返回 %d 字）", len(block.Content))
-	}
-	if block.Text != "" {
-		return fmt.Sprintf("（返回 %d 字）", len([]rune(block.Text)))
-	}
-	return "（完成）"
-}
-
-// FeedStreamLine 折叠一条 stream-json 输出行，返回它是否为 result 消息。
-// 非 JSON / 非对象行静默忽略——CLI 往 stdout 混入杂音时不至于中断整个会话归档。
-func FeedStreamLine(outcome *SessionOutcome, line string, onProgress func(string)) bool {
-	trimmed := strings.TrimSpace(line)
-	if trimmed == "" {
-		return false
-	}
-	var event streamEvent
-	if err := json.Unmarshal([]byte(trimmed), &event); err != nil {
-		return false
-	}
-	return feedStreamEvent(outcome, &event, onProgress)
-}
-
-func feedStreamEvent(outcome *SessionOutcome, event *streamEvent, onProgress func(string)) bool {
-	if event.Type != nil && *event.Type == "system" && event.Subtype != nil && *event.Subtype == "init" {
-		if event.SessionID != nil {
-			outcome.SessionID = *event.SessionID
-		}
-		if onProgress != nil {
-			onProgress(fmt.Sprintf("session=%s model=%s", valueOr(event.SessionID, "?"), valueOr(event.Model, "?")))
-		}
-		return false
-	}
-	if event.Type != nil && *event.Type == "assistant" {
-		outcome.NumTurns++
-		if event.Message != nil {
-			for _, block := range event.Message.Content {
-				switch {
-				case block.Type == "text" && strings.TrimSpace(block.Text) != "":
-					if onProgress != nil {
-						onProgress(strings.TrimSpace(block.Text))
-					}
-				case block.Type == "tool_use" && block.Name != "":
-					if onProgress != nil {
-						// 工具调用带出入参摘要：读者能判断「当前步在干什么」
-						if detail := describeToolInput(block.Name, block.Input); detail != "" {
-							onProgress(fmt.Sprintf("🔧 %s: %s", block.Name, detail))
-						} else {
-							onProgress("🔧 " + block.Name)
-						}
-					}
-				}
-			}
-		}
-		return false
-	}
-	// user 事件承载 tool_result：把每个工具的回执折成一行（错误显式标红），
-	// 会话时间线在日志里完整可读
-	if event.Type != nil && *event.Type == "user" && event.Message != nil && onProgress != nil {
-		for _, block := range event.Message.Content {
-			if block.Type == "tool_result" {
-				onProgress("  ↳ " + describeToolResult(&block))
-			}
-		}
-		return false
-	}
-	if event.Type != nil && *event.Type == "result" {
-		if event.Subtype != nil {
-			outcome.Subtype = *event.Subtype
-		}
-		if event.IsError != nil {
-			outcome.IsError = *event.IsError
-		} else {
-			outcome.IsError = true
-		}
-		if event.NumTurns != nil {
-			outcome.NumTurns = *event.NumTurns
-		}
-		outcome.CostUSD = 0
-		if event.TotalCostUSD != nil {
-			outcome.CostUSD = *event.TotalCostUSD
-		}
-		outcome.DurationMS = 0
-		if event.DurationMS != nil {
-			outcome.DurationMS = *event.DurationMS
-		}
-		if event.SessionID != nil {
-			outcome.SessionID = *event.SessionID
-		}
-		outcome.Errors = append(outcome.Errors, event.Errors...)
-		outcome.PermissionDenials = len(event.PermissionDenials)
-		if !outcome.IsError && event.Result != nil {
-			outcome.Result = *event.Result
-		}
-		return true
-	}
-	return false
-}
-
-func valueOr(value *string, fallback string) string {
-	if value != nil {
-		return *value
-	}
-	return fallback
-}
+// stream-json 的模型与解析（喂行、折叠归集、进度播报）都在 internal/claude：
+// 本包与 daemon 共用一份，CLI 改字段名只需改一处。
 
 // SessionOptions 是一次会话的输入。
 type SessionOptions struct {
@@ -406,91 +218,63 @@ func ReviewProtocolPrompt(projectDir string) string {
 	return strings.Join(sections, "\n\n")
 }
 
-// sessionCommand 组装会话命令：缺省直接跑 claude；Config.DockerImage 非空时
-// 跑在容器里——worktree 与 MCP 配置按相同绝对路径挂载（容器内外路径一致，
-// claude 的路径参数无需改写），认证环境变量按白名单透传（-e KEY 继承宿主值）。
-// 返回的 container 名用于超时终止（SIGTERM docker 客户端不会停容器）。
-func sessionCommand(options SessionOptions) (bin string, args []string, container string) {
+// sessionContainer 组装容器形态的运行参数：worktree、会话输入文件与文本记录
+// 目录按相同绝对路径挂载（容器内外路径一致，claude 的路径参数无需改写），认证
+// 环境变量按白名单透传（`-e KEY` 继承宿主值）。返回 nil 表示直接跑宿主 claude。
+//
+// 容器名带进程号与纳秒时间戳：同一宿主可能并行多个待办，名字必须唯一（超时兜底
+// 按名 kill 容器，重名会误杀别的会话）。
+func sessionContainer(options SessionOptions) *claude.Container {
 	config := options.Config
-	claudeArgs := []string{
-		"-p",
-		options.Prompt,
-		"--permission-mode",
-		"auto",
-		"--autocompact",
-		"auto",
-		"--output-format",
-		"stream-json",
-		"--verbose",
-		"--strict-mcp-config",
-		"--mcp-config",
-		options.MCPConfigPath,
-		"--setting-sources",
-		claudecfg.SettingSources,
-		"--max-turns",
-		strconv.Itoa(MaxTurns),
-	}
-	// 会话记录持久化：稳定的 ID（同一待办重试续接）+ 自定义标题
-	if options.SessionID != "" {
-		if options.SessionResume {
-			claudeArgs = append(claudeArgs, "--resume", options.SessionID)
-		} else {
-			claudeArgs = append(claudeArgs, "--session-id", options.SessionID)
-		}
-	}
-	if options.Title != "" {
-		claudeArgs = append(claudeArgs, "--name", options.Title)
-	}
-	if options.SettingsPath != "" {
-		claudeArgs = append(claudeArgs, "--settings", options.SettingsPath)
-	}
-	if options.AppendSystemPrompt != "" {
-		claudeArgs = append(claudeArgs, "--append-system-prompt", options.AppendSystemPrompt)
-	}
-	if config.Model != "" {
-		claudeArgs = append(claudeArgs, "--model", config.Model)
-	}
 	if config.DockerImage == "" {
-		return config.ClaudeBin, claudeArgs, ""
+		return nil
 	}
-	container = fmt.Sprintf("assistant-review-%d-%d", os.Getpid(), time.Now().UnixNano())
-	args = []string{
-		"run", "--rm", "-i",
-		"--name", container,
-		"-v", options.Cwd + ":" + options.Cwd,
-		"-w", options.Cwd,
+	return &claude.Container{
+		Name:  fmt.Sprintf("assistant-review-%d-%d", os.Getpid(), time.Now().UnixNano()),
+		Cwd:   options.Cwd,
+		Image: config.DockerImage,
+		// assistant 二进制：会话里的 gitea MCP 由它启动（claudecfg.AssistantCommand），
+		// 按同一绝对路径只读挂进去，评审镜像不必自带 assistant
+		AssistantBin: claudecfg.AssistantCommand(),
+		// 文本记录固定目录名靠进程环境传递，容器内显式注入并挂载（挂载点见
+		// sessionMountDirs 的 projects 目录）
+		ConfigDir:      config.SessionDir,
+		ProjectDirName: config.SessionProject,
+		Network:        config.DockerNetwork,
+		// 会话输入文件（MCP 配置、独立 settings）与文本记录目录
+		MountDirs: sessionMountDirs(options),
+		// Gitea 身份与配置来源由宿主显式钉定：docker 从宿主环境继承值（见
+		// sessionCredentialEnv），容器内的 MCP 才能拿到与 daemon 相同的评审身份。
+		PassthroughEnv: append(dockerPassthroughEnv(), sessionCredentialKeys(config)...),
 	}
-	// 会话输入文件（MCP 配置、独立 settings）与文本记录目录按相同绝对路径挂载
-	for _, dir := range sessionMountDirs(options) {
-		args = append(args, "-v", dir+":"+dir)
+}
+
+// sessionArgsOptions 组装传给 claude 的参数面（宿主与容器形态共用）：评审会话的
+// 全部「非默认取舍」——权限模式、autocompact、strict-mcp-config、setting-sources、
+// max-turns 与 session-id/--resume——都只在这里出现一次。
+func sessionArgsOptions(options SessionOptions) claude.ArgsOptions {
+	config := options.Config
+	args := claude.ArgsOptions{
+		Prompt:             options.Prompt,
+		SettingsPath:       options.SettingsPath,
+		MCPConfigPath:      options.MCPConfigPath,
+		SettingSources:     claudecfg.SettingSources,
+		AppendSystemPrompt: options.AppendSystemPrompt,
+		Name:               options.Title,
+		Model:              config.Model,
+		PermissionMode:     "auto",
+		// 会话记录持久化：稳定的 ID（同一待办重试续接）+ 自定义标题
+		Session: claude.Session{ID: options.SessionID, Resume: options.SessionResume},
+		// runaway 会话兜底（超时之外的第二道闸）
+		MaxTurns:    MaxTurns,
+		Autocompact: "auto",
+		StrictMCP:   true,
+		Verbose:     true,
 	}
-	// assistant 二进制：会话里的 gitea MCP 由它启动（claudecfg.AssistantCommand），
-	// 按同一绝对路径只读挂进去，评审镜像不必自带 assistant
-	if assistant := claudecfg.AssistantCommand(); filepath.IsAbs(assistant) {
-		args = append(args, "-v", assistant+":"+assistant+":ro")
+	if container := sessionContainer(options); container != nil {
+		args.Container = container
 	}
-	// 文本记录固定目录名靠进程环境传递，容器内显式注入并挂载（挂载点见
-	// sessionMountDirs 的 projects 目录）
-	if config.SessionDir != "" {
-		args = append(args, "-e", "CLAUDE_CONFIG_DIR="+config.SessionDir)
-	}
-	if config.SessionProject != "" {
-		args = append(args, "-e", "CLAUDE_CODE_PROJECT_DIR_NAME="+config.SessionProject)
-	}
-	if config.DockerNetwork != "" {
-		args = append(args, "--network", config.DockerNetwork)
-	}
-	for _, key := range dockerPassthroughEnv() {
-		args = append(args, "-e", key)
-	}
-	// Gitea 身份与配置来源由宿主显式钉定：docker 从宿主环境继承值（见
-	// sessionCredentialEnv），容器内的 MCP 才能拿到与 daemon 相同的评审身份。
-	for _, key := range sessionCredentialKeys(config) {
-		args = append(args, "-e", key)
-	}
-	args = append(args, config.DockerImage, config.ClaudeBin)
-	args = append(args, claudeArgs...)
-	return "docker", args, container
+	return args
 }
 
 // sessionCredentialEnv 返回钉定评审会话 Gitea 身份与配置来源的环境变量：
@@ -557,11 +341,15 @@ func dockerPassthroughEnv() []string {
 	return keys
 }
 
-// RunSession 驱动 claude 子进程并归集 stream-json 结果。
+// RunSession 驱动一次评审/分诊会话并归集 stream-json 结果。
+//
+// 分成两半：组装（review.md → 附加提示词、文本记录探测、settings/MCP 配置落盘、
+// env/argv/Spec）是纯逻辑，可在单测里逐项断言；执行只经过 claude.Runner 这一个
+// 执行点（缺省 exec 起真实进程，测试注入假实现喂预置的 stream-json 行）。
 func RunSession(options SessionOptions) SessionOutcome {
 	config := options.Config
 	startedAt := time.Now()
-	outcome := NewSessionOutcome()
+	outcome := newSessionOutcome()
 
 	// 会话上下文：assistant 内置的评审/分诊协议 + 项目自有约定（.assistant/review.md）
 	if options.AppendSystemPrompt == "" {
@@ -589,7 +377,7 @@ func RunSession(options SessionOptions) SessionOutcome {
 	configDir, cleanup, err := createSessionConfigDir()
 	if err != nil {
 		outcome.Errors = append(outcome.Errors, err.Error())
-		return outcome
+		return sessionOutcomeOf(outcome)
 	}
 	defer cleanup()
 	// 会话配置根由 assistant 托管（claude 的全局配置与会话状态都写在这里，
@@ -597,19 +385,19 @@ func RunSession(options SessionOptions) SessionOutcome {
 	if config.SessionDir != "" {
 		if err := os.MkdirAll(config.SessionDir, 0o755); err != nil {
 			outcome.Errors = append(outcome.Errors, fmt.Sprintf("创建会话配置根 %s: %v", config.SessionDir, err))
-			return outcome
+			return sessionOutcomeOf(outcome)
 		}
 	}
 	// 供应商代码级特化（如 opencode 的会话请求头）：一次会话一个 id
 	overrides, err := provider.Apply(config.ProviderName, "review", "", config.Provider)
 	if err != nil {
 		outcome.Errors = append(outcome.Errors, err.Error())
-		return outcome
+		return sessionOutcomeOf(outcome)
 	}
 	settingsPath, err := writeClaudeSessionSettings(configDir, overrides)
 	if err != nil {
 		outcome.Errors = append(outcome.Errors, err.Error())
-		return outcome
+		return sessionOutcomeOf(outcome)
 	}
 	options.SettingsPath = settingsPath
 	// 会话 MCP 配置：assistant 指定的 gitea server + 仓库 .mcp.json 的其它 server
@@ -617,13 +405,14 @@ func RunSession(options SessionOptions) SessionOutcome {
 	mergedMCPPath, err := writeSessionMCPConfig(configDir, options.MCPConfigPath, overrides)
 	if err != nil {
 		outcome.Errors = append(outcome.Errors, err.Error())
-		return outcome
+		return sessionOutcomeOf(outcome)
 	}
 	options.MCPConfigPath = mergedMCPPath
 
-	bin, args, container := sessionCommand(options)
+	spec := runSessionSpec(options)
 	if config.Debug {
-		debugProgress(options.OnProgress, "会话命令："+truncateRunes(strings.Join(append([]string{bin}, args...), " "), 800))
+		debugProgress(options.OnProgress, "会话命令："+truncateRunes(
+			strings.Join(append([]string{spec.Bin}, spec.Args...), " "), 800))
 		debugProgress(options.OnProgress, "文本记录："+outcome.TranscriptPath)
 		debugProgress(options.OnProgress, "会话配置：")
 		for _, line := range claudecfg.EnvLines(config.Provider.Env) {
@@ -640,80 +429,25 @@ func RunSession(options SessionOptions) SessionOutcome {
 			debugProgress(options.OnProgress, "    "+line)
 		}
 	}
-	command := exec.Command(bin, args...)
-	command.Dir = options.Cwd
-	// 文本记录的固定项目目录名必须在进程环境里（settings.env 无效）；同时把
-	// Gitea 身份与配置来源显式钉定给会话（见 sessionCredentialEnv）
-	env := claudecfg.SessionEnv(config.SessionDir, config.SessionProject)
-	env = append(env, sessionCredentialEnv(config)...)
-	if len(env) > 0 {
-		command.Env = append(os.Environ(), env...)
-	}
-	stream := &streamWriter{outcome: &outcome, onProgress: options.OnProgress, debug: config.Debug,
-		thinking: thinkingTracker{onProgress: options.OnProgress, debug: config.Debug}}
+
+	stream := newSessionStream(&outcome, options.OnProgress, config.Debug)
+	defer stream.close()
 	// 会话记录归档（run.yaml sessions-dir + 命名模板）：原始 stream-json 每行
 	// 落盘，外部工具（sqlite3 cli/编辑器）无需经 daemon 即可内省完整会话
 	if archiveDir := strings.TrimSpace(config.SessionArchiveDir); archiveDir != "" {
-		archivePath := filepath.Join(archiveDir, outcome.SessionID+".jsonl")
-		if err := os.MkdirAll(archiveDir, 0o755); err == nil {
-			if file, err := os.OpenFile(archivePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
-				stream.archiveFile = file
-				defer file.Close()
-				outcome.ArchivePath = archivePath
-			}
-		}
-	}
-	stderr := &tailWriter{}
-	command.Stdout = stream
-	command.Stderr = stderr
-
-	if err := command.Start(); err != nil {
-		// spawn 失败：claudeBin/docker 不存在或不可执行
-		outcome.Errors = append(outcome.Errors, err.Error())
-		return outcome
+		outcome.ArchivePath = stream.archiveTo(archiveDir)
 	}
 
-	var timedOut atomic.Bool
-	timer := time.AfterFunc(config.SessionTimeout, func() {
-		timedOut.Store(true)
-		// docker 客户端被终止不会停掉容器，按名 kill 兜底
-		if container != "" {
-			_ = exec.Command("docker", "kill", container).Run()
-		}
-		_ = terminateProcess(command.Process)
-		time.AfterFunc(killGrace, func() { _ = command.Process.Kill() })
-	})
-	waitErr := command.Wait()
-	timer.Stop()
-	// Wait 已等待 stdio 拷贝完成，冲刷无换行结尾的残余行
+	// 超时终止（SIGTERM → 宽限期后 SIGKILL）、容器按名兜底、spawn 失败与退出码
+	// 归因都在 Runner 里；这里只管「拿到结论没有」。
+	runErr := sessionRunner().Run(context.Background(), spec, stream.consume)
+
+	// Runner 按行交付，flush 只兜底无换行结尾的残余行
 	stream.flush()
 	// 残留的思考段（流以 thinking 帧结尾时）冲刷 + 全会话合计
 	stream.thinking.finish()
-
-	switch {
-	case waitErr != nil && command.ProcessState == nil:
-		outcome.Errors = append(outcome.Errors, waitErr.Error())
-	case timedOut.Load():
-		outcome.Errors = append(
-			outcome.Errors,
-			fmt.Sprintf("会话超时（>%dms），已 SIGTERM 终止", config.SessionTimeout.Milliseconds()),
-		)
-	default:
-		if exitCode := command.ProcessState.ExitCode(); exitCode != 0 {
-			how := ""
-			if exitCode > 0 {
-				how = fmt.Sprintf("退出码 %d", exitCode)
-			} else if signaled, name := processSignaled(command.ProcessState); signaled {
-				how = fmt.Sprintf("被信号 %s 终止", name)
-			} else {
-				how = "异常终止"
-			}
-			suffix := ""
-			if tail := strings.TrimSpace(stderr.String()); tail != "" {
-				suffix = "：" + tail
-			}
-			outcome.Errors = append(outcome.Errors, "claude "+how+suffix)
-		}
+	if runErr != nil {
+		outcome.Errors = append(outcome.Errors, runErr.Error())
 	}
 	if !stream.sawResult {
 		outcome.Errors = append(outcome.Errors, "stream 结束但未收到 result 消息")
@@ -724,63 +458,138 @@ func RunSession(options SessionOptions) SessionOutcome {
 	if config.Debug {
 		debugProgress(options.OnProgress, fmt.Sprintf("会话结束：subtype=%s is_error=%t turns=%d cost=$%.4f duration=%dms",
 			outcome.Subtype, outcome.IsError, outcome.NumTurns, outcome.CostUSD, outcome.DurationMS))
-		if tail := strings.TrimSpace(stderr.String()); tail != "" {
-			debugProgress(options.OnProgress, "stderr 尾部："+truncateRunes(tail, 600))
-		}
 	}
 	if outcome.DurationMS == 0 {
 		outcome.DurationMS = time.Since(startedAt).Milliseconds()
 	}
-	return outcome
+	return sessionOutcomeOf(outcome)
 }
 
-// streamWriter 按行折叠 stream-json 输出。
-type streamWriter struct {
-	outcome    *SessionOutcome
+// sessionOutcomeOf 把内部归集折进对外类型：TranscriptPath 是本包本地探测所得
+// （claude 包不知道文本记录落在哪），其余字段一一对应。
+func sessionOutcomeOf(outcome sessionOutcome) SessionOutcome {
+	return SessionOutcome{
+		Subtype:           outcome.Subtype,
+		IsError:           outcome.IsError,
+		NumTurns:          outcome.NumTurns,
+		CostUSD:           outcome.CostUSD,
+		DurationMS:        outcome.DurationMS,
+		SessionID:         outcome.SessionID,
+		TranscriptPath:    outcome.TranscriptPath,
+		ArchivePath:       outcome.ArchivePath,
+		Resumed:           outcome.Resumed,
+		Result:            outcome.Result,
+		Errors:            outcome.Errors,
+		PermissionDenials: outcome.PermissionDenials,
+	}
+}
+
+// SessionRunner 是可替换的执行点：生产用 claude.NewExecRunner()（真实子进程），
+// 测试注入假实现喂预置的 stream-json 行或注入失败。做成包级变量而不是
+// RunSession 的参数，是为了保持后者对 cmd/assistant 与调度引擎的既有签名。
+var (
+	SessionRunner   claude.Runner = claude.NewExecRunner()
+	sessionRunnerMu sync.RWMutex
+)
+
+// sessionRunner 取当前执行点（并发读需要加锁：测试会在跑会话时替换它）。
+func sessionRunner() claude.Runner {
+	sessionRunnerMu.RLock()
+	defer sessionRunnerMu.RUnlock()
+	return SessionRunner
+}
+
+// setSessionRunner 替换执行点并返回还原函数（仅测试使用）。
+func setSessionRunner(runner claude.Runner) func() {
+	sessionRunnerMu.Lock()
+	previous := SessionRunner
+	SessionRunner = runner
+	sessionRunnerMu.Unlock()
+	return func() {
+		sessionRunnerMu.Lock()
+		SessionRunner = previous
+		sessionRunnerMu.Unlock()
+	}
+}
+
+// runSessionSpec 把参数面折成一次 CLI 调用的输入（纯函数：不碰进程与文件系统）。
+func runSessionSpec(options SessionOptions) claude.Spec {
+	config := options.Config
+	// 文本记录的固定项目目录名必须在进程环境里（settings.env 无效）；同时把
+	// Gitea 身份与配置来源显式钉定给会话（见 sessionCredentialEnv）
+	env := claudecfg.SessionEnv(config.SessionDir, config.SessionProject)
+	env = append(env, sessionCredentialEnv(config)...)
+	return claude.BuildSpec(sessionArgsOptions(options), config.ClaudeBin, options.Cwd, env, config.SessionTimeout)
+}
+
+// sessionStream 消费 Runner 交付的 stream-json 行：归档原始行、按需报事件时间线、
+// 折叠进归集结果。它对应此前直接挂在子进程 stdout 上的 streamWriter——改为 Runner
+// 逐行交付后，切行与「无换行结尾的末行」都由 claude 包负责。
+type sessionStream struct {
+	outcome    *sessionOutcome
 	onProgress func(string)
-	buffer     []byte
-	sawResult  bool
+	// buffer 只作兜底：Runner 正常按行交付时它始终为空
+	buffer    []byte
+	sawResult bool
 	// debug 为真时把每行原始 stream 事件也交给 onProgress（排查「会话在干什么」）
 	debug bool
-	// thinking 聚合 system/thinking_tokens 帧（仅 debug 下喂入）
+	// thinking 聚合 system/thinking_tokens 帧
 	thinking thinkingTracker
-	// archiveFile 是会话原始 stream-json 行的归档文件（可选；每行原样追加，
-	// daemon 重启不丢，外部工具可直接内省）
+	// archiveFile 是会话原始 stream-json 行的归档文件（可选；未配置归档时为空）
 	archiveFile *os.File
 }
 
-func (w *streamWriter) Write(chunk []byte) (int, error) {
-	w.buffer = append(w.buffer, chunk...)
-	for {
-		newline := bytes.IndexByte(w.buffer, '\n')
-		if newline < 0 {
-			break
-		}
-		line := string(w.buffer[:newline])
-		w.buffer = w.buffer[newline+1:]
-		w.reportDebug(line)
-		if w.archiveFile != nil {
-			_, _ = w.archiveFile.WriteString(line + "\n")
-		}
-		if FeedStreamLine(w.outcome, line, w.onProgress) {
-			w.sawResult = true
-		}
+func newSessionStream(outcome *sessionOutcome, onProgress func(string), debug bool) *sessionStream {
+	return &sessionStream{
+		outcome:    outcome,
+		onProgress: onProgress,
+		debug:      debug,
+		thinking:   thinkingTracker{onProgress: onProgress, debug: debug},
 	}
-	return len(chunk), nil
 }
 
-func (w *streamWriter) flush() {
-	if len(w.buffer) == 0 {
+// archiveTo 打开归档文件（<dir>/<SessionID>.jsonl）并返回其路径；目录或文件不可用
+// 时返回空串——归档是附加能力，不能因为盘上出问题就中断会话。
+func (s *sessionStream) archiveTo(dir string) string {
+	archivePath := filepath.Join(dir, s.outcome.SessionID+".jsonl")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return ""
+	}
+	file, err := os.OpenFile(archivePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return ""
+	}
+	s.archiveFile = file
+	return archivePath
+}
+
+// close 关闭归档文件（未开归档时不动）。
+func (s *sessionStream) close() {
+	if s.archiveFile != nil {
+		_ = s.archiveFile.Close()
+	}
+}
+
+// consume 消费一行输出：归档原文、按需报事件时间线、折叠进归集结果。
+func (s *sessionStream) consume(line []byte) {
+	text := string(line)
+	s.reportDebug(text)
+	if s.archiveFile != nil {
+		_, _ = s.archiveFile.WriteString(text + "\n")
+	}
+	if claude.Feed(&s.outcome.Outcome, line, claude.ProgressTerse, s.onProgress) {
+		s.sawResult = true
+	}
+}
+
+// flush 折叠尚未交付的残余行（正常路径下缓冲为空）。
+func (s *sessionStream) flush() {
+	if len(s.buffer) == 0 {
 		return
 	}
-	w.reportDebug(string(w.buffer))
-	if w.archiveFile != nil {
-		_, _ = w.archiveFile.WriteString(string(w.buffer) + "\n")
-	}
-	if FeedStreamLine(w.outcome, string(w.buffer), w.onProgress) {
-		w.sawResult = true
-	}
-	w.buffer = nil
+	line := s.buffer
+	s.buffer = nil
+	s.consume(line)
 }
 
 // debugProgress 在 --debug 下把细节写进待办日志（前缀 [debug]，便于过滤）。
@@ -791,39 +600,25 @@ func debugProgress(onProgress func(string), line string) {
 	onProgress("[debug] " + line)
 }
 
-// parseStreamEvent 提炼 stream-json 单行的头部（解析失败 ok=false）。
-func parseStreamEvent(line string) (streamEvent, bool) {
-	var event streamEvent
-	if err := json.Unmarshal([]byte(line), &event); err != nil {
-		return streamEvent{}, false
-	}
-	return event, true
-}
-
 // reportDebug 在 --debug 下报一行事件时间线：只写 type/subtype，不堆原始 JSON
-// （base64 与长 diff 会把日志淹掉；原文在会话文本记录里）。例外是
+// （base64 与长 diff 会把日志淹掉；原文在会话文本记录与归档里）。例外是
 // system/thinking_tokens 帧：思考期间每约 10ms 一帧，逐帧上报会把时间线淹掉，
 // 改由 thinkingTracker 累计、段结束时报一条汇总（含 t/s）。
-func (w *streamWriter) reportDebug(line string) {
-	if !w.debug || w.onProgress == nil {
+func (s *sessionStream) reportDebug(line string) {
+	if !s.debug || s.onProgress == nil {
 		return
 	}
-	trimmed := strings.TrimSpace(line)
-	if trimmed == "" {
+	event, ok := claude.ParseLine([]byte(line))
+	if ok && event.IsSystem("thinking_tokens") {
+		s.thinking.observe(event)
 		return
 	}
-	event, ok := parseStreamEvent(trimmed)
-	if ok && event.Type != nil && event.Subtype != nil &&
-		*event.Type == "system" && *event.Subtype == "thinking_tokens" {
-		w.thinking.observe(event)
-		return
-	}
-	w.thinking.flush()
-	w.onProgress("[debug] 事件 " + describeStreamEvent(event, ok, trimmed))
+	s.thinking.flush()
+	s.onProgress("[debug] 事件 " + describeStreamEvent(event, ok, line))
 }
 
 // describeStreamEvent 由已解析的事件给出类型标注；非 JSON 行只报长度。
-func describeStreamEvent(event streamEvent, ok bool, line string) string {
+func describeStreamEvent(event claude.Event, ok bool, line string) string {
 	if !ok {
 		return fmt.Sprintf("（非 JSON 行，%d 字）", len([]rune(line)))
 	}
@@ -866,7 +661,7 @@ type thinkingTracker struct {
 }
 
 // observe 记录一帧 thinking_tokens：优先取增量，缺失时按累计值差值补算。
-func (t *thinkingTracker) observe(event streamEvent) {
+func (t *thinkingTracker) observe(event claude.Event) {
 	now := time.Now()
 	if t.burstStart.IsZero() {
 		t.burstStart = now
@@ -950,33 +745,4 @@ func truncateRunes(text string, limit int) string {
 		return text
 	}
 	return string(runes[:limit]) + "…"
-}
-
-// tailWriter 只保留 stderr 尾部（失败时留线索）。
-type tailWriter struct {
-	buffer []byte
-}
-
-func (w *tailWriter) Write(chunk []byte) (int, error) {
-	w.buffer = append(w.buffer, chunk...)
-	if len(w.buffer) > stderrTailChars {
-		w.buffer = w.buffer[len(w.buffer)-stderrTailChars:]
-	}
-	return len(chunk), nil
-}
-
-func (w *tailWriter) String() string {
-	return string(w.buffer)
-}
-
-func signalName(signal syscall.Signal) string {
-	switch signal {
-	case syscall.SIGTERM:
-		return "SIGTERM"
-	case syscall.SIGKILL:
-		return "SIGKILL"
-	case syscall.SIGINT:
-		return "SIGINT"
-	}
-	return signal.String()
 }

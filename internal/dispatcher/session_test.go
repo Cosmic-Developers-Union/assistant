@@ -3,9 +3,9 @@ package dispatcher
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
+	"github.com/Cosmic-Developers-Union/assistant/internal/claude"
 	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
 )
 
@@ -52,15 +52,14 @@ func TestRunSessionPersistsTranscript(t *testing.T) {
 	if err := os.WriteFile(mcpConfigPath, []byte(`{"mcpServers":{}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	argsFile := filepath.Join(dir, "args.txt")
-	envFile := filepath.Join(dir, "env.txt")
-	bin := fakeClaude(t, dir, `printf '%s\n' "$@" > '`+argsFile+`'
-printf '%s' "$CLAUDE_CODE_PROJECT_DIR_NAME" > '`+envFile+`'
-printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"session_id":"x","result":"ok"}'`)
+	runner := &fakeRunner{lines: []string{
+		`{"type":"result","subtype":"success","is_error":false,"num_turns":1,"session_id":"x","result":"ok"}`,
+	}}
+	useFakeRunner(t, runner)
 
 	sessionDir := filepath.Join(dir, "claude")
 	config := testConfig(func(config *Config) {
-		config.ClaudeBin = bin
+		config.ClaudeBin = "claude"
 		config.SessionDir = sessionDir
 		config.SessionProject = "assistant-acme-repo"
 	})
@@ -80,19 +79,15 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"num_turns"
 	if outcome.TranscriptPath != wantPath || outcome.Resumed {
 		t.Errorf("TranscriptPath = %q Resumed = %v, want %q/false", outcome.TranscriptPath, outcome.Resumed, wantPath)
 	}
-	raw, err := os.ReadFile(argsFile)
-	if err != nil {
-		t.Fatal(err)
+	spec := runner.lastSpec(t)
+	if !containsString(spec.Args, "--session-id") || containsString(spec.Args, "--resume") {
+		t.Errorf("首次应 --session-id：%v", spec.Args)
 	}
-	args := strings.Split(string(raw), "\n")
-	if !containsString(args, "--session-id") || containsString(args, "--resume") {
-		t.Errorf("首次应 --session-id：%v", args)
+	if !containsString(spec.Args, "--name") || !containsString(spec.Args, "review acme/repo#1") {
+		t.Errorf("缺 --name 标题：%v", spec.Args)
 	}
-	if !containsString(args, "--name") || !containsString(args, "review acme/repo#1") {
-		t.Errorf("缺 --name 标题：%v", args)
-	}
-	if env, err := os.ReadFile(envFile); err != nil || string(env) != "assistant-acme-repo" {
-		t.Errorf("CLAUDE_CODE_PROJECT_DIR_NAME = %q, err = %v", string(env), err)
+	if project, ok := claude.EnvValue(spec.Env, "CLAUDE_CODE_PROJECT_DIR_NAME"); !ok || project != "assistant-acme-repo" {
+		t.Errorf("CLAUDE_CODE_PROJECT_DIR_NAME = %q（ok=%v），want assistant-acme-repo", project, ok)
 	}
 
 	// 预置文本记录后重试同一待办 → --resume 续接，同一路径
@@ -113,12 +108,8 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"num_turns"
 	if outcome.IsError || !outcome.Resumed {
 		t.Fatalf("outcome = %+v, want resumed", outcome)
 	}
-	raw, err = os.ReadFile(argsFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	args = strings.Split(string(raw), "\n")
-	if !containsString(args, "--resume") || containsString(args, "--session-id") {
-		t.Errorf("已有记录应 --resume：%v", args)
+	spec = runner.lastSpec(t)
+	if !containsString(spec.Args, "--resume") || containsString(spec.Args, "--session-id") {
+		t.Errorf("已有记录应 --resume：%v", spec.Args)
 	}
 }

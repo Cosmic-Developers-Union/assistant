@@ -182,17 +182,24 @@ func TestSessionProjectsDirEmptyAndMountDirsSkipsEmpty(t *testing.T) {
 
 func readMCPServers(t *testing.T, path string) map[string]any {
 	t.Helper()
+	servers, _ := readMCPDocument(path)["mcpServers"].(map[string]any)
+	if servers == nil {
+		t.Fatalf("MCP 配置缺少 mcpServers：%s", path)
+	}
+	return servers
+}
+
+// readMCPDocument 读取 MCP 配置文件为通用文档（读不到或坏档返回空文档）：
+// 供「会话临时配置目录在 RunSession 返回前就被清理」的路径在 Runner 回调里
+// 就地取值——那里不能 t.Fatal。
+func readMCPDocument(path string) map[string]any {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatal(err)
+		return map[string]any{}
 	}
 	var document map[string]any
 	if err := json.Unmarshal(data, &document); err != nil {
-		t.Fatal(err)
+		return map[string]any{}
 	}
-	servers, _ := document["mcpServers"].(map[string]any)
-	if servers == nil {
-		t.Fatalf("MCP 配置缺少 mcpServers：%s", data)
-	}
-	return servers
+	return document
 }

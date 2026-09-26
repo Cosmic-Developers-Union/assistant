@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Cosmic-Developers-Union/assistant/internal/claude"
 	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
 	"github.com/Cosmic-Developers-Union/assistant/internal/status"
 )
@@ -793,12 +794,13 @@ func TestWriteSessionMCPConfigReportsWriteFailure(t *testing.T) {
 }
 
 // TestParseStreamEventRejectsNonJSON：非 JSON 行必须有明确的「解析失败」出口，
-// 而不是零值事件——零值会被下游当成一条无类型事件计入时间线。
+// 而不是零值事件——零值会被下游当成一条无类型事件计入时间线。解析本身归
+// claude 包（ParseLine），这里钉的是 dispatch 侧依赖的那条契约。
 func TestParseStreamEventRejectsNonJSON(t *testing.T) {
-	if _, ok := parseStreamEvent("这不是 JSON"); ok {
+	if _, ok := claude.ParseLine([]byte("这不是 JSON")); ok {
 		t.Error("非 JSON 行应返回 ok=false")
 	}
-	if event, ok := parseStreamEvent(`{"type":"assistant","subtype":"text"}`); !ok {
+	if event, ok := claude.ParseLine([]byte(`{"type":"assistant","subtype":"text"}`)); !ok {
 		t.Error("合法 JSON 应返回 ok=true")
 	} else if event.Type == nil || *event.Type != "assistant" {
 		t.Errorf("解析结果 = %+v, want type=assistant", event)
@@ -812,16 +814,16 @@ func TestDescribeStreamEventLabelsEachShape(t *testing.T) {
 	str := func(value string) *string { return &value }
 	cases := []struct {
 		name  string
-		event streamEvent
+		event claude.Event
 		ok    bool
 		line  string
 		want  string
 	}{
-		{"非 JSON 行", streamEvent{}, false, "乱码", "（非 JSON 行，2 字）"},
-		{"type/subtype", streamEvent{Type: str("assistant"), Subtype: str("text")}, true, "{}", "assistant/text"},
-		{"仅 type", streamEvent{Type: str("result")}, true, "{}", "result"},
-		{"仅 subtype", streamEvent{Subtype: str("error")}, true, "{}", "subtype/error"},
-		{"无标注", streamEvent{}, true, "{}", "（未标注类型）"},
+		{"非 JSON 行", claude.Event{}, false, "乱码", "（非 JSON 行，2 字）"},
+		{"type/subtype", claude.Event{Type: str("assistant"), Subtype: str("text")}, true, "{}", "assistant/text"},
+		{"仅 type", claude.Event{Type: str("result")}, true, "{}", "result"},
+		{"仅 subtype", claude.Event{Subtype: str("error")}, true, "{}", "subtype/error"},
+		{"无标注", claude.Event{}, true, "{}", "（未标注类型）"},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -832,9 +834,10 @@ func TestDescribeStreamEventLabelsEachShape(t *testing.T) {
 	}
 }
 
-// TestStreamWriterFlushWritesArchiveTail：无换行结尾的残余行在收尾 flush 时
-// 也要写进 --debug 归档——归档是会话原始流量的唯一副本，丢尾巴等于丢结论。
-func TestStreamWriterFlushWritesArchiveTail(t *testing.T) {
+// TestSessionStreamFlushWritesArchiveTailAndFold：残余行（Runner 未能按行交付时
+// 的兜底路径）在收尾 flush 时也要写进归档并折叠进归集结果——归档是会话原始流量
+// 的唯一副本，丢尾巴等于丢结论。
+func TestSessionStreamFlushWritesArchiveTail(t *testing.T) {
 	dir := t.TempDir()
 	archive := filepath.Join(dir, "archive.jsonl")
 	file, err := os.Create(archive)
@@ -842,16 +845,12 @@ func TestStreamWriterFlushWritesArchiveTail(t *testing.T) {
 		t.Fatal(err)
 	}
 	var debugLines []string
-	writer := &streamWriter{
-		debug:       true,
-		onProgress:  func(line string) { debugLines = append(debugLines, line) },
-		archiveFile: file,
-	}
-	writer.outcome = &SessionOutcome{}
-	if _, err := writer.Write([]byte(`{"type":"assistant","subtype":"text"}`)); err != nil {
-		t.Fatal(err)
-	}
-	writer.flush()
+	outcome := newSessionOutcome()
+	outcome.SessionID = "s-tail"
+	stream := newSessionStream(&outcome, func(line string) { debugLines = append(debugLines, line) }, true)
+	stream.archiveFile = file
+	stream.buffer = []byte(`{"type":"assistant","subtype":"text"}`)
+	stream.flush()
 	if err := file.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -866,8 +865,11 @@ func TestStreamWriterFlushWritesArchiveTail(t *testing.T) {
 	if len(debugLines) == 0 || !strings.Contains(strings.Join(debugLines, "\n"), "[debug] 事件 assistant/text") {
 		t.Errorf("flush 应上报事件时间线：%v", debugLines)
 	}
+	if outcome.NumTurns != 1 {
+		t.Errorf("NumTurns = %d, want 1（残余行也要折叠）", outcome.NumTurns)
+	}
 	// 二次 flush 无残余：不得重复写
-	writer.flush()
+	stream.flush()
 	if again, _ := os.ReadFile(archive); string(again) != string(data) {
 		t.Errorf("空缓冲 flush 不应重复写归档：%q", again)
 	}
@@ -900,20 +902,19 @@ func TestThinkingTrackerFlushDisabledStaysSilent(t *testing.T) {
 	}
 }
 
-// TestFeedStreamEventToolUseWithoutDetail：工具调用拿不到出入参摘要时要退化成
-// 「🔧 名称」，不能整行丢掉——读者至少要知道当前步调用了哪个工具。
-func TestFeedStreamEventToolUseWithoutDetail(t *testing.T) {
-	event := streamEvent{
+// TestFeedEventToolUseWithoutDetail：工具调用拿不到出入参摘要时要退化成
+// 「🔧 名称」，不能整行丢掉——读者至少要知道当前步调用了哪个工具。折叠与摘要
+// 规则都归 claude 包（FeedEvent），这里钉的是 dispatch 依赖的那些出口。
+func TestFeedEventToolUseWithoutDetail(t *testing.T) {
+	event := claude.Event{
 		Type: ptr("assistant"),
-		Message: &struct {
-			Content []streamContentBlock `json:"content"`
-		}{Content: []streamContentBlock{
+		Message: &claude.Message{Content: []claude.ContentBlock{
 			{Type: "tool_use", Name: "Read", Input: json.RawMessage(`"不是对象"`)},
 		}},
 	}
 	var lines []string
-	outcome := &SessionOutcome{}
-	if feedStreamEvent(outcome, &event, func(line string) { lines = append(lines, line) }) {
+	outcome := claude.NewOutcome()
+	if claude.FeedEvent(&outcome, event, claude.ProgressTerse, func(line string) { lines = append(lines, line) }) {
 		t.Error("工具调用不应被当成 result")
 	}
 	if len(lines) != 1 || lines[0] != "🔧 Read" {
@@ -924,19 +925,18 @@ func TestFeedStreamEventToolUseWithoutDetail(t *testing.T) {
 	}
 }
 
-// TestFeedStreamEventToolUseWithDetail：有出入参摘要时走「🔧 名称: 摘要」，
-// 该分支才是常态——详见 describeToolInput 的测试。
-func TestFeedStreamEventToolUseWithDetail(t *testing.T) {
-	event := streamEvent{
+// TestFeedEventToolUseWithDetail：有出入参摘要时走「🔧 名称: 摘要」，
+// 该分支才是常态——详见 claude.DescribeToolInput 的测试。
+func TestFeedEventToolUseWithDetail(t *testing.T) {
+	event := claude.Event{
 		Type: ptr("assistant"),
-		Message: &struct {
-			Content []streamContentBlock `json:"content"`
-		}{Content: []streamContentBlock{
+		Message: &claude.Message{Content: []claude.ContentBlock{
 			{Type: "tool_use", Name: "Bash", Input: json.RawMessage(`{"command":"ls -la"}`)},
 		}},
 	}
 	var lines []string
-	feedStreamEvent(&SessionOutcome{}, &event, func(line string) { lines = append(lines, line) })
+	outcome := claude.NewOutcome()
+	claude.FeedEvent(&outcome, event, claude.ProgressTerse, func(line string) { lines = append(lines, line) })
 	if len(lines) != 1 || !strings.HasPrefix(lines[0], "🔧 Bash: ") {
 		t.Errorf("进度行 = %v, want 带摘要的 🔧 Bash: …", lines)
 	}
@@ -1001,10 +1001,10 @@ func TestReviewProtocolPromptIncludesConventions(t *testing.T) {
 	}
 }
 
-// TestSessionCommandInjectsSessionDirAndProjectName：容器形态下文本记录目录名
-// 靠进程环境传递，必须显式注入并挂载——漏掉会让容器内 claude 写进宿主
-// 默认目录，会话记录散落。
-func TestSessionCommandInjectsSessionDirAndProjectName(t *testing.T) {
+// TestSessionSpecInjectsSessionDirAndProjectName：容器形态下文本记录目录名
+// 靠进程环境传递给 docker（`-e KEY`），漏掉会让容器内 claude 写进容器默认目录，
+// 会话记录散落；宿主形态则必须走 SessionEnv 而不是容器专用注入。
+func TestSessionSpecInjectsSessionDirAndProjectName(t *testing.T) {
 	config := testConfig(func(c *Config) {
 		c.DockerImage = "review:latest"
 		c.SessionDir = "/host/sessions"
@@ -1016,14 +1016,14 @@ func TestSessionCommandInjectsSessionDirAndProjectName(t *testing.T) {
 		Cwd:           "/tmp/wt",
 		MCPConfigPath: "/tmp/wt/.mcp.json",
 	}
-	bin, args, container := sessionCommand(options)
-	if bin != "docker" {
-		t.Errorf("容器形态 bin = %q, want docker", bin)
+	spec := runSessionSpec(options)
+	if spec.Bin != "docker" {
+		t.Errorf("容器形态 bin = %q, want docker", spec.Bin)
 	}
-	if container == "" {
-		t.Error("容器形态应返回容器名（超时终止要用）")
+	if spec.Container == "" {
+		t.Error("容器形态应带容器名（超时终止要用）")
 	}
-	joined := strings.Join(args, " ")
+	joined := strings.Join(spec.Args, " ")
 	for _, want := range []string{
 		"-e CLAUDE_CONFIG_DIR=/host/sessions",
 		"-e CLAUDE_CODE_PROJECT_DIR_NAME=/host/projects",
@@ -1036,61 +1036,31 @@ func TestSessionCommandInjectsSessionDirAndProjectName(t *testing.T) {
 			t.Errorf("容器命令缺少 %q：\n%s", want, joined)
 		}
 	}
-	// 宿主形态：不带 docker，直接跑 claude，且不注入容器专用环境变量
+	// 宿主形态：不带 docker，直接跑 claude，环境变量走 SessionEnv（不是容器 -e）
 	hostConfig := testConfig(func(c *Config) {
 		c.SessionDir = "/host/sessions"
 		c.SessionProject = "/host/projects"
 	})
-	hostBin, hostArgs, hostContainer := sessionCommand(SessionOptions{
+	hostSpec := runSessionSpec(SessionOptions{
 		Config: hostConfig,
 		Prompt: "评审这个 PR",
 		Cwd:    "/tmp/wt",
 	})
-	if hostBin != "claude" || hostContainer != "" {
-		t.Errorf("宿主形态 bin=%q container=%q, want claude / 空", hostBin, hostContainer)
+	if hostSpec.Bin != "claude" || hostSpec.Container != "" {
+		t.Errorf("宿主形态 bin=%q container=%q, want claude / 空", hostSpec.Bin, hostSpec.Container)
 	}
-	if strings.Contains(strings.Join(hostArgs, " "), "CLAUDE_CONFIG_DIR") {
-		t.Errorf("宿主形态不应注入容器环境变量：%v", hostArgs)
+	if strings.Contains(strings.Join(hostSpec.Args, " "), "CLAUDE_CONFIG_DIR") {
+		t.Errorf("宿主形态不应注入容器环境变量：%v", hostSpec.Args)
 	}
-}
-
-// TestProcessSignaledReportsUnsignaledState：退出码非零的「正常退出」不能被
-// 当成信号终止——错误信息里写错原因会把排障引到错误方向。
-func TestProcessSignaledReportsUnsignaledState(t *testing.T) {
-	command := exec.Command("sh", "-c", "exit 3")
-	if err := command.Run(); err == nil {
-		t.Fatal("该命令应返回非零退出码")
+	configDir, ok := claude.EnvValue(hostSpec.Env, "CLAUDE_CONFIG_DIR")
+	if !ok || configDir != "/host/sessions" {
+		t.Errorf("宿主形态应把配置根写进进程环境：%v", hostSpec.Env)
 	}
-	signaled, name := processSignaled(command.ProcessState)
-	if signaled {
-		t.Errorf("普通退出不应判为信号终止：name = %q", name)
-	}
-	if name != "" {
-		t.Errorf("非信号退出不应给出信号名：%q", name)
+	if project, ok := claude.EnvValue(hostSpec.Env, "CLAUDE_CODE_PROJECT_DIR_NAME"); !ok || project != "/host/projects" {
+		t.Errorf("宿主形态应把文本记录目录名写进进程环境：%v", hostSpec.Env)
 	}
 }
 
-// TestProcessSignaledReportsSignalName：被信号终止时要给出具体信号名——「被
-// 信号 SIGKILL 终止」（超时 OOM 还是被谁 kill）与「异常终止」是两条完全不同的
-// 排障线索。
-func TestProcessSignaledReportsSignalName(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("环境无 sh")
-	}
-	command := exec.Command("sh", "-c", "kill -TERM $$")
-	_ = command.Run()
-	if command.ProcessState == nil {
-		t.Skip("进程状态不可用，跳过")
-	}
-	signaled, name := processSignaled(command.ProcessState)
-	if !signaled {
-		t.Skipf("该平台未把自终止记为信号退出：%v", command.ProcessState)
-	}
-	if name == "" || !strings.HasPrefix(name, "SIG") {
-		t.Errorf("信号名 = %q, want SIG*", name)
-	}
-}
-
-// ptr 是测试里构造 streamEvent 指针字段的助手（生产侧字段全是指针，
+// ptr 是测试里构造 claude.Event 指针字段的助手（生产侧字段全是指针，
 // 便于区分「字段缺失」与「字段为零值」）。
 func ptr[T any](value T) *T { return &value }

@@ -17,13 +17,3 @@ func pidAlive(pid int) bool {
 	_ = windows.CloseHandle(handle)
 	return true
 }
-
-// terminateProcess 优雅终止会话进程：Windows 不支持 SIGTERM，直接 Kill。
-func terminateProcess(process *os.Process) error {
-	return process.Kill()
-}
-
-// processSignaled 返回进程是否被信号终止及信号名；Windows 无信号语义。
-func processSignaled(state *os.ProcessState) (bool, string) {
-	return false, ""
-}

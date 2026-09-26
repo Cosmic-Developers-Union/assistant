@@ -331,3 +331,40 @@ func TestEnvValue(t *testing.T) {
 		t.Errorf("含 = 的值被截断：%q", value)
 	}
 }
+
+// BuildArgs 与旧 dispatcher.sessionCommand 的**标志集**等价（顺序不同，见下）。
+//
+// 迁移到本包时重新组织了 flag 顺序（--verbose 提到前面、--settings 与其同类相邻），
+// 内容一字不差：不多不少。CLI 按名字解析选项、与顺序无关（已用真实 CLI 验证
+// `--output-format json --verbose -p …` 可正常出结果），故不把顺序当契约——但把
+// 「标志集」钉住：漏一个 flag 是静默失效，写错键名更是不会有报错。
+func TestBuildArgsFlagSetMatchesLegacyDispatcher(t *testing.T) {
+	got := BuildArgs(ArgsOptions{
+		Prompt: "review pr #1", PermissionMode: "auto", Autocompact: "auto",
+		Verbose: true, StrictMCP: true, MCPConfigPath: "/tmp/mcp.json",
+		SettingSources: "project", MaxTurns: 300, Session: Session{ID: "s-1"},
+		Name: "assistant-review-1", SettingsPath: "/tmp/settings.json",
+		AppendSystemPrompt: "协议", Model: "sonnet",
+	})
+	// 旧实现的标志集（撇开顺序与取值）
+	wantFlags := []string{
+		"-p", "--permission-mode", "--autocompact", "--output-format", "--verbose",
+		"--strict-mcp-config", "--mcp-config", "--setting-sources", "--max-turns",
+		"--session-id", "--name", "--settings", "--append-system-prompt", "--model",
+	}
+	seen := map[string]bool{}
+	for _, arg := range got {
+		if strings.HasPrefix(arg, "-") {
+			seen[arg] = true
+		}
+	}
+	for _, flag := range wantFlags {
+		if !seen[flag] {
+			t.Errorf("缺少 flag %s（漏一个就是静默失效）：%v", flag, got)
+		}
+	}
+	// 反向：不引入旧实现没有的 flag（--bare/--agents 等只在显式要求时出现）
+	if len(seen) != len(wantFlags) {
+		t.Errorf("flag 数不符：%v", got)
+	}
+}
