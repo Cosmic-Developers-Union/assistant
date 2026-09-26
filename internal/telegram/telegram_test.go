@@ -61,6 +61,10 @@ func newFakeAPI(t *testing.T, token string) *fakeAPI {
 		}
 		_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": batch})
 	})
+	handle("sendChatAction", func(writer http.ResponseWriter, request *http.Request) {
+		record("sendChatAction", request)
+		_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true, "result": true})
+	})
 	handle("sendMessage", func(writer http.ResponseWriter, request *http.Request) {
 		payload := record("sendMessage", request)
 		fake.mu.Lock()
@@ -165,3 +169,46 @@ func TestGetMeAndErrors(t *testing.T) {
 	}
 }
 
+// SendTyping 的协议契约：Bot API 的「正在输入」是 sendChatAction 且 action
+// 必须字面为 typing——写错方法或动作值只会静默不显示，没有任何报错。
+func TestSendTyping(t *testing.T) {
+	fake := newFakeAPI(t, "tok-1")
+	client := newTestClient(fake)
+
+	if err := client.SendTyping(t.Context(), "chat-9"); err != nil {
+		t.Fatalf("SendTyping() error = %v", err)
+	}
+	if calls := fake.callsOf("sendChatAction"); calls != 1 {
+		t.Fatalf("sendChatAction 调用次数 = %d, want 1", calls)
+	}
+	body := fake.bodyOf("sendChatAction", 1)
+	if body["chat_id"] != "chat-9" {
+		t.Errorf("chat_id = %v, want chat-9", body["chat_id"])
+	}
+	if body["action"] != "typing" {
+		t.Errorf("action = %v, want typing", body["action"])
+	}
+	if calls := fake.callsOf("sendMessage"); calls != 0 {
+		t.Errorf("sendMessage 不应被调用（typing 不是发消息）：%d 次", calls)
+	}
+}
+
+// typing 是尽力而为：服务端拒绝（ok=false）必须返回错误而不是静默吞掉，
+// 否则运维看不到「客户端连不上」。
+func TestSendTypingSurfacesServerError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /bottok-1/sendChatAction", func(writer http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(writer).Encode(map[string]any{"ok": false, "description": "chat not found"})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	client := NewClient(Config{BotToken: "tok-1", APIBaseURL: server.URL, HTTPClient: server.Client()})
+
+	err := client.SendTyping(t.Context(), "chat-9")
+	if err == nil {
+		t.Fatal("SendTyping() error = nil, want 服务端拒绝的错误")
+	}
+	if !strings.Contains(err.Error(), "chat not found") {
+		t.Errorf("error = %v, want 含服务端 description", err)
+	}
+}

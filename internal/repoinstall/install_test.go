@@ -3,6 +3,7 @@ package repoinstall
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -472,5 +473,168 @@ func TestClaudeMDLifecycle(t *testing.T) {
 	}
 	if got := readFile(t, path); got != "# 用户说明\n" {
 		t.Errorf("应只摘掉导入行：%q", got)
+	}
+}
+
+// InstallWorkflows 只动 workflow：它是 `assistant install gitea-actions` 的
+// 实现路径，不能顺带重写 AGENTS.md / 技能等其它产物（否则一条只读命令的
+// 语义就变了）。同时要清理旧版独立 automerge workflow 的 marker 文件。
+func TestInstallWorkflowsOnlyTouchesWorkflows(t *testing.T) {
+	options := testOptions(t)
+	// 预置一个用户自有文件与一个旧版 workflow，验证前者不动、后者被清
+	agentPath := filepath.Join(options.Dir, ManagedAgentPath())
+	userContent := "# 手写的协作约定\n"
+	if err := os.WriteFile(agentPath, []byte(userContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	legacy := LegacyWorkflowPaths()[0]
+	legacyPath := filepath.Join(options.Dir, legacy)
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyPath, []byte(Marker+"\n旧版 workflow\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := InstallWorkflows(options); err != nil {
+		t.Fatalf("InstallWorkflows() error = %v", err)
+	}
+
+	for _, relative := range ManagedWorkflowPaths() {
+		content := readFile(t, filepath.Join(options.Dir, relative))
+		if !strings.Contains(content, Marker) {
+			t.Errorf("%s 缺少 marker", relative)
+		}
+	}
+	if got := readFile(t, agentPath); got != userContent {
+		t.Errorf("InstallWorkflows 改动了 AGENTS.md：%q", got)
+	}
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Errorf("旧版 workflow %s 未被清理（err=%v）", legacy, err)
+	}
+	// 幂等：再跑一次不应报错
+	if err := InstallWorkflows(options); err != nil {
+		t.Errorf("第二次 InstallWorkflows() error = %v", err)
+	}
+}
+
+// InstallWorkflows 的入参校验与 Install 同口径：非法的 --tools 值必须被拒
+// （否则会写出一份半成品产物）。
+func TestInstallWorkflowsValidatesOptions(t *testing.T) {
+	options := testOptions(t)
+	options.Tools = []string{"unsupported-tool"}
+	if err := InstallWorkflows(options); err == nil {
+		t.Error("error = nil, want 不支持的 tools 报错")
+	}
+	// dry-run 下不得落盘
+	dryRun := testOptions(t)
+	dryRun.DryRun = true
+	if err := InstallWorkflows(dryRun); err != nil {
+		t.Fatalf("dry-run InstallWorkflows() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dryRun.Dir, ManagedWorkflowPaths()[0])); !os.IsNotExist(err) {
+		t.Error("dry-run 不应写文件")
+	}
+}
+
+// normalize：Dir 补缺省并转绝对路径；空 Tools 补全支持列表；非法工具报错并
+// 列出可选项（错误信息要能直接指导用户改命令行）。
+func TestNormalizeOptions(t *testing.T) {
+	t.Run("补全缺省并转绝对路径", func(t *testing.T) {
+		options := Options{Dir: ".", Log: func(string, ...any) {}}
+		if err := options.normalize(); err != nil {
+			t.Fatalf("normalize() error = %v", err)
+		}
+		if !filepath.IsAbs(options.Dir) {
+			t.Errorf("Dir = %q, want 绝对路径", options.Dir)
+		}
+		if !slices.Equal(options.Tools, SupportedTools()) {
+			t.Errorf("Tools = %v, want 补全为支持列表", options.Tools)
+		}
+	})
+
+	t.Run("空 Dir 落到当前目录", func(t *testing.T) {
+		options := Options{Log: func(string, ...any) {}}
+		if err := options.normalize(); err != nil {
+			t.Fatalf("normalize() error = %v", err)
+		}
+		if !filepath.IsAbs(options.Dir) {
+			t.Errorf("Dir = %q, want 绝对路径", options.Dir)
+		}
+	})
+
+	t.Run("非法工具报错并列出可选项", func(t *testing.T) {
+		options := Options{Dir: t.TempDir(), Tools: []string{"claude", "emacs"}, Log: func(string, ...any) {}}
+		err := options.normalize()
+		if err == nil {
+			t.Fatal("error = nil, want 不支持的 --tools 值")
+		}
+		if !strings.Contains(err.Error(), "emacs") {
+			t.Errorf("error = %v, want 点名非法值", err)
+		}
+		for _, supported := range SupportedTools() {
+			if !strings.Contains(err.Error(), supported) {
+				t.Errorf("error = %v, want 列出可选项 %s", err, supported)
+			}
+		}
+	})
+
+	t.Run("Tools 被复制而非共享", func(t *testing.T) {
+		options := Options{Dir: t.TempDir(), Tools: []string{"claude"}, Log: func(string, ...any) {}}
+		if err := options.normalize(); err != nil {
+			t.Fatal(err)
+		}
+		options.Tools[0] = "mutated"
+		if SupportedTools()[0] == "mutated" {
+			t.Error("normalize 与内置列表共享了底层数组")
+		}
+	})
+}
+
+// write/remove 的 dry-run 分支：dry-run 必须零副作用且能在日志里看到意图。
+func TestWriteAndRemoveDryRun(t *testing.T) {
+	var logs []string
+	options := Options{Dir: t.TempDir(), DryRun: true, Log: func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}}
+	path := filepath.Join(options.Dir, "sub", "file.txt")
+
+	if err := options.write(path, "内容"); err != nil {
+		t.Fatalf("write() error = %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("dry-run 不应落盘")
+	}
+
+	// remove 对不存在的文件在 dry-run 下也不应报错
+	if err := options.remove(filepath.Join(options.Dir, "not-there.txt")); err != nil {
+		t.Fatalf("remove() error = %v, want dry-run 不报错", err)
+	}
+
+	joined := strings.Join(logs, "\n")
+	if !strings.Contains(joined, "dry-run") {
+		t.Errorf("日志未标明 dry-run：%q", joined)
+	}
+	if !strings.Contains(joined, filepath.Join("sub", "file.txt")) {
+		t.Errorf("日志未给出相对路径：%q", joined)
+	}
+}
+
+// remove 对不存在的文件静默成功（幂等卸载），对真实文件则删除。
+func TestRemoveIsIdempotent(t *testing.T) {
+	options := testOptions(t)
+	path := filepath.Join(options.Dir, "gone.txt")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := options.remove(path); err != nil {
+		t.Fatalf("remove() error = %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("文件未被删除")
+	}
+	// 再删一次：不存在不算错误，否则重跑 install/uninstall 会中断
+	if err := options.remove(path); err != nil {
+		t.Errorf("第二次 remove() error = %v, want nil（幂等）", err)
 	}
 }

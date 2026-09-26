@@ -67,6 +67,11 @@ type fakeAPI struct {
 	// review_request 事件）；timelineError 模拟时间线读取失败。
 	requestEvents map[string][]time.Time
 	timelineError error
+	// reviewListError/pullError/labelError 是给编排路径注入读取失败的缝。
+	reviewListError map[string]error
+	pullError       map[string]error
+	labelError      map[string]error
+	addLabelError   map[string]error
 	// selfLogin 是 AuthenticatedUser 返回的身份（会签方），默认 "merge"。
 	selfLogin string
 	// ops 按发生顺序记录 review 提交与合并动作，供时序断言使用。
@@ -105,6 +110,9 @@ func (f *fakeAPI) ListOpenPullRequests(_ context.Context, repository Repository)
 }
 
 func (f *fakeAPI) GetPullRequest(_ context.Context, repository Repository, index int64) (PullRequest, error) {
+	if err := f.pullError[repository.FullName()]; err != nil {
+		return PullRequest{}, err
+	}
 	return f.current[pullRequestKey(repository, index)], nil
 }
 
@@ -154,6 +162,9 @@ func (f *fakeAPI) DisarmAutoMerge(_ context.Context, _ Repository, index int64) 
 }
 
 func (f *fakeAPI) ListPullReviews(_ context.Context, repository Repository, index int64) ([]Review, error) {
+	if err := f.reviewListError[repository.FullName()]; err != nil {
+		return nil, err
+	}
 	return f.reviews[pullRequestKey(repository, index)], nil
 }
 
@@ -193,6 +204,9 @@ func (f *fakeAPI) ListBranchProtections(_ context.Context, repository Repository
 }
 
 func (f *fakeAPI) ListRepositoryLabels(_ context.Context, repository Repository) ([]Label, error) {
+	if err := f.labelError[repository.FullName()]; err != nil {
+		return nil, err
+	}
 	return f.labels[repository.FullName()], nil
 }
 
@@ -216,7 +230,10 @@ func (f *fakeAPI) CreateLabel(
 	return Label{ID: f.nextLabelID, Name: definition.Name, Exclusive: definition.Exclusive}, nil
 }
 
-func (f *fakeAPI) AddLabel(_ context.Context, _ Repository, index, labelID int64) error {
+func (f *fakeAPI) AddLabel(_ context.Context, repository Repository, index, labelID int64) error {
+	if err := f.addLabelError[repository.FullName()]; err != nil {
+		return err
+	}
 	f.addedLabels = append(f.addedLabels, labelChange{Item: index, Label: labelID})
 	return nil
 }
@@ -1543,23 +1560,27 @@ func TestManagerReportsProgress(t *testing.T) {
 
 func newFakeAPI(repository Repository, labels []Label) *fakeAPI {
 	return &fakeAPI{
-		repositories:   []Repository{repository},
-		triageIssues:   map[string][]Issue{},
-		reviewPulls:    map[string][]Issue{},
-		openIssues:     map[string][]Issue{},
-		pullRequests:   map[string][]PullRequest{},
-		current:        map[string]PullRequest{},
-		reviews:        map[string][]Review{},
-		comments:       map[string][]Comment{},
-		labels:         map[string][]Label{repository.FullName(): labels},
-		protections:    map[string][]BranchProtection{},
-		statuses:       map[string][]CheckStatus{},
-		armedPulls:     map[int64]bool{},
-		issueListError: map[string]error{},
-		pullListError:  map[string]error{},
-		protectError:   map[string]error{},
-		requestEvents:  map[string][]time.Time{},
-		nextLabelID:    100,
+		repositories:    []Repository{repository},
+		triageIssues:    map[string][]Issue{},
+		reviewPulls:     map[string][]Issue{},
+		openIssues:      map[string][]Issue{},
+		pullRequests:    map[string][]PullRequest{},
+		current:         map[string]PullRequest{},
+		reviews:         map[string][]Review{},
+		comments:        map[string][]Comment{},
+		labels:          map[string][]Label{repository.FullName(): labels},
+		protections:     map[string][]BranchProtection{},
+		statuses:        map[string][]CheckStatus{},
+		armedPulls:      map[int64]bool{},
+		issueListError:  map[string]error{},
+		pullListError:   map[string]error{},
+		protectError:    map[string]error{},
+		requestEvents:   map[string][]time.Time{},
+		reviewListError: map[string]error{},
+		pullError:       map[string]error{},
+		labelError:      map[string]error{},
+		addLabelError:   map[string]error{},
+		nextLabelID:     100,
 	}
 }
 
@@ -1832,5 +1853,133 @@ func TestManagerCheckJoinsRepositoryErrors(t *testing.T) {
 		t.Fatal("Check() error = nil, want 汇总错误")
 	} else if !strings.Contains(err.Error(), repository.FullName()) {
 		t.Errorf("error = %v, want 含仓库名", err)
+	}
+}
+
+// reconcileRepository 的错误聚合：标签准备失败即中止（后续步骤没有标签可用），
+// 其余步骤各自记错并继续（一个 PR 失败不应拖住其它 PR）。
+func TestManagerReconcileRepositoryErrorAggregation(t *testing.T) {
+	repository := Repository{Owner: "acme", Name: "video"}
+
+	t.Run("标签读取失败即中止", func(t *testing.T) {
+		api := newFakeAPI(repository, completeLabels())
+		api.labelError[repository.FullName()] = errors.New("标签服务不可用")
+		manager := NewManager(api, WithContentReviewer("ai"))
+		if err := manager.reconcileRepository(t.Context(), repository); err == nil {
+			t.Error("error = nil, want 标签失败中止")
+		}
+	})
+
+	t.Run("PR 列表失败时仍带上 issue 侧的错", func(t *testing.T) {
+		api := newFakeAPI(repository, completeLabels())
+		api.openIssues[repository.FullName()] = []Issue{{Index: 3}}
+		api.addLabelError[repository.FullName()] = errors.New("打标签不可用")
+		api.pullListError[repository.FullName()] = errors.New("PR 列表不可用")
+		manager := NewManager(api, WithContentReviewer("ai"))
+		err := manager.reconcileRepository(t.Context(), repository)
+		if err == nil {
+			t.Fatal("error = nil, want 聚合错误")
+		}
+		if !strings.Contains(err.Error(), "打标签不可用") || !strings.Contains(err.Error(), "PR 列表不可用") {
+			t.Errorf("error = %v, want 同时包含两侧错误", err)
+		}
+	})
+
+	t.Run("单个 PR 失败不影响其余 PR", func(t *testing.T) {
+		api := newFakeAPI(repository, completeLabels())
+		api.pullRequests[repository.FullName()] = []PullRequest{{Index: 1}, {Index: 2}}
+		api.current[pullRequestKey(repository, 1)] = mergeablePullRequest(1, nil)
+		api.current[pullRequestKey(repository, 2)] = mergeablePullRequest(2, nil)
+		api.reviews[pullRequestKey(repository, 1)] = []Review{{
+			User: "ai", State: ReviewStateApproved, CommitID: "head",
+			Submitted: time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC),
+		}}
+		manager := NewManager(api, WithContentReviewer("ai"))
+		if err := manager.reconcileRepository(t.Context(), repository); err != nil {
+			t.Fatalf("reconcileRepository() error = %v", err)
+		}
+		touched := map[int64]bool{}
+		for _, change := range api.addedLabels {
+			touched[change.Item] = true
+		}
+		for _, want := range []int64{1, 2} {
+			if !touched[want] {
+				t.Errorf("PR #%d 未被收敛：addedLabels = %+v", want, api.addedLabels)
+			}
+		}
+	})
+}
+
+// Check 的错误路径：任一仓库检索失败都要带上仓库名并继续其余仓库，最后聚合返回。
+func TestManagerCheckErrorBranches(t *testing.T) {
+	repository := Repository{Owner: "acme", Name: "video"}
+	other := Repository{Owner: "acme", Name: "video2"}
+
+	t.Run("triage 与 review 两侧都失败仍聚合", func(t *testing.T) {
+		api := newFakeAPI(repository, completeLabels())
+		api.repositories = []Repository{repository}
+		api.issueListError[repository.FullName()] = errors.New("triage 不可用")
+		manager := NewManager(api, WithContentReviewer("ai"))
+		report, err := manager.Check(t.Context())
+		if err == nil {
+			t.Fatal("error = nil, want 检索失败")
+		}
+		if !strings.Contains(err.Error(), repository.FullName()) {
+			t.Errorf("error = %v, want 含仓库名", err)
+		}
+		if report.HasWork() {
+			t.Errorf("report = %+v, want 空", report)
+		}
+	})
+
+	t.Run("一个仓库失败其余照常返回", func(t *testing.T) {
+		api := newFakeAPI(repository, completeLabels())
+		api.repositories = []Repository{repository, other}
+		api.issueListError[repository.FullName()] = errors.New("triage 不可用")
+		api.triageIssues[other.FullName()] = []Issue{{Index: 5, Title: "待分诊"}}
+		manager := NewManager(api, WithContentReviewer("ai"))
+		report, err := manager.Check(t.Context())
+		if err == nil {
+			t.Fatal("error = nil, want 至少一个仓库失败")
+		}
+		if len(report.NeedsTriage) != 1 || report.NeedsTriage[0].Repository.FullName() != other.FullName() {
+			t.Errorf("report.NeedsTriage = %+v, want 仅 video2#5", report.NeedsTriage)
+		}
+	})
+}
+
+// WriteReport 的写入失败必须暴露：报告写不出去（管道断开/磁盘满）时不能静默成功。
+func TestWriteReportPropagatesWriteErrors(t *testing.T) {
+	report := Report{
+		NeedsTriage: []IssueSummary{{Repository: Repository{Owner: "acme", Name: "video"}, Index: 1, Title: "t"}},
+		NeedsReview: []PullRequestSummary{{Repository: Repository{Owner: "acme", Name: "video"}, Index: 2, Title: "p"}},
+	}
+	if err := WriteReport(failingWriter{}, report); err == nil {
+		t.Error("error = nil, want 写入失败上抛")
+	}
+}
+
+// requiredContexts：目标分支匹配才取必要检查；无匹配分支时返回空（不误用其它
+// 分支的策略）。
+func TestRequiredContextsBranches(t *testing.T) {
+	protected := BranchProtection{
+		RuleName:          "main",
+		EnableStatusCheck: true,
+		Contexts:          []string{"assistant/check", "ci/build", "assistant/check"},
+	}
+	if got := requiredContexts([]BranchProtection{protected}, "main"); len(got) != 2 {
+		t.Errorf("requiredContexts(main) = %v, want 去重后的 2 项", got)
+	}
+	if got := requiredContexts([]BranchProtection{protected}, "release"); len(got) != 0 {
+		t.Errorf("requiredContexts(release) = %v, want 空", got)
+	}
+	if got := requiredContexts(nil, "main"); len(got) != 0 {
+		t.Errorf("requiredContexts(nil) = %v, want 空", got)
+	}
+	// 通配规则名命中 release/*；未启用状态检查的规则不贡献 context。
+	glob := BranchProtection{RuleName: "release/*", EnableStatusCheck: true, Contexts: []string{"ci/build"}}
+	disabled := BranchProtection{RuleName: "*", Contexts: []string{"ci/nope"}}
+	if got := requiredContexts([]BranchProtection{glob, disabled}, "release/1.0"); !slices.Equal(got, []string{"ci/build"}) {
+		t.Errorf("requiredContexts(release/1.0) = %v, want [ci/build]", got)
 	}
 }

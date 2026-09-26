@@ -3,6 +3,8 @@ package status
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -863,5 +865,137 @@ func TestUseSeparateTokens(t *testing.T) {
 
 	if err := client.UseBranchProtectionToken("bp-token"); err != nil {
 		t.Fatalf("UseBranchProtectionToken() error = %v", err)
+	}
+}
+
+// WriteReport 的写入失败必须返回错误：调用方据此判断输出是否完整。
+// （正常路径与格式已由 check_test.go 的 TestWriteReport 覆盖。）
+func TestWriteReportReportsWriteFailure(t *testing.T) {
+	repository := Repository{Owner: "acme", Name: "video"}
+
+	for _, test := range []struct {
+		name   string
+		report Report
+	}{
+		{name: "空清单", report: Report{}},
+		{
+			name: "有待办",
+			report: Report{NeedsTriage: []IssueSummary{
+				{Repository: repository, Index: 3, Title: "t"},
+			}},
+		},
+		{
+			name: "待评审条目写入失败",
+			report: Report{NeedsTriage: []IssueSummary{{Repository: repository, Index: 3, Title: "t"}},
+				NeedsReview: []PullRequestSummary{{Repository: repository, Index: 5, Title: "p"}}},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := WriteReport(failingWriter{}, test.report); err == nil {
+				t.Error("WriteReport() error = nil, want 写入失败")
+			}
+		})
+	}
+}
+
+// failingWriter 模拟输出不可写（磁盘满、管道断开）。
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+// keepOnlyPrefixedLabel 的契约：目标标签缺失时报错（不能静默跳过——那会让
+// 状态机分叉）；已带目标标签时不重复添加；同前缀的其它标签被移除。
+func TestKeepOnlyPrefixedLabel(t *testing.T) {
+	repository := Repository{Owner: "acme", Name: "video"}
+
+	t.Run("目标标签不在仓库标签体系时报错", func(t *testing.T) {
+		api := newFakeAPI(repository, completeLabels())
+		manager := NewManager(api)
+		err := manager.keepOnlyPrefixedLabel(t.Context(), repository,
+			mergeablePullRequest(7, nil), map[string]Label{}, statusLabelPrefix, reviewLabelName)
+		if err == nil {
+			t.Error("error = nil, want 标签缺失错误")
+		}
+	})
+
+	t.Run("已带目标标签时不重复添加", func(t *testing.T) {
+		labels := completeLabels()
+		reviewLabel := labelByName(t, labels, reviewLabelName)
+		api := newFakeAPI(repository, labels)
+		manager := NewManager(api)
+
+		if err := manager.keepOnlyPrefixedLabel(t.Context(), repository,
+			mergeablePullRequest(7, []Label{reviewLabel}),
+			map[string]Label{reviewLabelName: reviewLabel}, statusLabelPrefix, reviewLabelName); err != nil {
+			t.Fatalf("error = %v", err)
+		}
+		if len(api.addedLabels) != 0 {
+			t.Errorf("added = %+v, want 无（标签已在）", api.addedLabels)
+		}
+	})
+}
+
+// branchBehind / formatBranchState 的边界：缺 base 或 merge-base 时「未知」
+// （不能猜成落后——那是会阻断合并的判定）。
+func TestBranchBehindBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		pull       PullRequest
+		wantBehind bool
+		wantKnown  bool
+	}{
+		{
+			name: "缺 base sha 时未知",
+			pull: PullRequest{MergeBase: "mb"},
+		},
+		{
+			name: "缺 merge-base 时未知",
+			pull: PullRequest{BaseSHA: "base"},
+		},
+		{
+			name:      "两者相同：未落后（已知且不落后）",
+			pull:      PullRequest{BaseSHA: "base", MergeBase: "base"},
+			wantKnown: true,
+		},
+		{
+			name:       "不同：落后",
+			pull:       PullRequest{BaseSHA: "base", MergeBase: "mb"},
+			wantBehind: true,
+			wantKnown:  true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			behind, known := branchBehind(test.pull)
+			if behind != test.wantBehind || known != test.wantKnown {
+				t.Errorf("branchBehind() = (%t, %t), want (%t, %t)",
+					behind, known, test.wantBehind, test.wantKnown)
+			}
+			wantText := "unknown"
+			if test.wantKnown {
+				wantText = fmt.Sprint(test.wantBehind)
+			}
+			if got := formatBranchState(behind, known); got != wantText {
+				t.Errorf("formatBranchState() = %q, want %q", got, wantText)
+			}
+		})
+	}
+}
+
+// awaitingLabelForStatus 的映射是确定性的：review 归 reviewer、approved 归
+// 合并人、其余归作者（「轮到谁行动」不能有歧义）。
+func TestAwaitingLabelForStatus(t *testing.T) {
+	for _, test := range []struct {
+		status string
+		want   string
+	}{
+		{status: reviewLabelName, want: awaitingReviewerLabelName},
+		{status: approvedLabelName, want: awaitingMergeLabelName},
+		{status: changesRequestedLabelName, want: awaitingAuthorLabelName},
+		{status: inProgressLabelName, want: awaitingAuthorLabelName},
+		{status: "未知状态", want: awaitingAuthorLabelName},
+	} {
+		if got := awaitingLabelForStatus(test.status); got != test.want {
+			t.Errorf("awaitingLabelForStatus(%q) = %q, want %q", test.status, got, test.want)
+		}
 	}
 }

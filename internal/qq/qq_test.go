@@ -587,3 +587,260 @@ func TestGatewayStopsOnClose4004(t *testing.T) {
 		t.Fatal("Run 未停止（close 4004 不应退避重试）")
 	}
 }
+
+// 401 的刷新重试：token 过期后平台回 401，客户端必须强制刷新一次并重发，
+// 而不是把 401 当终态抛给上层（那会让用户看到「回复失败」而不是自动恢复）。
+func TestClientRetriesAfter401(t *testing.T) {
+	var attempts int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /token", func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "tok-fresh", "expires_in": "7200"})
+	})
+	mux.HandleFunc("/v2/users/", func(writer http.ResponseWriter, request *http.Request) {
+		// 第一次（旧 token）拒绝，刷新后放行
+		if atomic.AddInt32(&attempts, 1) == 1 {
+			http.Error(writer, "expired", http.StatusUnauthorized)
+			return
+		}
+		if got := request.Header.Get("Authorization"); got != "QQBot tok-fresh" {
+			t.Errorf("重试时 Authorization = %q, want QQBot tok-fresh", got)
+		}
+		writer.WriteHeader(http.StatusOK)
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	client := NewClient(Config{
+		AppID: "app-1", AppSecret: "sec-1",
+		APIBaseURL: server.URL, TokenURL: server.URL + "/token", HTTPClient: server.Client(),
+	})
+
+	if err := client.SendC2CText(t.Context(), "QQ_u1", "m-1", 1, "hi"); err != nil {
+		t.Fatalf("SendC2CText() error = %v, want 401 后刷新重试成功", err)
+	}
+	if got := atomic.LoadInt32(&attempts); got != 2 {
+		t.Errorf("发送尝试次数 = %d, want 2（一次 401 + 一次重试）", got)
+	}
+}
+
+// 刷新后仍 401：必须报错并点明「刷新后仍被拒」，否则无从区分凭据错与权限错。
+func TestClientReportsPersistent401(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /token", func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "tok-fresh", "expires_in": "7200"})
+	})
+	var attempts atomic.Int32
+	mux.HandleFunc("/v2/groups/", func(writer http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		http.Error(writer, "forbidden", http.StatusUnauthorized)
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	client := NewClient(Config{
+		AppID: "app-1", AppSecret: "sec-1",
+		APIBaseURL: server.URL, TokenURL: server.URL + "/token", HTTPClient: server.Client(),
+	})
+
+	err := client.SendGroupText(t.Context(), "GG_1", "m-1", 1, "hi")
+	if err == nil || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("error = %v, want 含 401 的发送失败", err)
+	}
+	// 重试过：token 端点收到 1 次常规 + 1 次强制刷新
+	if got := attempts.Load(); got != 2 {
+		t.Errorf("发送尝试次数 = %d, want 2", got)
+	}
+}
+
+// 非 2xx 的错误信息要带状态码与响应体片段（运维据此判断是参数错还是权限错）。
+func TestClientReportsSendFailureWithBody(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /token", func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "tok-1", "expires_in": "7200"})
+	})
+	mux.HandleFunc("/v2/users/", func(writer http.ResponseWriter, _ *http.Request) {
+		http.Error(writer, `{"code":11244,"message":"msg_id 重复"}`, http.StatusBadRequest)
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	client := NewClient(Config{
+		AppID: "app-1", AppSecret: "sec-1",
+		APIBaseURL: server.URL, TokenURL: server.URL + "/token", HTTPClient: server.Client(),
+	})
+
+	err := client.SendC2CText(t.Context(), "QQ_u1", "m-1", 1, "hi")
+	if err == nil {
+		t.Fatal("error = nil, want 发送失败")
+	}
+	if !strings.Contains(err.Error(), "400") || !strings.Contains(err.Error(), "msg_id 重复") {
+		t.Errorf("error = %v, want 含状态码与响应体", err)
+	}
+}
+
+// get 的失败分支与空响应体：空体不解析（不报「解析失败」），非 2xx 带路径。
+func TestClientGetBranches(t *testing.T) {
+	t.Run("非 2xx 带路径与响应体", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("POST /token", func(writer http.ResponseWriter, _ *http.Request) {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "tok-1", "expires_in": "7200"})
+		})
+		mux.HandleFunc("GET /gateway", func(writer http.ResponseWriter, _ *http.Request) {
+			http.Error(writer, "service unavailable", http.StatusServiceUnavailable)
+		})
+		server := httptest.NewServer(mux)
+		t.Cleanup(server.Close)
+		client := NewClient(Config{
+			AppID: "app-1", AppSecret: "sec-1",
+			APIBaseURL: server.URL, TokenURL: server.URL + "/token", HTTPClient: server.Client(),
+		})
+		if _, err := client.GetGateway(t.Context()); err == nil ||
+			!strings.Contains(err.Error(), "/gateway") || !strings.Contains(err.Error(), "503") {
+			t.Errorf("GetGateway() error = %v, want 含路径与 503", err)
+		}
+	})
+
+	t.Run("空响应体不触发解析错误", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("POST /token", func(writer http.ResponseWriter, _ *http.Request) {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "tok-1", "expires_in": "7200"})
+		})
+		mux.HandleFunc("GET /empty", func(writer http.ResponseWriter, _ *http.Request) {
+			writer.WriteHeader(http.StatusOK)
+		})
+		server := httptest.NewServer(mux)
+		t.Cleanup(server.Close)
+		client := NewClient(Config{
+			AppID: "app-1", AppSecret: "sec-1",
+			APIBaseURL: server.URL, TokenURL: server.URL + "/token", HTTPClient: server.Client(),
+		})
+		var out struct {
+			URL string `json:"url"`
+		}
+		if err := client.get(t.Context(), "/empty", &out); err != nil {
+			t.Errorf("get() error = %v, want nil（空体跳过解析）", err)
+		}
+	})
+
+	t.Run("响应体不是 JSON 时报解析错误", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("POST /token", func(writer http.ResponseWriter, _ *http.Request) {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "tok-1", "expires_in": "7200"})
+		})
+		mux.HandleFunc("GET /garbage", func(writer http.ResponseWriter, _ *http.Request) {
+			_, _ = writer.Write([]byte("not json"))
+		})
+		server := httptest.NewServer(mux)
+		t.Cleanup(server.Close)
+		client := NewClient(Config{
+			AppID: "app-1", AppSecret: "sec-1",
+			APIBaseURL: server.URL, TokenURL: server.URL + "/token", HTTPClient: server.Client(),
+		})
+		var out struct {
+			URL string `json:"url"`
+		}
+		if err := client.get(t.Context(), "/garbage", &out); err == nil {
+			t.Error("get() error = nil, want 解析失败")
+		}
+	})
+}
+
+// HTTPClient 的缺省：未注入时回退 http.DefaultClient（网关拨号用）。
+func TestHTTPClientFallsBackToDefault(t *testing.T) {
+	client := NewClient(Config{AppID: "a", AppSecret: "s"})
+	if client.HTTPClient() != http.DefaultClient {
+		t.Error("未注入 client 时应回退 http.DefaultClient")
+	}
+	注入 := &http.Client{}
+	withInjected := NewClient(Config{AppID: "a", AppSecret: "s", HTTPClient: 注入})
+	if withInjected.HTTPClient() != 注入 {
+		t.Error("注入的 client 应被原样返回（可能带自定义 Transport/超时）")
+	}
+}
+
+// NewClient 的缺省填充：空 URL 落到官方端点，Log 为 nil 时给个空实现以免调用点
+// 到处判空。
+func TestNewClientDefaults(t *testing.T) {
+	client := NewClient(Config{AppID: "a", AppSecret: "s"})
+	if client.config.APIBaseURL != DefaultAPIBaseURL {
+		t.Errorf("APIBaseURL = %q, want %q", client.config.APIBaseURL, DefaultAPIBaseURL)
+	}
+	if client.config.TokenURL != DefaultTokenURL {
+		t.Errorf("TokenURL = %q, want %q", client.config.TokenURL, DefaultTokenURL)
+	}
+	if client.log == nil {
+		t.Fatal("log 不应为 nil")
+	}
+	client.log("空实现不应 panic：%d", 1)
+
+	custom := NewClient(Config{APIBaseURL: "https://example.com", TokenURL: "https://example.com/t"})
+	if custom.config.APIBaseURL != "https://example.com" || custom.config.TokenURL != "https://example.com/t" {
+		t.Errorf("显式配置被覆盖：%+v", custom.config)
+	}
+}
+
+// truncateBody 的边界：200 字以内原样、超限截断并带省略号（错误信息不能把
+// 整个响应体灌进日志）。
+func TestTruncateBodyBoundaries(t *testing.T) {
+	exact := strings.Repeat("x", 200)
+	if got := truncateBody([]byte(exact)); got != exact {
+		t.Errorf("恰好 200 字不应截断：%d 字 → %q", len(got), got[:min(20, len(got))])
+	}
+	over := strings.Repeat("x", 201)
+	got := truncateBody([]byte(over))
+	// 按字节截到 200，再拼省略号：总共 203 字节（多字节字符可能切在中途，
+	// 这是刻意取舍——错误信息只是诊断片段，不值得为对齐 rune 边界放大逻辑）
+	if len(got) != 200+len("…") || !strings.HasSuffix(got, "…") || !strings.HasPrefix(got, over[:200]) {
+		t.Errorf("超限应截断到前 200 字节 + 省略号：实际 %d 字节", len(got))
+	}
+	// 中文不会因按字节截断而 panic，且仍是合法 UTF-8 前缀的形态
+	chinese := strings.Repeat("错", 100) // 300 字节
+	if got := truncateBody([]byte(chinese)); len(got) != 200+len("…") {
+		t.Errorf("中文截断长度 = %d 字节, want 203", len(got))
+	}
+	if got := truncateBody(nil); got != "" {
+		t.Errorf("truncateBody(nil) = %q, want 空", got)
+	}
+}
+
+// shortSessionID 只展示前 8 位：会话 ID 长且无信息量，完整打印会把日志行撑爆，
+// 但 8 位以内必须原样（否则短 ID 反而不可读）。
+func TestShortSessionIDBoundaries(t *testing.T) {
+	for _, test := range []struct{ id, want string }{
+		{id: "", want: ""},
+		{id: "abc", want: "abc"},
+		{id: "12345678", want: "12345678"},
+		{id: "123456789", want: "12345678…"},
+		{id: "abcdefghijklmnop", want: "abcdefgh…"},
+	} {
+		if got := shortSessionID(test.id); got != test.want {
+			t.Errorf("shortSessionID(%q) = %q, want %q", test.id, got, test.want)
+		}
+	}
+}
+
+// FatalError.Fatal 是给 daemon 通道层看的标记：凭据类错误必须报告「不可重试」，
+// 否则 daemon 会对着一个永远失败的凭据无限退避重试。
+func TestFatalErrorMarksNonRetryable(t *testing.T) {
+	fatal := &FatalError{Stage: "换取 access token", Code: "100007", Message: "appid invalid"}
+	if !fatal.Fatal() {
+		t.Error("FatalError.Fatal() = false, want true（凭据错不可重试）")
+	}
+	if !errors.Is(fatal, error(fatal)) {
+		t.Error("FatalError 应可用 errors.Is 识别（错误链契约）")
+	}
+	// 错误文案必须点名排查方向：AppID/AppSecret 与 $VAR 引用的 .env
+	message := fatal.Error()
+	for _, want := range []string{"换取 access token", "100007", "AppID/AppSecret", ".env"} {
+		if !strings.Contains(message, want) {
+			t.Errorf("error = %q, want 含 %q", message, want)
+		}
+	}
+	// 无 Body 时不留悬空的冒号
+	if got := (&FatalError{Stage: "换取 access token"}).Error(); strings.Contains(got, "：。") {
+		t.Errorf("无 Body 的错误文案 = %q, want 不带空正文段", got)
+	}
+}

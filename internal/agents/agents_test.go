@@ -47,3 +47,30 @@ func TestBuiltinAgents(t *testing.T) {
 		t.Error("Has 判定不对")
 	}
 }
+
+// SubagentNames 是缺省子代理集的展示口径：不含 main（它不是子代理），且与
+// Subagents() 同名同序——两者漂移会让「默认配置」与实际装载的子代理不一致。
+func TestSubagentNamesMatchesSubagents(t *testing.T) {
+	names := SubagentNames()
+	definitions := Subagents()
+	if len(names) != len(definitions) {
+		t.Fatalf("SubagentNames() = %v, Subagents() 有 %d 项", names, len(definitions))
+	}
+	for index, definition := range definitions {
+		if names[index] != definition.Name {
+			t.Errorf("names[%d] = %q, want %q", index, names[index], definition.Name)
+		}
+	}
+	for _, name := range names {
+		if name == "main" {
+			t.Error("SubagentNames() 不应含 main：它是主代理，不是子代理")
+		}
+	}
+	// 返回的是副本：调用方排序/截断不能改到内置定义
+	if len(names) > 1 {
+		names[0] = "mutated"
+		if SubagentNames()[0] == "mutated" {
+			t.Error("SubagentNames() 返回了共享切片")
+		}
+	}
+}

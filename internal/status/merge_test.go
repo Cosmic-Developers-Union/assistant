@@ -464,3 +464,50 @@ func TestAutoMergeIgnoresApprovalFromOthers(t *testing.T) {
 		t.Errorf("merged pulls = %v, want none（alice 未批准，他人批准不算）", api.mergedPulls)
 	}
 }
+
+// 分支保护读取被拒（普通协作者令牌没有 repo admin）时降级为「任何失败检查即
+// 阻塞」的严格模式继续，而不是让整轮合并失败——门禁不失效，只是无法收窄到
+// 必要 context。其它错误则必须上抛（不能把网络故障当权限问题吞掉）。
+func TestAutoMergeRepositoryDegradesOnPermissionError(t *testing.T) {
+	repository := Repository{Owner: "acme", Name: "video"}
+	repository2 := Repository{Owner: "acme", Name: "video2"}
+
+	t.Run("403 降级后继续处理", func(t *testing.T) {
+		api := newFakeAPI(repository, completeLabels())
+		api.pullRequests[repository.FullName()] = []PullRequest{{Index: 7}}
+		api.current[pullRequestKey(repository, 7)] = mergeablePullRequest(7, nil)
+		api.protectError[repository.FullName()] = &PermissionError{Operation: "GET /branch_protections"}
+
+		manager := NewManager(api, WithContentReviewer("ai"), WithStateReviewer("merge"))
+		// 没有内容批准 ⇒ 跳过合并，但不应返回错误
+		merged, err := manager.autoMergeRepository(t.Context(), repository)
+		if err != nil {
+			t.Fatalf("autoMergeRepository() error = %v, want nil（403 应降级而非失败）", err)
+		}
+		if merged {
+			t.Error("merged = true, want false（无内容批准）")
+		}
+	})
+
+	t.Run("非权限错误上抛", func(t *testing.T) {
+		api := newFakeAPI(repository2, completeLabels())
+		api.pullRequests[repository2.FullName()] = []PullRequest{{Index: 8}}
+		api.current[pullRequestKey(repository2, 8)] = mergeablePullRequest(8, nil)
+		api.protectError[repository2.FullName()] = errors.New("网络不可用")
+
+		manager := NewManager(api, WithContentReviewer("ai"))
+		if _, err := manager.autoMergeRepository(t.Context(), repository2); err == nil {
+			t.Error("error = nil, want 网络错误上抛")
+		}
+	})
+
+	t.Run("PR 列表失败上抛", func(t *testing.T) {
+		api := newFakeAPI(repository2, completeLabels())
+		api.pullListError[repository2.FullName()] = errors.New("unavailable")
+
+		manager := NewManager(api, WithContentReviewer("ai"))
+		if _, err := manager.autoMergeRepository(t.Context(), repository2); err == nil {
+			t.Error("error = nil, want 列表错误上抛")
+		}
+	})
+}
