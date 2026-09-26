@@ -334,43 +334,35 @@ func (c *Chat) sessionArgs(sessionID, title string, fresh bool, text, workspace 
 	if err != nil {
 		return nil, err
 	}
-	args := []string{
-		"-p", text,
-		"--output-format", "stream-json",
-		"--verbose",
-		"--permission-mode", "auto",
-		"--strict-mcp-config",
-		"--mcp-config", mcpPath,
-		"--settings", settingsPath,
-		"--setting-sources", claudecfg.SettingSources,
-		"--append-system-prompt", c.systemPrompt(agent),
-		"--max-turns", "50",
-	}
-	// 子代理以 claude 自定义 agent 注入：主模型按 description 经原生 Task 工具委派
-	if agentsJSON := c.agentsJSON(); agentsJSON != "" {
-		args = append(args, "--agents", agentsJSON)
-	}
-	// 最小模式：不加载 hooks/插件同步/CLAUDE.md 自动发现与记忆，上下文只有上面
-	// 显式给的系统提示词、settings（含 provider env）与 daemon MCP
-	if agent.Bare {
-		args = append(args, "--bare")
-	}
+	// argv 经 claude.BuildArgs 组装（与评审会话同一份）：手搓一遍的代价是「加了
+	// 一个 flag 只改一处」，两边静默漂移。MaxTurns 是对话会话的回合上限（比评审
+	// 的小：一次问答不需要 300 回合）。
+	args := claude.BuildArgs(claude.ArgsOptions{
+		Prompt:             text,
+		Verbose:            true,
+		PermissionMode:     "auto",
+		StrictMCP:          true,
+		MCPConfigPath:      mcpPath,
+		SettingsPath:       settingsPath,
+		SettingSources:     claudecfg.SettingSources,
+		AppendSystemPrompt: c.systemPrompt(agent),
+		MaxTurns:           chatMaxTurns,
+		AgentsJSON:         c.agentsJSON(),
+		// 最小模式：不加载 hooks/插件同步/CLAUDE.md 自动发现与记忆，上下文只有
+		// 显式给的系统提示词、settings（含 provider env）与 daemon MCP
+		Bare:    agent.Bare,
+		Session: claude.Session{ID: sessionID, Resume: !fresh},
+		Name:    title,
+		Model:   agent.Model,
+	})
 	if fresh || c.config.Debug {
 		c.logSessionConfig(sessionID, agent, overrides, settingsPath, mcpPath)
 	}
-	if fresh {
-		args = append(args, "--session-id", sessionID)
-	} else {
-		args = append(args, "--resume", sessionID)
-	}
-	if title != "" {
-		args = append(args, "--name", title)
-	}
-	if agent.Model != "" {
-		args = append(args, "--model", agent.Model)
-	}
 	return args, nil
 }
+
+// chatMaxTurns 是对话会话的回合上限：一次问答比一次评审短得多，不共用评审的 300。
+const chatMaxTurns = 50
 
 // systemPrompt 组装对话会话的 system 提示词：主 agent 自带提示词优先，否则
 // 内置 main 预设 +（配置了记录库时）历史回查提示。

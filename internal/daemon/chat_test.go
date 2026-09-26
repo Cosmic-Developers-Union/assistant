@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -402,5 +403,58 @@ func TestChatSessionEnvDoesNotPinProjectDir(t *testing.T) {
 	}
 	if !strings.Contains(joined, "ASSISTANT_CONFIG=/cfg/config.json") {
 		t.Errorf("应注入配置来源：%v", env)
+	}
+}
+
+// 对话会话的 argv 必须与评审会话同一份实现（claude.BuildArgs），且标志集完整：
+// 漏一个 flag 就是静默失效（例如少了 --settings，会话就丢掉 provider env 与权限
+// 放行）。这条钉住 chat 侧的标志集，评审侧的对应用例在 claude/args_test.go。
+func TestChatSessionArgsFlagSet(t *testing.T) {
+	chat, err := NewChat(ChatConfig{
+		StateDir:   t.TempDir(),
+		SessionDir: t.TempDir(),
+		MainAgent:  AgentRuntime{Name: "main", ClaudeBin: "claude"},
+		Log:        func(string, ...any) {},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	args, err := chat.sessionArgs("sess-1", "标题", true, "你好", workspace,
+		AgentRuntime{Name: "main", ClaudeBin: "claude", Model: "m-main", Bare: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seen := map[string]bool{}
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			seen[arg] = true
+		}
+	}
+	for _, flag := range []string{
+		"-p", "--output-format", "--verbose", "--permission-mode", "--strict-mcp-config",
+		"--mcp-config", "--settings", "--setting-sources", "--append-system-prompt",
+		"--max-turns", "--bare", "--session-id", "--name", "--model",
+	} {
+		if !seen[flag] {
+			t.Errorf("对话会话 argv 缺少 %s：%v", flag, args)
+		}
+	}
+	// 回合上限是对话会话自己的（不是评审的 300）
+	if got := argumentAfter(args, "--max-turns"); got != strconv.Itoa(chatMaxTurns) {
+		t.Errorf("--max-turns = %q, want %d", got, chatMaxTurns)
+	}
+	// 首轮用 --session-id，续接用 --resume（互斥）
+	resumed, err := chat.sessionArgs("sess-1", "标题", false, "再来", workspace,
+		AgentRuntime{Name: "main", ClaudeBin: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if argumentAfter(resumed, "--resume") != "sess-1" {
+		t.Errorf("续接应带 --resume：%v", resumed)
+	}
+	if slices.Contains(resumed, "--session-id") {
+		t.Errorf("续接不应带 --session-id：%v", resumed)
 	}
 }
