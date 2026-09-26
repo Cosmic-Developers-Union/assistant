@@ -43,6 +43,7 @@ declare -A thresholds=(
 	[internal/setup]=90
 	[internal/provider]=90
 	[internal/claudecfg]=90
+	[internal/claude]=90
 	[cmd/assistant]=90
 	[internal/weixin]=80
 	[internal/qq]=80
