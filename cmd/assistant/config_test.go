@@ -63,15 +63,21 @@ func readConfig(t *testing.T, path string) map[string]any {
 }
 
 // 首次生成：用 credentials.json 里已登录的平台预填 instances，补 $schema 并把
-// schema 写到旁边；没有 provider 时校验会报出来（写入仍然完成）。
+// schema 写到旁边；凭据齐备时（凭据库提供 process 环境凭据）校验通过。
 func TestConfigInitPrefillsFromCredentials(t *testing.T) {
 	dir := t.TempDir()
 	writeCredentials(t, dir, "https://gitea.mms.vincentge.top", "https://gitea.aicler.com")
 	path := filepath.Join(dir, "config.json")
 
 	output, err := execConfigInit(t, path, "")
-	if err == nil || !strings.Contains(err.Error(), "已写入") {
-		t.Fatalf("没有 provider 时应当写入后报校验问题：err=%v\n%s", err, output)
+	// 没有 provider 定义不再是错误：凭据库/进程环境提供凭据时校验通过（provider
+	// 定义是可选的），配置仍可用于 assistant run。此前的断言期望「写入后报校验
+	// 问题」——那是凭据不可用时才成立的旧行为，已过期。
+	if err != nil {
+		t.Fatalf("config init 应当成功：err=%v\n%s", err, output)
+	}
+	if !strings.Contains(output, "校验通过") {
+		t.Errorf("输出应报告校验通过：\n%s", output)
 	}
 	if !strings.Contains(output, "+ gitea 通道 https://gitea.mms.vincentge.top") ||
 		!strings.Contains(output, "+ $schema: "+schema.Reference) {
@@ -306,8 +312,9 @@ func TestConfigInitCompletesSkeleton(t *testing.T) {
 	}
 
 	output, err := execConfigInit(t, path, "")
-	// 没有 provider 时与既有行为一致：写入后报校验问题
-	if err == nil || !strings.Contains(err.Error(), "已写入") {
+	// 同 TestConfigInitPrefillsFromCredentials：凭据齐备时校验通过，补全在骨架上
+	// 正常完成（骨架的 instances 为空不再是错误）。
+	if err != nil {
 		t.Fatalf("config init 应当在骨架上完成补全：err = %v\n%s", err, output)
 	}
 	document := readConfig(t, path)
