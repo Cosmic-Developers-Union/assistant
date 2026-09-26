@@ -222,6 +222,10 @@ func (s *Store) Snapshot() Status {
 		}
 		return 1
 	})
-	status.Recent = slices.Clone(s.recent)
+	// slices.Clone(nil) 返回 nil，会让空 recent 序列化成 null；显式兜底成空
+	// 数组，与上面三个集合的形态保持一致。
+	if cloned := slices.Clone(s.recent); cloned != nil {
+		status.Recent = cloned
+	}
 	return status
 }
