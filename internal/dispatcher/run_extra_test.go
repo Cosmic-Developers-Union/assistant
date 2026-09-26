@@ -2,6 +2,7 @@ package dispatcher
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -140,5 +141,35 @@ func TestSessionCommandDockerMountsAllDirs(t *testing.T) {
 	}
 	if !slices.Contains(spec.Args, "assistant-review:dev") {
 		t.Errorf("镜像名应作为最后一个位置参数前出现：%v", spec.Args)
+	}
+}
+
+// 非零退出但已给出 result 帧：结论必须保留在 Outcome.Result 里，错误另记。
+// 真实 CLI 在 API 层失败时就是这个形态（实测 is_error=true、subtype=success、
+// 原因只在 result 文本里），丢了它评审结论就无从判断。
+func TestResultSurvivesNonZeroExit(t *testing.T) {
+	runner := &fakeRunner{
+		lines: []string{
+			`{"type":"result","subtype":"success","is_error":true,"num_turns":2,` +
+				`"result":"head 已更新，需以新 head 重新评审"}`,
+		},
+		err: errors.New("claude 退出码 1：api error"),
+	}
+	useFakeRunner(t, runner)
+
+	outcome := RunSession(SessionOptions{
+		Config: Config{ClaudeBin: "claude", SessionDir: t.TempDir(), SessionProject: "p"},
+		Prompt: "review pr #1",
+		Cwd:    t.TempDir(),
+	})
+
+	if !strings.Contains(outcome.Result, "head 已更新") {
+		t.Errorf("结论被丢弃：Result = %q（评审成败判不出来）", outcome.Result)
+	}
+	if !outcome.IsError {
+		t.Error("非零退出应判为失败")
+	}
+	if len(outcome.Errors) == 0 {
+		t.Error("失败原因应记进 Errors")
 	}
 }

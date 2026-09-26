@@ -673,10 +673,15 @@ func (c *Chat) run(ctx context.Context, bin string, args []string, dir string, o
 	err := runner.Run(ctx, spec, func(line []byte) {
 		feedChatStreamLine(&outcome, line, onProgress)
 	})
-	if err != nil {
-		return outcome, err
-	}
-	if outcome.Subtype == "" && outcome.Result == "" && outcome.APIError == "" {
+	// 有结果就以结果为准，**即使进程非零退出**：真实 CLI 在 API 层失败时正是
+	// 「给出 result 帧（is_error=true，原因写在 result 文本里）后仍以非零码退出」。
+	// 此时把那句话丢掉、只报一句「会话失败」，等于把唯一的排查线索删了——旧实现
+	// 也是「有结果就返回结果」。
+	hasResult := outcome.Subtype != "" || outcome.Result != "" || outcome.APIError != ""
+	if !hasResult {
+		if err != nil {
+			return outcome, err
+		}
 		return outcome, fmt.Errorf("会话没有返回结果")
 	}
 	return outcome, nil

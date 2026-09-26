@@ -1,8 +1,11 @@
 package daemon
 
 import (
+	"context"
 	"strings"
 	"testing"
+
+	"github.com/Cosmic-Developers-Union/assistant/internal/claude"
 )
 
 // TestChatOutcomeFailureMessageBranches 钉住失败原因的择优顺序：API 层错误（401/
@@ -100,5 +103,52 @@ func TestFailedSessionKeepsResultText(t *testing.T) {
 	}
 	if outcome.Result != "已达回合上限，未完成审查" {
 		t.Errorf("失败会话的说明文本被丢弃：Result = %q（用户会只看到泛化的 FailureMessage）", outcome.Result)
+	}
+}
+
+// exitRunner 模拟「产出完整 result 帧后仍以非零码退出」——真实 CLI 在 API 层失败
+// 时就是这个形态（实测：is_error=true、subtype=success、原因只在 result 里）。
+type exitRunner struct{ payload string }
+
+func (r exitRunner) Run(_ context.Context, _ claude.Spec, onLine func([]byte)) error {
+	if onLine != nil {
+		onLine([]byte(r.payload))
+	}
+	return &exitError{}
+}
+
+type exitError struct{}
+
+func (*exitError) Error() string { return "claude 退出码 1：api error" }
+
+// 进程非零退出但已给出 result 时，那句话必须**照常回给用户**，而不是变成一句
+// 「对话会话失败」。
+func TestResultSurvivesNonZeroExit(t *testing.T) {
+	payload := `{"type":"result","subtype":"success","is_error":true,"num_turns":1,` +
+		`"result":"API Error: 400 没有匹配的模型路由：nonexistent"}`
+
+	chat, err := NewChat(ChatConfig{
+		StateDir:   t.TempDir(),
+		SessionDir: t.TempDir(),
+		Claude:     exitRunner{payload: payload},
+		Log:        func(string, ...any) {},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var outcome chatOutcome
+	done := feedChatStreamLine(&outcome, []byte(payload), nil)
+	if !done {
+		t.Fatal("应识别为 result")
+	}
+	if !strings.Contains(outcome.Result, "没有匹配的模型路由") {
+		t.Fatalf("归集就该保留原因：%q", outcome.Result)
+	}
+
+	// 走 Chat.run 的真实路径：非零退出时是否还拿得到这句话？
+	_, runErr := chat.run(context.Background(), "claude", nil, t.TempDir(), nil)
+	if runErr != nil && !strings.Contains(runErr.Error(), "没有匹配的模型路由") {
+		t.Errorf("非零退出丢弃了 result 文本：err = %v\n（用户会看到笼统的失败，而非具体原因）", runErr)
 	}
 }
