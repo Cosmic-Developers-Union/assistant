@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -722,5 +723,29 @@ func TestFollowerRecordsReadFailure(t *testing.T) {
 	follow.drain()
 	if follow.err() == nil {
 		t.Error("失败状态应保持")
+	}
+}
+
+// 巨大的单行（超过 followChunk，无换行结尾）：跨块拼接必须完整。
+func TestHugeSingleLineAcrossChunks(t *testing.T) {
+	payload := `{"big":"` + strings.Repeat("y", followChunk*3+1234) + `"}`
+	path := filepath.Join(t.TempDir(), "big")
+	if err := os.WriteFile(path, []byte(payload), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// cat 逐块写出，末尾无换行
+	var lines []string
+	err := NewExecRunner().Run(context.Background(), Spec{
+		Bin:  "sh",
+		Args: []string{"-c", "cat " + path},
+	}, func(line []byte) { lines = append(lines, string(line)) })
+	if err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+	if len(lines) != 1 {
+		t.Fatalf("应交付 1 行，实际 %d 行", len(lines))
+	}
+	if lines[0] != payload {
+		t.Errorf("跨块内容被截断：长度 %d，want %d", len(lines[0]), len(payload))
 	}
 }
