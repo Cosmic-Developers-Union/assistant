@@ -134,6 +134,9 @@ type Chat struct {
 	conversations *conversations.File
 	// pushed 记录每个 claude 会话最近一次推送的文件大小（避免每轮重复上传）
 	pushed map[string]int64
+	// conversationWorkspace 是工作目录推导的可注入缝（nil 时按 StateDir 派生）：
+	// 通道层的「映射失败仍要能对话」这一路要求映射表与工作目录的落点可分离。
+	conversationWorkspace func(conversationID string) string
 }
 
 // NewChat 创建对话会话管理器（加载已持久化的会话映射）。
@@ -611,6 +614,13 @@ func readSessionMetadata(workspace string) (sessionMetadata, error) {
 // 稳定派生）：claude 按 cwd 派生项目名，因此同一目录 = 同一项目 = 文本记录稳定，
 // 用户 cd 进去 `claude --continue` 就能接上最近的会话。
 func (c *Chat) workspaceDir(conversationID string) (string, error) {
+	if c.conversationWorkspace != nil {
+		dir := c.conversationWorkspace(conversationID)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", fmt.Errorf("创建会话工作目录 %s: %w", dir, err)
+		}
+		return dir, nil
+	}
 	dir := filepath.Join(c.config.StateDir, chatSessionTitle(conversationID))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("创建会话工作目录 %s: %w", dir, err)

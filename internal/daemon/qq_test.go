@@ -21,6 +21,10 @@ import (
 type fakeQQ struct {
 	server *httptest.Server
 	sent   []map[string]any
+	// paths 与 sent 一一对应，记录每次发送的请求路径——收信方（user_openid /
+	// group_openid）编在 URL 路径里，不在请求体中，只比对 body 看不出私聊、群聊
+	// 是否打对了接口。
+	paths  []string
 	tokens int32
 
 	mu     sync.Mutex
@@ -50,6 +54,7 @@ func newFakeQQ(t *testing.T) *fakeQQ {
 		_ = json.Unmarshal(body, &payload)
 		fake.mu.Lock()
 		fake.sent = append(fake.sent, payload)
+		fake.paths = append(fake.paths, request.URL.Path)
 		fake.mu.Unlock()
 		writer.WriteHeader(http.StatusOK)
 	})
@@ -100,6 +105,13 @@ func (f *fakeQQ) setWS(handler func(t *testing.T, conn *websocket.Conn)) {
 	f.mu.Lock()
 	f.ws = handler
 	f.mu.Unlock()
+}
+
+// sentPaths 返回已记录发送的请求路径快照（与 sentSnapshot 顺序一致）。
+func (f *fakeQQ) sentPaths() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.paths...)
 }
 
 func (f *fakeQQ) sentSnapshot() []map[string]any {
@@ -245,10 +257,10 @@ func TestQQChannelDeniesWithoutWhitelist(t *testing.T) {
 // 文本清理：残留的 @ 提及前缀（<@!bot>、<@bot>、@机器人）被剥掉，正文保留。
 func TestCleanQQContent(t *testing.T) {
 	cases := map[string]string{
-		"<@!BOT123> 查状态":   "查状态",
-		"<@BOT123>你好":       "你好",
-		"@机器人 帮我看看":         "帮我看看",
-		"  纯文本 ":             "纯文本",
+		"<@!BOT123> 查状态":      "查状态",
+		"<@BOT123>你好":         "你好",
+		"@机器人 帮我看看":           "帮我看看",
+		"  纯文本 ":              "纯文本",
 		"两段<@A> <@B> mention": "两段<@A> <@B> mention",
 	}
 	for input, want := range cases {
