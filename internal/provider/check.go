@@ -57,6 +57,12 @@ func (c CredentialCheck) Describe() string {
 // （例如 MiniMax 国内账号的 key 在国际端点上必然 401）。
 const CredentialHint = "检查 api_key 与端点是否配套（如 MiniMax 国内账号要用 minimax-cn / api.minimaxi.com）、密钥是否过期；可用 assistant validate --online 复测"
 
+// checkClient 是自检使用的 HTTP 客户端。做成包级变量是为了让测试注入
+// httptest 的客户端：自检本身只是「发一个最小请求看端点怎么回」，逻辑
+// （凭据取舍、端点/模型解析、状态归类、错误压缩）都值得被测，不该因为
+// 需要真实网络而整块留在覆盖之外。生产路径用默认客户端与原有超时。
+var checkClient = http.DefaultClient
+
 // CheckCredential 用最小请求验证 provider 的凭据与端点是否真的可用。daemon 启动时
 // 跑一次，能把「密钥/端点不对 → 每条消息静默重试几分钟」变成一行明确告警。
 func CheckCredential(ctx context.Context, overrides claudecfg.Overrides) CredentialCheck {
@@ -101,7 +107,7 @@ func CheckCredential(ctx context.Context, overrides claudecfg.Overrides) Credent
 	} else {
 		request.Header.Set("authorization", "Bearer "+authToken)
 	}
-	response, err := http.DefaultClient.Do(request)
+	response, err := checkClient.Do(request)
 	if err != nil {
 		result.Err = err
 		return result
