@@ -127,11 +127,36 @@ debug     = Why is it happening?
 - 不引入新依赖除非确有必要；能复用标准库与既有封装就不另起一套。
 - 移除死代码、过时引用与失效测试；有特殊保留原因要写注释说明。
 
+## 测试与覆盖率
+
+覆盖率是必要条件，不是充分条件；数字达标不等于测试合格。
+
+- **一般模块 ≥80%，核心模块 ≥90%**，逐包达成（不是全仓平均）。
+- **核心 = 除纯适配器外的一切**：承载系统语义的包——`internal/status`（评审
+  状态机）、`internal/dispatcher`（调度引擎）、`internal/daemon`、`internal/instances`、
+  `internal/config`、`internal/credentials`、`internal/sessionstore`、`internal/statestore`、
+  `internal/setup`、`internal/provider`、`internal/claudecfg`、`cmd/assistant`。
+  一般 = I/O 适配器与胶水——`internal/weixin`、`internal/qq`、`internal/telegram`、
+  `internal/mcps`、`internal/repoinstall`、`internal/runcfg`、`internal/conversations`、
+  `internal/envref`、`internal/agents`、`internal/logcfg`、`skills`。
+- **公共 API、错误路径、边界条件、协议与接口契约必须有测试**，不受覆盖率数字
+  影响。这部分是硬要求：一个 100% 覆盖但不测错误路径的包仍不合格。
+- 门禁：`make cover`（逐包对照阈值，任一不达标即失败）；`make cover-report`
+  只打印差距不失败（摸底用）。阈值表在 `scripts/coverage.sh`，新增包必须在
+  其中登记（有逻辑走 `thresholds`，纯 `//go:embed` 资源走 `asset_only`）。
+- 形式化规格约束的语义核（`internal/dispatcher` 的循环守卫与去重、
+  `internal/status/verify.go`）无论包整体百分比起伏，都应接近 100%。
+- 需要真实进程 / 网络 / 计时器而无法在单测中覆盖的路径（如 `RunSession` 拉起
+  真实 `claude`），用可注入的缝把**逻辑**测到，真实调用交给 `make test-e2e`；
+  若某包因这类边界无法达标，如实说明是哪些函数与原因，**不要用无意义的测试
+  堆数字**。
+
 ## 形式化规格
 
 改变调度语义或评审状态机时，必须同步更新 `formal/Dispatcher.lean` /
 `spec/ReviewStateMachine.tla`，并让证明与模型检查重新通过
-（`lean formal/Dispatcher.lean`）。
+（`lean formal/Dispatcher.lean`；TLA+ 模型检查：
+`java -cp <tla2tools.jar> tlc2.TLC ReviewStateMachine.tla`，在 `spec/` 下执行）。
 
 ## 托管文件不要手改
 

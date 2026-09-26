@@ -90,6 +90,14 @@ test: ## 运行测试
 	@echo "==> 运行测试..."
 	go test -v ./...
 
+.PHONY: cover
+cover: ## 采集覆盖率并对照阈值门禁（核心 90% / 一般 80%）
+	@./scripts/coverage.sh
+
+.PHONY: cover-report
+cover-report: ## 只打印各包覆盖率与阈值差距，不因不达标而失败（摸底用）
+	@./scripts/coverage.sh --report
+
 .PHONY: image
 image: ## 构建容器镜像（仓库级 Actions 用；推送到 registry 由 CI 完成）
 	@echo "==> 构建容器镜像 $(IMAGE)..."
