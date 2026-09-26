@@ -1,8 +1,10 @@
 package claudecfg
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -105,5 +107,105 @@ func TestProbeCachesAndBlankPath(t *testing.T) {
 	}
 	if got := ClaudeVersion(multi); got != "3.1.4 (Claude Code)" {
 		t.Errorf("多行版本应只取第一行：%q", got)
+	}
+}
+
+// stubProber 记录调用并按脚本回放结果（不启动真实进程）。
+type stubProber struct {
+	calls    []string
+	outputs  map[string][]byte
+	failures map[string]error
+}
+
+func (p *stubProber) Output(bin string, args ...string) ([]byte, error) {
+	key := bin + " " + strings.Join(args, " ")
+	p.calls = append(p.calls, key)
+	if err := p.failures[key]; err != nil {
+		return nil, err
+	}
+	return p.outputs[key], nil
+}
+
+// useProbe 把探测执行器换成假实现并清缓存（缓存按路径键控，不清会串味）。
+func useProbe(t *testing.T, prober Prober) {
+	t.Helper()
+	original := Probe
+	Probe = prober
+	t.Cleanup(func() {
+		Probe = original
+		resetProbeCaches()
+	})
+	resetProbeCaches()
+}
+
+// 探测执行失败时返回保守值（空版本 / 不支持 --bare），且不把失败结果当成功缓存。
+func TestProbeFailureReturnsConservativeValues(t *testing.T) {
+	prober := &stubProber{failures: map[string]error{
+		"/x/claude --version": errors.New("exit 1"),
+		"/x/claude --help":    errors.New("exit 1"),
+	}}
+	useProbe(t, prober)
+
+	if got := ClaudeVersion("/x/claude"); got != "" {
+		t.Errorf("探测失败应给空版本：%q", got)
+	}
+	if SupportsBare("/x/claude") {
+		t.Error("探测失败应判为不支持 --bare")
+	}
+	if len(prober.calls) != 2 {
+		t.Errorf("应各探测一次：%v", prober.calls)
+	}
+}
+
+// 命中缓存时不再调用执行器：探测不便宜，重复探测会拖慢启动。
+func TestProbeCacheAvoidsSecondExecution(t *testing.T) {
+	prober := &stubProber{outputs: map[string][]byte{
+		"/x/claude --version": []byte("1.2.3\n"),
+		"/x/claude --help":    []byte("--bare\n"),
+	}}
+	useProbe(t, prober)
+
+	_ = ClaudeVersion("/x/claude")
+	_ = ClaudeVersion("/x/claude")
+	_ = SupportsBare("/x/claude")
+	_ = SupportsBare("/x/claude")
+
+	if len(prober.calls) != 2 {
+		t.Errorf("二次调用应命中缓存，实际调用 %v", prober.calls)
+	}
+}
+
+// 失败结果的缓存语义：与成功一样只探一次（失败也要缓存，否则每次启动都重探一个
+// 坏路径）。
+func TestProbeCachesFailures(t *testing.T) {
+	prober := &stubProber{failures: map[string]error{"/x/bad --version": errors.New("boom")}}
+	useProbe(t, prober)
+
+	_ = ClaudeVersion("/x/bad")
+	_ = ClaudeVersion("/x/bad")
+	if len(prober.calls) != 1 {
+		t.Errorf("失败结果也应缓存：%v", prober.calls)
+	}
+}
+
+// 版本行只有空白/多行空行时给空串（不产出空白的「版本」）。
+func TestProbeVersionBlankOutput(t *testing.T) {
+	prober := &stubProber{outputs: map[string][]byte{
+		"/x/blank --version": []byte("  \n\t\n"),
+	}}
+	useProbe(t, prober)
+	if got := ClaudeVersion("/x/blank"); got != "" {
+		t.Errorf("空白版本行应为空：%q", got)
+	}
+}
+
+// --help 输出里出现 --bare 子串即判为支持（真实 CLI 把它列在帮助里）。
+func TestSupportsBareSubstringMatch(t *testing.T) {
+	prober := &stubProber{outputs: map[string][]byte{
+		"/x/claude --help": []byte("Usage: claude [options]\n  --bare   Minimal mode\n  --verbose\n"),
+	}}
+	useProbe(t, prober)
+	if !SupportsBare("/x/claude") {
+		t.Error("帮助里含 --bare 应判为支持")
 	}
 }

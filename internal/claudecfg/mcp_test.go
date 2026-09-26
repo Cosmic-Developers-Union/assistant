@@ -1,9 +1,12 @@
 package claudecfg
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 )
 
@@ -220,5 +223,53 @@ func TestStringListBranches(t *testing.T) {
 		if got := stringList(value); got != nil {
 			t.Errorf("stringList(%#v) = %v, want nil", value, got)
 		}
+	}
+}
+
+// resetAssistantCommand 复位缓存以便覆盖各分支（sync.Once 定值后无法再验其它路径）。
+// 仅供测试：在生产路径上没有调用点。
+func resetAssistantCommand() {
+	assistantCommandOnce = sync.Once{}
+	assistantCommand = ""
+}
+
+// 取不到自身路径（os.Executable 报错）时回退 PATH 名 "assistant"：会话里的 MCP
+// 仍能靠 PATH 启动，不至于因为拿不到绝对路径就完全起不来。
+func TestAssistantCommandFallsBackWhenExecutableUnavailable(t *testing.T) {
+	original := AssistantExecutable
+	t.Cleanup(func() { AssistantExecutable = original; resetAssistantCommand() })
+
+	AssistantExecutable = func() (string, error) { return "", errors.New("no executable") }
+	resetAssistantCommand()
+	if got := AssistantCommand(); got != "assistant" {
+		t.Errorf("AssistantCommand = %q, want 回退名 assistant", got)
+	}
+}
+
+// 自身路径为空串时同样回退（filepath.Abs("") 给出 cwd，不能用）。
+func TestAssistantCommandFallsBackOnEmptyPath(t *testing.T) {
+	original := AssistantExecutable
+	t.Cleanup(func() { AssistantExecutable = original; resetAssistantCommand() })
+
+	AssistantExecutable = func() (string, error) { return "   ", nil }
+	resetAssistantCommand()
+	if got := AssistantCommand(); got != "assistant" {
+		t.Errorf("AssistantCommand = %q, want 回退名 assistant", got)
+	}
+}
+
+// 拿到相对路径时给出绝对路径（会话可能在任何工作目录里启动）。
+func TestAssistantCommandAbsolutizesRelativePath(t *testing.T) {
+	original := AssistantExecutable
+	t.Cleanup(func() { AssistantExecutable = original; resetAssistantCommand() })
+
+	AssistantExecutable = func() (string, error) { return "bin/assistant", nil }
+	resetAssistantCommand()
+	got := AssistantCommand()
+	if !filepath.IsAbs(got) {
+		t.Errorf("AssistantCommand = %q, want 绝对路径", got)
+	}
+	if !strings.HasSuffix(got, filepath.Join("bin", "assistant")) {
+		t.Errorf("AssistantCommand = %q, 应保留原始尾部", got)
 	}
 }

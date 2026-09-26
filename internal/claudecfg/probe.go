@@ -13,12 +13,40 @@ import (
 // 用于给出可诊断的启动日志，绝不能拖住 daemon 启动。
 const probeTimeout = 20 * time.Second
 
+// Prober 执行一次探测命令并返回其 stdout。接口存在的唯一理由是让「探测」可注入：
+// 缓存与解析逻辑（下面全部代码）需要能独立测试，而真实 exec 只有实现关心。
+type Prober interface {
+	Output(bin string, args ...string) ([]byte, error)
+}
+
+// execProber 是 Prober 的生产实现（唯一启动探测子进程的地方）。
+type execProber struct{}
+
+func (execProber) Output(bin string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+	return exec.CommandContext(ctx, bin, args...).Output()
+}
+
+// Probe 是探测用的执行器；测试替换它即可在不启动真实进程的前提下覆盖缓存、
+// 解析与失败回退。生产不修改。
+var Probe Prober = execProber{}
+
 var (
 	probeMu       sync.Mutex
 	versionCache  = map[string]string{}
 	versionProbed = map[string]bool{}
 	bareCache     = map[string]bool{}
 )
+
+// resetProbeCaches 清空探测缓存（仅供测试：缓存按路径键控，测试之间会互相污染）。
+func resetProbeCaches() {
+	probeMu.Lock()
+	defer probeMu.Unlock()
+	versionCache = map[string]string{}
+	versionProbed = map[string]bool{}
+	bareCache = map[string]bool{}
+}
 
 // ClaudeVersion 返回 claude 的版本行（如 "2.1.270 (Claude Code)"）；路径无效或
 // 执行失败返回空串。结果按可执行文件路径缓存。
@@ -35,7 +63,7 @@ func ClaudeVersion(bin string) string {
 	}
 	probeMu.Unlock()
 
-	output, err := probeClaude(bin, "--version")
+	output, err := Probe.Output(bin, "--version")
 	value := ""
 	if err == nil {
 		value = strings.TrimSpace(string(output))
@@ -67,7 +95,7 @@ func SupportsBare(bin string) bool {
 	probeMu.Unlock()
 
 	supported := false
-	if output, err := probeClaude(bin, "--help"); err == nil {
+	if output, err := Probe.Output(bin, "--help"); err == nil {
 		supported = strings.Contains(string(output), "--bare")
 	}
 	probeMu.Lock()
@@ -106,9 +134,3 @@ func CredentialSource(overrides Overrides) string {
 // MissingCredentialHint 是「没有任何 AI 凭据」时的修复提示。
 const MissingCredentialHint = "在 config.json 的 providers（或 optimizations）里给所选 provider 配 api_key，" +
 	"或给进程注入 ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN；会话不再读 ~/.claude 登录态"
-
-func probeClaude(bin string, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
-	defer cancel()
-	return exec.CommandContext(ctx, bin, args...).Output()
-}

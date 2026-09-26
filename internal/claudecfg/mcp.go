@@ -47,17 +47,27 @@ var (
 	assistantCommand     string
 )
 
+// AssistantExecutable 取当前进程的可执行文件路径；测试替换它即可覆盖「取不到自身
+// 路径时回退 assistant」这条分支。生产不修改。
+var AssistantExecutable = os.Executable
+
 // AssistantCommand 返回当前 assistant 可执行文件的绝对路径（取不到时回退 PATH
 // 名字 assistant）：会话里的 assistant MCP 用它启动，于是既不看会话的工作目录与
 // PATH，也不要求会话镜像里预装了 assistant。
 func AssistantCommand() string {
 	assistantCommandOnce.Do(func() {
 		assistantCommand = "assistant"
-		path, err := os.Executable()
+		path, err := AssistantExecutable()
 		if err != nil {
 			return
 		}
-		absolute, err := filepath.Abs(strings.TrimSpace(path))
+		// 先判空再 Abs：filepath.Abs("") 不报错，它返回**当前工作目录**——把
+		// 一个空的自身路径当成 cwd 会让会话去启动一个碰巧叫 assistant 的目录。
+		trimmed := strings.TrimSpace(path)
+		if trimmed == "" {
+			return
+		}
+		absolute, err := filepath.Abs(trimmed)
 		if err != nil || absolute == "" {
 			return
 		}
