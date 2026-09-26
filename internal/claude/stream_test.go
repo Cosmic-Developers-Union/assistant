@@ -91,8 +91,28 @@ func TestFeedInit(t *testing.T) {
 	if got := BrokenMCPServers(&outcome); got != "broken=failed" {
 		t.Errorf("BrokenMCPServers = %q, want broken=failed", got)
 	}
-	if len(progress) != 1 || !strings.Contains(progress[0], "session=sess-42") {
-		t.Errorf("紧凑形态应报一行 session=…：%v", progress)
+	// 紧凑形态：一行 session=…，外加一行未就绪 MCP 告警
+	if len(progress) != 2 {
+		t.Fatalf("紧凑形态应报 session 一行 + MCP 告警一行：%v", progress)
+	}
+	if !strings.Contains(progress[0], "session=sess-42") {
+		t.Errorf("首行应含 session=…：%v", progress[0])
+	}
+	if !strings.Contains(progress[1], "MCP 服务未就绪") || !strings.Contains(progress[1], "broken=failed") {
+		t.Errorf("次行应报未就绪的 MCP：%v", progress[1])
+	}
+}
+
+// 全部 MCP 就绪时不产告警行（避免误导读者去找一个不存在的问题）。
+func TestFeedInitNoMCPWarningWhenHealthy(t *testing.T) {
+	var progress []string
+	outcome := NewOutcome()
+	Feed(&outcome, []byte(`{"type":"system","subtype":"init","session_id":"s","mcp_servers":[
+		{"name":"gitea","status":"connected"}]}`), ProgressTerse, collect(&progress))
+	for _, line := range progress {
+		if strings.Contains(line, "MCP 服务未就绪") {
+			t.Errorf("全部就绪时不该告警：%v", progress)
+		}
 	}
 }
 

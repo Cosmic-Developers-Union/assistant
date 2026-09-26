@@ -181,6 +181,13 @@ func FeedEvent(outcome *Outcome, event Event, style Progress, onProgress func(st
 		} else if event.SessionID != nil {
 			report("session=" + *event.SessionID + " model=" + pointerOr(event.Model, "?"))
 		}
+		// 未就绪的 MCP server 单独告警一行：init 里声明了却没连上，是「工具用不了」
+		// 的最常见原因。两种形态都报——评审会话也常因此卡住，且这一行是排查起点，
+		// 不该只在展开形态里出现。
+		if broken := BrokenMCPServers(outcome); broken != "" {
+			report("⚠ MCP 服务未就绪：" + broken +
+				"（检查该 server 的命令是否可用，或在所属 provider 的 mcp 配置里给 null 关闭）")
+		}
 	case event.IsSystem("thinking_tokens"):
 		feedThinkingTokens(outcome, event, onProgress)
 	case event.IsSystem("api_error"):
