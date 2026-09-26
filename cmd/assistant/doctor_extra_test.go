@@ -501,19 +501,23 @@ func TestLoadOptionalConfigParsesEmptySkeleton(t *testing.T) {
 	}
 }
 
-// TestPrintSessionFindingsFlagsUnresolvedProviderRef 断言 provider 的密钥引用
-// 解析失败时报 UNMANAGED 并让 problems 递增：$VAR 写错时静默通过会让操作者以为
-// 凭据齐备，实际会话起来后会因为没有 key 而失败在很远的地方。
-func TestPrintSessionFindingsFlagsUnresolvedProviderRef(t *testing.T) {
+// TestPrintSessionFindingsSkipsInvalidConfig 断言配置语义无效时凭据一项报 SKIPPED
+// 而不是崩掉或误报凭据就绪：resolveInstanceFile 会先跑一遍 File.Validate（它已经
+// 覆盖了密钥引用与 provider.Resolve 的全部错误路径），所以无效配置根本到不了
+// 「解析 provider 覆盖」那一步。
+//
+// 这条断言同时给 doctor.go 的 UNMANAGED 分支（printSessionFindings 里
+// EffectiveOverrides 报错的出口）留证：能通过 resolveInstanceFile 的文件必然能解析，
+// 该分支不可达，属死代码，故不追覆盖率。
+func TestPrintSessionFindingsSkipsInvalidConfig(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	t.Setenv("ASSISTANT_UNSET_KEY", "")
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	file := &instances.File{
-		DefaultProvider: "work",
+		DefaultProvider: "openai",
 		Providers: map[string]instances.Provider{
-			// 引用一个不存在的变量：envref 展开失败，EffectiveOverrides 报错。
-			"work": {APIKey: "${ASSISTANT_DEFINITELY_UNSET_KEY}"},
+			// 预设要求必须给 ANTHROPIC_BASE_URL，这里故意不给。
+			"openai": {APIKey: "sk-test"},
 		},
 		Runtimes: map[string]instances.Runtime{"main": {Root: t.TempDir()}},
 	}
@@ -522,10 +526,10 @@ func TestPrintSessionFindingsFlagsUnresolvedProviderRef(t *testing.T) {
 	}
 	out := &bytes.Buffer{}
 	problems := printSessionFindings(out, configPath)
-	if !strings.Contains(out.String(), "UNMANAGED") {
-		t.Errorf("引用解析失败应报 UNMANAGED，输出：\n%s", out.String())
+	if !strings.Contains(out.String(), "SKIPPED") {
+		t.Errorf("无效配置应报 SKIPPED，输出：\n%s", out.String())
 	}
-	if problems != 1 {
-		t.Errorf("problems = %d, want 1（解析失败计一处问题）", problems)
+	if problems != 0 {
+		t.Errorf("problems = %d, want 0（凭据一项跳过不计问题）", problems)
 	}
 }

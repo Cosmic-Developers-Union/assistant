@@ -81,6 +81,56 @@ func newInitFake(t *testing.T) *initFake {
 	return fake
 }
 
+// newInitServerWithFailures 构造看得到失败开关的 init 替身服务端：fail 提供
+// 三个「服务端说不」的开关，路由与载荷沿用 initFake 的那一套，只有被开关拦下
+// 的端点会改写状态码。
+func newInitServerWithFailures(t *testing.T, fail *initFailFake) *httptest.Server {
+	t.Helper()
+	fake := fail.initFake
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fake.recorded = append(fake.recorded, r.Method+" "+r.URL.Path)
+		path := strings.TrimPrefix(r.URL.Path, "/api/v1")
+		if strings.Contains(path, "/labels") && r.Method != http.MethodGet && fail.labelStatus != 0 {
+			w.WriteHeader(fail.labelStatus)
+			json.NewEncoder(w).Encode(map[string]string{"message": "labels rejected"})
+			return
+		}
+		if strings.Contains(path, "/collaborators") && r.Method != http.MethodGet && fail.collaboratorStatus != 0 {
+			w.WriteHeader(fail.collaboratorStatus)
+			json.NewEncoder(w).Encode(map[string]string{"message": "collaborators rejected"})
+			return
+		}
+		if strings.TrimPrefix(r.URL.Path, "/api/v1/") == "user" {
+			json.NewEncoder(w).Encode(map[string]any{"id": 1, "login": fake.self, "user_name": fake.self})
+			return
+		}
+		switch {
+		case path == "/version":
+			json.NewEncoder(w).Encode(map[string]string{"version": "1.22.0"})
+		case path == "/user":
+			json.NewEncoder(w).Encode(map[string]any{"id": 1, "login": fake.self, "user_name": fake.self})
+		case path == "/user/repos":
+			json.NewEncoder(w).Encode([]any{})
+		case strings.HasSuffix(path, "/collaborators"):
+			fake.writeCollaborators(w)
+		case strings.Contains(path, "/collaborators/") && strings.HasSuffix(path, "/permission"):
+			fake.writePermission(w, path)
+		case strings.Contains(path, "/collaborators/"):
+			w.WriteHeader(http.StatusNoContent)
+		case strings.Contains(path, "/branch_protections"):
+			fake.writeBranchProtection(w, r.Method)
+		case strings.Contains(path, "/labels"):
+			fake.writeLabels(w, r.Method)
+		case strings.HasPrefix(path, "/repos/"):
+			segments := strings.Split(strings.TrimPrefix(path, "/repos/"), "/")
+			fake.writeRepo(w, segments, r.URL.RawQuery)
+		default:
+			json.NewEncoder(w).Encode(map[string]any{})
+		}
+	}))
+}
+
 // writeCollaborators 返回协作者清单；failCollaborators 时用 403 表达「令牌
 // 读不到协作者」，这正是 init 要求仓库管理员权限的现实形态。
 func (f *initFake) writeCollaborators(w http.ResponseWriter) {

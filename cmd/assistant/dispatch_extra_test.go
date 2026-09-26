@@ -37,6 +37,13 @@ type fakeGitea struct {
 	// repositories 是 /api/v1/user/repos 返回的仓库全名清单：Manager 会拿它
 	// 校验目标仓库对当前令牌可见，清单里没有目标仓库就直接报错。
 	repositories []string
+	// reposStatus 非零时 /api/v1/user/repos 返回它（而不是仓库清单）。
+	//
+	// 「可见仓库」是 Manager.Check 的第一个调用，也是 label-sync / check 这类
+	// 动作唯一的入口：它在 401/403/5xx 下失败意味着一次巡检根本没发生。这份失败
+	// 必须能被构造出来，否则「动作失败时错误是否冒到最外层」的分支只能靠真实站点
+	// 才能走到。
+	reposStatus int
 }
 
 func newFakeGitea(t *testing.T) *fakeGitea {
@@ -71,6 +78,11 @@ func newFakeGitea(t *testing.T) *fakeGitea {
 			// 同步令牌可见的仓库清单（check --wait 与不限仓库的 Manager 都靠它）：
 			// 必须是列表形态，否则调用方拿到 "{}" 会当成反序列化错误；内容取自
 			// repos 登记表，好让 Manager 的「目标仓库对令牌可见」校验通过。
+			if fake.reposStatus != 0 {
+				w.WriteHeader(fake.reposStatus)
+				json.NewEncoder(w).Encode(map[string]string{"message": "repositories rejected"})
+				return
+			}
 			repositories := []any{}
 			for _, full := range fake.repositories {
 				owner, name, ok := strings.Cut(full, "/")
@@ -103,6 +115,22 @@ func newFakeGitea(t *testing.T) *fakeGitea {
 			case "pulls":
 				json.NewEncoder(w).Encode(payloadOrEmpty(fake.pulls[full]))
 			case "reviews":
+				json.NewEncoder(w).Encode([]any{})
+			case "labels":
+				// 标签端点有两种方法：POST 建标签要回一个 gitea.Label 对象
+				// （回数组会让 SDK 报 "cannot unmarshal array into ... gitea.Label"），
+				// GET 列表才是数组。名字从请求体里回读，好让调用方接到的标签名
+				// 确实是它刚创建的那一个。
+				if r.Method == http.MethodPost || r.Method == http.MethodPatch {
+					var body struct {
+						Name string `json:"name"`
+					}
+					_ = json.NewDecoder(r.Body).Decode(&body)
+					json.NewEncoder(w).Encode(map[string]any{
+						"id": 1, "name": body.Name, "color": "#000000",
+					})
+					return
+				}
 				json.NewEncoder(w).Encode([]any{})
 			default:
 				json.NewEncoder(w).Encode([]any{})

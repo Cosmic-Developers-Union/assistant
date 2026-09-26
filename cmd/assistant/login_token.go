@@ -33,12 +33,24 @@ func newLoginTokenCommand() *cobra.Command {
 	return command
 }
 
+// loginTokenCredentialPath / loginTokenCredentials 是凭据库定位与读取的注入缝。
+//
+// 默认就是真实实现；测试替换它们，才能构造出「连凭据文件落点都定不下来」与
+// 「落点已知但读取失败」这两类只在异常机器上才出现的分支（例如 HOME 与 XDG 皆空
+// 的容器）。生产路径不受影响：这两个变量只在命令执行时被读取一次。
+var (
+	loginTokenCredentialPath = credentials.Path
+	loginTokenCredentials    = credentials.Load
+)
+
 // resolveTokenUser 决定操作哪个账号的令牌：--user > 站点当前登录身份 > 站点唯一
 // 账号。多账号且无身份记录时不猜，点名让调用方指定。
 func resolveTokenUser(store *credentials.File, host, flagUser string) (string, error) {
 	if user := strings.TrimSpace(flagUser); user != "" {
 		return user, nil
 	}
+	// 先看身份记录：站点只有一个账号时它和 Users 一样，但多账号时它是唯一无歧义的
+	// 依据——调用方没写 --user 就说明它想操作「本站点当前登录的那个账号」。
 	if identity, ok := store.IdentityFor(host); ok {
 		return identity.User, nil
 	}
@@ -88,11 +100,11 @@ func newLoginTokenListCommand() *cobra.Command {
 				host = strings.TrimRight(strings.TrimSpace(args[0]), "/")
 			}
 			stdout := command.OutOrStdout()
-			path, err := credentials.Path()
+			path, err := loginTokenCredentialPath()
 			if err != nil {
 				return err
 			}
-			store, err := credentials.Load(path)
+			store, err := loginTokenCredentials(path)
 			if err != nil {
 				return err
 			}
@@ -157,11 +169,11 @@ func newLoginTokenShowCommand() *cobra.Command {
 }
 
 func runTokenShow(command *cobra.Command, host, purpose string, options *tokenShowOptions) error {
-	path, err := credentials.Path()
+	path, err := loginTokenCredentialPath()
 	if err != nil {
 		return err
 	}
-	store, err := credentials.Load(path)
+	store, err := loginTokenCredentials(path)
 	if err != nil {
 		return err
 	}
@@ -235,11 +247,11 @@ func newLoginTokenRefreshCommand() *cobra.Command {
 }
 
 func runTokenRefresh(command *cobra.Command, host, purpose string, options *tokenRefreshOptions) error {
-	path, err := credentials.Path()
+	path, err := loginTokenCredentialPath()
 	if err != nil {
 		return err
 	}
-	store, err := credentials.Load(path)
+	store, err := loginTokenCredentials(path)
 	if err != nil {
 		return err
 	}

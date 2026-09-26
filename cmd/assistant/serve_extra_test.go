@@ -11,7 +11,7 @@ import (
 // 这个值会被写进 serve.json 并当作 HTTP 头传递，必须只用 URL/头部安全的字符；
 // 同时又必须是随机的——两次生成相同意味着令牌可预测，等于没有鉴权。
 func TestRandomTokenIsURLSafeAndUnique(t *testing.T) {
-	first, err := randomToken()
+	first, err := randomToken(nil)
 	if err != nil {
 		t.Fatalf("randomToken: %v", err)
 	}
@@ -26,7 +26,7 @@ func TestRandomTokenIsURLSafeAndUnique(t *testing.T) {
 		t.Errorf("令牌 %q 含不安全字符（会被当作头部/URL 传递）", first)
 	}
 
-	second, err := randomToken()
+	second, err := randomToken(nil)
 	if err != nil {
 		t.Fatalf("randomToken 第二次: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestDefaultSessionsRootFollowsWorkingDirectory(t *testing.T) {
 	work := t.TempDir()
 	t.Chdir(work)
 
-	root, err := defaultSessionsRoot()
+	root, err := defaultSessionsRoot(nil)
 	if err != nil {
 		t.Fatalf("defaultSessionsRoot: %v", err)
 	}
