@@ -378,3 +378,29 @@ func TestChatConversationMappingAndSessionsMCP(t *testing.T) {
 		t.Errorf("settings 应放行 sessions MCP：%v", allow)
 	}
 }
+
+// 对话会话的环境注入：钉 CLAUDE_CONFIG_DIR（会话记录落在 assistant 托管目录），
+// 但**不**钉 CLAUDE_CODE_PROJECT_DIR_NAME——用户在该工作目录里
+// `claude --continue` 要能接上最近的会话；钉死目录名会让记录落到别处、接不上。
+func TestChatSessionEnvDoesNotPinProjectDir(t *testing.T) {
+	sessionDir := t.TempDir()
+	chat, err := NewChat(ChatConfig{
+		StateDir:        t.TempDir(),
+		SessionDir:      sessionDir,
+		AssistantConfig: "/cfg/config.json",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := chat.sessionEnv()
+	joined := strings.Join(env, " ")
+	if !strings.Contains(joined, "CLAUDE_CONFIG_DIR="+sessionDir) {
+		t.Errorf("应钉配置根：%v", env)
+	}
+	if strings.Contains(joined, "CLAUDE_CODE_PROJECT_DIR_NAME") {
+		t.Errorf("对话会话不该钉项目目录名：%v", env)
+	}
+	if !strings.Contains(joined, "ASSISTANT_CONFIG=/cfg/config.json") {
+		t.Errorf("应注入配置来源：%v", env)
+	}
+}
