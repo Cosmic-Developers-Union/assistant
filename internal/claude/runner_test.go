@@ -259,20 +259,32 @@ func TestExecRunnerTimeoutSkipsContainerKillWhenAbsent(t *testing.T) {
 	}
 }
 
-// ctx 取消：进程被终止、Run 返回错误（不静默成功）。
+// ctx 取消：进程被终止、Run 及时返回错误，且**取消前已产出的行仍要交付**。
+//
+// 这是 daemon 的会话超时机制（它用 ctx 限时，Spec.Timeout 留 0）。两处都要守住：
+// 静默成功会让一轮挂住的对话被当成空回复发出去；丢已产出的行则会丢掉结论。
 func TestExecRunnerContextCancellation(t *testing.T) {
 	requireShell(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(80 * time.Millisecond)
 		cancel()
 	}()
+	lines, onLine := collectLines()
+	start := time.Now()
 	err := NewExecRunner().Run(ctx, Spec{
-		Bin:  "sh",
-		Args: []string{"-c", "sleep 30"},
-	}, nil)
+		Bin: "sh",
+		Args: []string{"-c",
+			`printf '{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}\n'; sleep 30`},
+	}, onLine)
 	if err == nil {
 		t.Fatal("ctx 取消后 Run 不应返回 nil")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("ctx 取消应立即生效，实际 %v", elapsed)
+	}
+	if len(*lines) == 0 || !strings.Contains((*lines)[0], "working") {
+		t.Errorf("取消前已产出的行应仍交付：%v", *lines)
 	}
 }
 
