@@ -11,8 +11,10 @@ import (
 	"sync"
 	"testing"
 
+	builtinagents "github.com/Cosmic-Developers-Union/assistant/internal/agents"
 	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
 	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/provider"
 
 	"github.com/spf13/cobra"
 )
@@ -640,4 +642,223 @@ func TestSaveInstanceAddsMissingHost(t *testing.T) {
 	if !found {
 		t.Errorf("新站点未被登记：%+v", loaded.Channels)
 	}
+}
+
+// truncateDescription 的边界：取首行、按 rune 截到 80 字、空内容走兜底。
+//
+// 注意它只对**整段**去首尾空白（TrimSpace 在最前），首行内部的尾随空白会保留
+// ——后续行被 Cut 丢弃时不会顺手 trim 掉前一行的尾部空格。这是「取首行」语义
+// 的直接结果，不是缺陷：描述来自受管的系统提示词，不会有脏空白。
+func TestTruncateDescription(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		prompt string
+		want   string
+	}{
+		{name: "空提示词给缺省描述", prompt: "", want: "专项任务子代理"},
+		{name: "纯空白同空", prompt: "   \n\t ", want: "专项任务子代理"},
+		{name: "取首行", prompt: "第一行\n第二行\n第三行", want: "第一行"},
+		{name: "单行无换行", prompt: "只有一行", want: "只有一行"},
+		{name: "恰好 80 字不截断", prompt: strings.Repeat("文", 80), want: strings.Repeat("文", 80)},
+		{name: "超过 80 字截断加省略号", prompt: strings.Repeat("文", 81), want: strings.Repeat("文", 80) + "…"},
+		{name: "按 rune 计数（中文不按字节截断）", prompt: strings.Repeat("错", 200), want: strings.Repeat("错", 80) + "…"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := truncateDescription(test.prompt); got != test.want {
+				t.Errorf("truncateDescription(%q) = %q, want %q", test.prompt, got, test.want)
+			}
+		})
+	}
+}
+
+// 截断必须落在 rune 边界上：按字节切会把多字节字符劈成半个，日志与提示词里
+// 出现乱码。
+func TestTruncateDescriptionIsRuneSafe(t *testing.T) {
+	got := truncateDescription(strings.Repeat("中文", 100))
+	if !strings.HasPrefix(got, "中文") {
+		t.Errorf("截断结果不是合法前缀：%q", got)
+	}
+	for _, r := range got {
+		if r == '�' {
+			t.Fatalf("截断产生了替换字符（按字节切断）：%q", got)
+		}
+	}
+}
+
+// displayName 的三种形态：空名说明走内置缺省、provider 内置预设加标注、
+// 用户自定义名原样呈现——日志里要能一眼看出「这个名字是哪来的」。
+//
+// 判定用的是 provider.HasPreset（模型供应商预设），与 builtinagents 的内置
+// 子代理是两套名字空间，别混用。
+func TestDisplayName(t *testing.T) {
+	file := &instances.File{}
+	if got := displayName("", file); got != "内置缺省" {
+		t.Errorf("displayName(\"\") = %q, want 内置缺省", got)
+	}
+	presets := provider.PresetNames()
+	if len(presets) == 0 {
+		t.Skip("没有可用的 provider 预设名")
+	}
+	name := presets[0]
+	if got := displayName(name, file); !strings.Contains(got, "内置预设") {
+		t.Errorf("displayName(%q) = %q, want 带内置预设标注", name, got)
+	}
+	if got := displayName("my-custom-provider", file); got != "my-custom-provider" {
+		t.Errorf("自定义名应原样呈现：%q", got)
+	}
+}
+
+// buildMainAgentRuntime：主 agent 名缺省走 DefaultMainAgent；未定义的名字必须
+// 报错并列出可用项（否则 daemon 会以一个空 agent 启动）。
+func TestBuildMainAgentRuntime(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	_ = path
+
+	t.Run("缺省名可用", func(t *testing.T) {
+		file := &instances.File{}
+		runtime := instances.Runtime{}
+		agent, err := buildMainAgentRuntime(file, runtime, &dispatcherOptions{})
+		if err != nil {
+			t.Fatalf("buildMainAgentRuntime() error = %v", err)
+		}
+		if strings.TrimSpace(agent.ClaudeBin) == "" {
+			t.Error("ClaudeBin 应被补上缺省")
+		}
+		if agent.Name != instances.DefaultMainAgent {
+			t.Errorf("Name = %q, want %q", agent.Name, instances.DefaultMainAgent)
+		}
+	})
+
+	t.Run("未定义的名字报错并列出内置项", func(t *testing.T) {
+		file := &instances.File{}
+		runtime := instances.Runtime{MainAgent: "does-not-exist"}
+		_, err := buildMainAgentRuntime(file, runtime, &dispatcherOptions{})
+		if err == nil {
+			t.Fatal("error = nil, want 未定义主 agent 报错")
+		}
+		if !strings.Contains(err.Error(), "does-not-exist") {
+			t.Errorf("error = %v, want 点名缺失的名字", err)
+		}
+		for _, name := range builtinagents.Names() {
+			if !strings.Contains(err.Error(), name) {
+				t.Errorf("error = %v, want 列出内置项 %s", err, name)
+			}
+		}
+	})
+}
+
+// buildSubagents 的 nil vs 显式空语义：nil 表示「全部内置」，显式空数组表示
+// 「不注入任何子代理」——两者混淆会让用户以为关掉了子代理却仍然全开。
+func TestBuildSubagentsNilVersusEmpty(t *testing.T) {
+	file := &instances.File{}
+
+	t.Run("nil 注入全部内置", func(t *testing.T) {
+		subagents, err := buildSubagents(file, instances.Runtime{Subagents: nil}, &dispatcherOptions{})
+		if err != nil {
+			t.Fatalf("buildSubagents() error = %v", err)
+		}
+		if len(subagents) != len(builtinagents.Subagents()) {
+			t.Errorf("子代理数 = %d, want %d（全部内置）", len(subagents), len(builtinagents.Subagents()))
+		}
+	})
+
+	t.Run("显式空数组不注入", func(t *testing.T) {
+		subagents, err := buildSubagents(file, instances.Runtime{Subagents: []string{}}, &dispatcherOptions{})
+		if err != nil {
+			t.Fatalf("buildSubagents() error = %v", err)
+		}
+		if len(subagents) != 0 {
+			t.Errorf("子代理数 = %d, want 0（显式关闭）", len(subagents))
+		}
+	})
+
+	t.Run("描述为空时用系统提示词首行兜底", func(t *testing.T) {
+		// 未知名 + 未配置 system_prompt ⇒ 描述兜底成缺省文案
+		subagents, err := buildSubagents(file, instances.Runtime{Subagents: []string{"unknown-agent"}}, &dispatcherOptions{})
+		if err != nil {
+			t.Fatalf("buildSubagents() error = %v", err)
+		}
+		if len(subagents) != 1 {
+			t.Fatalf("子代理数 = %d, want 1", len(subagents))
+		}
+		if strings.TrimSpace(subagents[0].Description) == "" {
+			t.Error("描述不应为空（委派靠它决定是否交给该子代理）")
+		}
+		if subagents[0].Name != "unknown-agent" {
+			t.Errorf("Name = %q", subagents[0].Name)
+		}
+	})
+}
+
+// migrateRuntimeDir 的四种形态：同路径直接返回、旧目录不存在、新目录已在用
+// （不覆盖用户数据）、成功搬迁。
+func TestMigrateRuntimeDir(t *testing.T) {
+	t.Run("同路径直接返回", func(t *testing.T) {
+		dir := t.TempDir()
+		if got := migrateRuntimeDir(dir, dir, func(string, ...any) {}); got != dir {
+			t.Errorf("got %q, want %q", got, dir)
+		}
+	})
+
+	t.Run("旧目录不存在直接用新路径", func(t *testing.T) {
+		root := t.TempDir()
+		oldDir := filepath.Join(root, "old")
+		newDir := filepath.Join(root, "new")
+		if got := migrateRuntimeDir(oldDir, newDir, func(string, ...any) {}); got != newDir {
+			t.Errorf("got %q, want %q", got, newDir)
+		}
+	})
+
+	t.Run("新目录已在用则不覆盖用户数据", func(t *testing.T) {
+		root := t.TempDir()
+		oldDir := filepath.Join(root, "old")
+		newDir := filepath.Join(root, "new")
+		if err := os.MkdirAll(oldDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(newDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		marker := filepath.Join(newDir, "keep.txt")
+		if err := os.WriteFile(marker, []byte("用户数据\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := migrateRuntimeDir(oldDir, newDir, func(string, ...any) {}); got != newDir {
+			t.Errorf("got %q, want %q", got, newDir)
+		}
+		// 旧目录保留（留给用户处理），新目录的用户数据未被覆盖
+		if _, err := os.Stat(oldDir); err != nil {
+			t.Errorf("旧目录不应被删除：%v", err)
+		}
+		data, err := os.ReadFile(marker)
+		if err != nil || string(data) != "用户数据\n" {
+			t.Errorf("用户数据被改动：%q %v", data, err)
+		}
+	})
+
+	t.Run("成功搬迁并记日志", func(t *testing.T) {
+		root := t.TempDir()
+		oldDir := filepath.Join(root, "old")
+		newDir := filepath.Join(root, "new")
+		if err := os.MkdirAll(oldDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(oldDir, "payload.txt"), []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var logs []string
+		got := migrateRuntimeDir(oldDir, newDir, func(format string, args ...any) {
+			logs = append(logs, format)
+		})
+		if got != newDir {
+			t.Errorf("got %q, want %q", got, newDir)
+		}
+		// 内容跟着搬过去
+		if _, err := os.Stat(filepath.Join(newDir, "payload.txt")); err != nil {
+			t.Errorf("内容未搬迁：%v", err)
+		}
+		if len(logs) == 0 {
+			t.Error("搬迁成功应留日志（操作者要知道数据搬哪去了）")
+		}
+	})
 }
