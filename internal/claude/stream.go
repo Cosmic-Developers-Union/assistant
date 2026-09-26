@@ -284,7 +284,12 @@ func applyResult(outcome *Outcome, event Event) {
 	}
 	outcome.Errors = append(outcome.Errors, event.Errors...)
 	outcome.PermissionDenials = len(event.PermissionDenials)
-	if !outcome.IsError && event.Result != nil {
+	// Result 一律采纳，**失败时也采纳**：调用方靠 IsError 判成败，而失败会话的
+	// result 文本往往是模型给出的具体说明（「已达回合上限，未完成审查」），把它
+	// 丢掉会让上层只能回一句泛化的失败原因。曾按「失败时清空 Result」实现，
+	// 结果是 daemon 的失败回复永远拿不到那句说明（见 daemon 的
+	// TestFailedSessionKeepsResultText）。
+	if event.Result != nil {
 		outcome.Result = *event.Result
 	}
 }

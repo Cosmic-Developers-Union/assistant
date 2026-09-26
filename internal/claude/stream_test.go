@@ -288,20 +288,24 @@ func TestFeedResult(t *testing.T) {
 
 // is_error 缺省即失败：把一次未明确成功的会话当成功，会让「完成判定」在错误
 // 结论上放行——这是最危险的一种静默错误。
+//
+// 同时钉住：失败**不**清空 Result。判成败看 IsError，而失败会话的 result 文本
+// 常是模型给出的具体说明，上层（daemon 的失败回复）要拿它回给用户；清空它只会
+// 让用户看到一句泛化的失败原因。
 func TestFeedResultDefaultsToErrorWhenIsErrorAbsent(t *testing.T) {
 	outcome := NewOutcome()
-	Feed(&outcome, []byte(`{"type":"result","subtype":"error_max_turns","result":"不该被采纳"}`),
+	Feed(&outcome, []byte(`{"type":"result","subtype":"error_max_turns","result":"已达回合上限"}`),
 		ProgressTerse, nil)
 
 	if !outcome.IsError {
 		t.Error("is_error 缺席时必须判为失败")
 	}
-	if outcome.Result != "" {
-		t.Errorf("失败时不应采纳 result 文本：%q", outcome.Result)
+	if outcome.Result != "已达回合上限" {
+		t.Errorf("失败会话的说明文本应保留：Result = %q", outcome.Result)
 	}
 }
 
-// 失败的 result 不采纳 result 文本（避免把错误说明当成会话结论）。
+// 显式失败：IsError 为真、Errors 累积、说明文本保留（三者互不排斥）。
 func TestFeedResultExplicitError(t *testing.T) {
 	outcome := NewOutcome()
 	Feed(&outcome, []byte(`{"type":"result","is_error":true,"result":"出错了","errors":["boom","boom2"]}`),
@@ -309,8 +313,8 @@ func TestFeedResultExplicitError(t *testing.T) {
 	if !outcome.IsError {
 		t.Error("应判为失败")
 	}
-	if outcome.Result != "" {
-		t.Errorf("失败时 Result 应为空：%q", outcome.Result)
+	if outcome.Result != "出错了" {
+		t.Errorf("失败会话的说明文本应保留：Result = %q", outcome.Result)
 	}
 	if !slices.Equal(outcome.Errors, []string{"boom", "boom2"}) {
 		t.Errorf("Errors = %v", outcome.Errors)
