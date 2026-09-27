@@ -3,11 +3,9 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -606,75 +604,6 @@ func TestRunDispatchLoopStopsWhenStateStoreUnopenable(t *testing.T) {
 	}
 }
 
-// TestRunDispatchOneShotSurfacesWorktreeRootAndLockFailures 断言一次性命令在
-// 「工作区基名不可用」与「锁已被活跃进程持有」两种前置条件下的失败姿态：
-// review/triage 以某个账号在真实 PR 上落结论，这两处静默失败意味着要么评审
-// 实验写进了不该写的目录，要么两个进程在同一 PR 上同时说话。
-func TestRunDispatchOneShotSurfacesWorktreeRootAndLockFailures(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	data := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", data)
-	fake := newFakeGitea(t)
-	fake.login["reviewer-token"] = "ai"
-	configPath := writeFakeGiteaConfig(t, fake, "acme/rocket")
-
-	repoDir := initGitCheckout(t)
-	runGit(t, repoDir, "remote", "add", "origin", fake.server.URL+"/acme/rocket.git")
-
-	// 工作区基名指向普通文件下面：MkdirAll 必然失败。注意 os.MkdirAll 报的是
-	// PathError（逐级 mkdir 后拿到 ENOTDIR），消息里带的是失败的那一级路径
-	// （blocker），不是完整的工作区基名，所以下面按「指向 blocker 这一级」断言。
-	blocker := filepath.Join(t.TempDir(), "blocker")
-	if err := os.WriteFile(blocker, []byte("not a dir"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("DISPATCH_WORKTREE_ROOT", filepath.Join(blocker, "worktrees"))
-
-	command := &cobra.Command{}
-	command.SetOut(&bytes.Buffer{})
-	stderr := &bytes.Buffer{}
-	command.SetErr(stderr)
-	command.SetContext(t.Context())
-
-	options := &dispatcherOptions{
-		RepoDir:    repoDir,
-		BaseBranch: "main",
-		// LogDir 与 WorktreeRoot 分开存放：LogDir 必须先建成，这样才能确认失败
-		// 发生在工作区这一步，而不是被日志目录的失败提前盖过去。
-		LogDir:   t.TempDir(),
-		LockFile: filepath.Join(t.TempDir(), "dispatcher.lock"),
-	}
-	err := runDispatchOneShot(command, "", configPath, options, dispatcher.KindPull, 9)
-	if err == nil {
-		t.Fatal("工作区基名不可用时应失败")
-	}
-	if !strings.Contains(err.Error(), blocker) {
-		t.Errorf("err = %v, want 点名失败的那一级路径 %q", err, blocker)
-	}
-	if !strings.Contains(err.Error(), "not a directory") {
-		t.Errorf("err = %v, want 暴露底层 ENOTDIR 原因", err)
-	}
-	if !strings.Contains(stderr.String(), "当前账户：@ai（reviewer=ai）") {
-		t.Errorf("身份行应在失败前落盘：%q", stderr.String())
-	}
-
-	// 锁被活跃进程（PID 1）持有：必须拒绝，而不是在别人的调度循环旁边再起一份。
-	lockDir := t.TempDir()
-	lockFile := filepath.Join(lockDir, "dispatcher.lock")
-	if err := os.WriteFile(lockFile, []byte(strconv.Itoa(1)+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	options.WorktreeRoot = t.TempDir()
-	options.LockFile = lockFile
-	err = runDispatchOneShot(command, "", configPath, options, dispatcher.KindPull, 9)
-	if err == nil || !strings.Contains(err.Error(), "已在运行") {
-		t.Fatalf("err = %v, want dispatcher 已在运行", err)
-	}
-	if !strings.Contains(err.Error(), fmt.Sprintf("PID %d", 1)) {
-		t.Errorf("err = %v, want 点名持锁 PID", err)
-	}
-}
-
 // TestResolveDispatchTargetsRejectsMultipleReposWithRepoDir 断言 --repo-dir 与
 // 多仓库配置互斥：--repo-dir 表达的是「这个检出就是全部」，一旦配置里登记了
 // 多个仓库，拿同一个目录去跑所有仓库等于用同一份工作区并发评审不同 PR。
@@ -869,5 +798,352 @@ func TestGiteaTargetExplicitDirSkipsManagedState(t *testing.T) {
 	}
 	if target.config.AccessToken != "channel-token" {
 		t.Errorf("AccessToken = %q, want 通道令牌", target.config.AccessToken)
+	}
+}
+
+// TestNewDispatchDepsFollowUpMessagesFiltersAndFormats 断言追问轮的输入契约：
+// 只把「他人 + 非空正文」的新评论交回会话，并统一成 "@账号：正文" 形态。把
+// reviewer 自己的评论交回去会让会话自问自答，把空正文交回去会让它读到一条
+// 无内容的追问——两者都会让 ai 的回复脱离真实对话。
+func TestNewDispatchDepsFollowUpMessagesFiltersAndFormats(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fake := newFakeGitea(t)
+	fake.login["reviewer-token"] = "ai"
+	fake.comments["acme/rocket#7"] = []map[string]any{
+		{"id": 1, "body": "我自己刚说的", "user": map[string]any{"login": "ai", "user_name": "ai"}},
+		{"id": 2, "body": "没有账号的评论", "user": map[string]any{"login": "", "user_name": ""}},
+		{"id": 3, "body": "   \n", "user": map[string]any{"login": "bob", "user_name": "bob"}},
+		{"id": 4, "body": "再看一眼这个分支", "user": map[string]any{"login": "bob", "user_name": "bob"}},
+	}
+	target, _ := fakeGiteaCommand(t, fake, "")
+	deps := newDispatchDeps(target, &bytes.Buffer{}, nil, nil, false, false)
+
+	messages, err := deps.FollowUpMessages(t.Context(),
+		dispatcher.WorkItem{Kind: dispatcher.KindPull, Number: 7}, time.Time{})
+	if err != nil {
+		t.Fatalf("FollowUpMessages: %v", err)
+	}
+	if len(messages) != 1 || messages[0] != "@bob：再看一眼这个分支" {
+		t.Errorf("messages = %v, want 只留他人的非空正文并加账号前缀", messages)
+	}
+
+	// 站点不可达必须冒泡错误：对调度引擎而言「没有新消息」与「读不到消息」是
+	// 两件事——前者可以结束追问轮，后者只能重试，吞掉错误会把中断当成静默。
+	fake.server.Close()
+	if _, err := deps.FollowUpMessages(t.Context(),
+		dispatcher.WorkItem{Kind: dispatcher.KindPull, Number: 7}, time.Time{}); err == nil {
+		t.Error("站点不可达时应返回错误")
+	}
+}
+
+// TestNewDispatchDepsVerifyMapsPlatformVerdict 断言完成判定的映射契约：平台
+// 判定（head 漂移 / 新 review）要原样翻译成调度引擎的 ItemVerdict——引擎只认
+// 这三个字段，翻译时漏掉 HeadMoved 会让作废的评审继续烧重试会话。基础设施错误
+// 必须连同零值一起冒泡，绝不能伪装成「未完成」（那会让循环一直重试到超时）。
+func TestNewDispatchDepsVerifyMapsPlatformVerdict(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fake := newFakeGitea(t)
+	fake.login["reviewer-token"] = "ai"
+	pull := issuePayload(9, "refactor core", true, "review")
+	pull["head"] = map[string]any{"sha": "abc123"}
+	fake.pulls["acme/rocket"] = []map[string]any{pull}
+	// 字段名按 go-sdk 的 PullReview：reviewer 落在 "user"，时刻是 "submitted_at"
+	// （不是 "reviewer"/"submitted"——写错了会静默解析成零值，判定永远不完成）。
+	fake.reviews["acme/rocket#9"] = []map[string]any{{
+		"id": 1, "state": "APPROVED", "submitted_at": "2026-09-01T00:00:00Z",
+		"user": map[string]any{"login": "ai", "user_name": "ai"},
+	}}
+	target, _ := fakeGiteaCommand(t, fake, "")
+	deps := newDispatchDeps(target, &bytes.Buffer{}, nil, nil, false, false)
+
+	// head 未漂移且 reviewer 在该 head 上留过新 review：判定完成。
+	verdict, err := deps.Verify(t.Context(),
+		dispatcher.WorkItem{Kind: dispatcher.KindPull, Number: 9}, time.Time{}, "abc123")
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if !verdict.Completed || verdict.HeadMoved {
+		t.Errorf("verdict = %+v, want completed 且 head 未漂移", verdict)
+	}
+	if verdict.Reason == "" {
+		t.Error("判定依据必须带回来：空原因让操作者无法解释为什么完成")
+	}
+
+	// 期望 head 与站点不一致：必须映射成 HeadMoved（本轮直接放行），而不是完成。
+	moved, err := deps.Verify(t.Context(),
+		dispatcher.WorkItem{Kind: dispatcher.KindPull, Number: 9}, time.Time{}, "旧head")
+	if err != nil {
+		t.Fatalf("Verify(head 漂移): %v", err)
+	}
+	if moved.Completed || !moved.HeadMoved {
+		t.Errorf("verdict = %+v, want head 漂移且未完成", moved)
+	}
+
+	// 站点不可达：错误与零值一起返回，不能退化成「未完成」。
+	fake.server.Close()
+	broken, err := deps.Verify(t.Context(),
+		dispatcher.WorkItem{Kind: dispatcher.KindPull, Number: 9}, time.Time{}, "abc123")
+	if err == nil {
+		t.Fatal("站点不可达时应返回错误")
+	}
+	if broken != (dispatcher.ItemVerdict{}) {
+		t.Errorf("verdict = %+v, want 零值（不把基础设施故障当结论）", broken)
+	}
+}
+
+// TestNewDispatchDepsIssueWorktreeLifecycle 断言 Issue 分诊的工作区生命周期：
+// PrepareIssue 在基线（config.BaseBranch）上建一个游离 worktree 并回基线 sha，
+// RemoveWorktree 再把它收干净且可重复调用。分诊会话就在这个 worktree 里跑，
+// 建不出来等于分诊永远起不来；收不干净会把宿主检出的 worktree 注册表拖脏。
+func TestNewDispatchDepsIssueWorktreeLifecycle(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	data := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", data)
+
+	// 本地 remote：避免任何网络往返，同时让 fetch origin main 有真分支可拉。
+	remote := initGitCheckout(t)
+	runGit(t, remote, "checkout", "-q", "-b", "main")
+	runGit(t, remote, "commit", "-q", "--allow-empty", "-m", "基线")
+	root := initGitCheckout(t)
+	runGit(t, root, "remote", "add", "origin", remote)
+
+	fake := newFakeGitea(t)
+	fake.login["reviewer-token"] = "ai"
+	client, err := status.NewClient(fake.server.URL, "reviewer-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := dispatchTarget{
+		instance: instances.Instance{Host: fake.server.URL},
+		repo:     instances.Repo{Name: "acme/rocket"},
+		config: dispatcher.Config{
+			Host: fake.server.URL, AccessToken: "reviewer-token", Reviewer: "ai", BaseBranch: "main",
+			Repository:   status.Repository{Owner: "acme", Name: "rocket"},
+			WorktreeRoot: t.TempDir(),
+		},
+		client:  client,
+		repoDir: root,
+	}
+	deps := newDispatchDeps(target, &bytes.Buffer{}, nil, nil, false, false)
+
+	worktreeDir := filepath.Join(target.config.WorktreeRoot, "issue-7")
+	sha, err := deps.PrepareIssue(worktreeDir)
+	if err != nil {
+		t.Fatalf("PrepareIssue: %v", err)
+	}
+	if strings.TrimSpace(sha) == "" {
+		t.Error("PrepareIssue 应回基线 sha")
+	}
+	if _, err := os.Stat(worktreeDir); err != nil {
+		t.Errorf("worktree 未落地: %v", err)
+	}
+	if err := deps.RemoveWorktree(worktreeDir); err != nil {
+		t.Fatalf("RemoveWorktree: %v", err)
+	}
+	if _, err := os.Stat(worktreeDir); !os.IsNotExist(err) {
+		t.Errorf("worktree 应被移除，stat err = %v", err)
+	}
+	// 重复清理必须是无害的：残留收尾路径会再叫一次。
+	if err := deps.RemoveWorktree(worktreeDir); err != nil {
+		t.Errorf("重复 RemoveWorktree 应静默收敛: %v", err)
+	}
+}
+
+// TestNewDispatchDepsRunSessionPinsStableSession 断言装配处给会话钉的稳定 ID：
+// PR 以 head 为锚（head 变了换新记录，旧记录不被污染），Issue 以标题为锚；同一
+// 待办的两次调用必须落到同一个记录上（run 的重试靠 --resume 续接，ID 漂了就会
+// 每轮开一个新会话）。
+func TestNewDispatchDepsRunSessionPinsStableSession(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	fake := newFakeGitea(t)
+	fake.login["reviewer-token"] = "ai"
+	target, _ := fakeGiteaCommand(t, fake, "")
+	// claude 不存在：会话必然失败，但装配处传入的 SessionID 已经落进结论里，
+	// 这正是要断言的部分——不必真起一个会话。
+	target.config.ClaudeBin = filepath.Join(t.TempDir(), "claude-不存在")
+	target.repoDir = t.TempDir()
+	deps := newDispatchDeps(target, &bytes.Buffer{}, nil, nil, false, false)
+
+	repository := target.config.Repository.FullName()
+	pull := dispatcher.SessionRequest{
+		Item:    dispatcher.WorkItem{Kind: dispatcher.KindPull, Number: 9},
+		HeadSHA: "abc123",
+	}
+	first := deps.RunSession(pull)
+	want := dispatcher.SessionID(target.config.Host, repository, dispatcher.KindPull, 9, "abc123")
+	if first.SessionID != want {
+		t.Errorf("PR 会话 ID = %q, want %q（head 为锚）", first.SessionID, want)
+	}
+
+	// 同一待办重试：锚点未变，ID 必须一致（--resume 的前提）。
+	if again := deps.RunSession(pull); again.SessionID != first.SessionID {
+		t.Errorf("重试换了会话 ID：%q → %q", first.SessionID, again.SessionID)
+	}
+	// head 推进：换新记录，而不是续写旧 head 的评审。
+	pull.HeadSHA = "def456"
+	if moved := deps.RunSession(pull); moved.SessionID == first.SessionID {
+		t.Error("head 变化后沿用旧会话 ID，评审会写进作废的锚点")
+	}
+	// Issue 以标题为锚，与 PR 同一编号也不相撞。
+	issue := dispatcher.SessionRequest{Item: dispatcher.WorkItem{Kind: dispatcher.KindIssue, Number: 9, Title: "标题甲"}}
+	issueWant := dispatcher.SessionID(target.config.Host, repository, dispatcher.KindIssue, 9, "标题甲")
+	if got := deps.RunSession(issue); got.SessionID != issueWant {
+		t.Errorf("Issue 会话 ID = %q, want %q（标题为锚）", got.SessionID, issueWant)
+	}
+	if issueWant == want {
+		t.Error("PR 与 Issue 的会话 ID 不应相同")
+	}
+}
+
+// TestAppendOnFinishHandlesNilFirst 断言回调组合的空值语义：first 为 nil 时
+// 直接返回 second（内存 store 未启用时「只挂状态库」是正常形态），否则两者都
+// 必须被调用——漏掉任一个都会让一条运行态记录凭空消失。
+func TestAppendOnFinishHandlesNilFirst(t *testing.T) {
+	var called []string
+	second := func(_ dispatcher.WorkItem, _ dispatcher.SessionOutcome) { called = append(called, "second") }
+	if got := appendOnFinish(nil, second); got == nil {
+		t.Fatal("first 为 nil 时应直接返回 second")
+	} else {
+		got(dispatcher.WorkItem{}, dispatcher.SessionOutcome{})
+	}
+	first := func(_ dispatcher.WorkItem, _ dispatcher.SessionOutcome) { called = append(called, "first") }
+	appendOnFinish(first, second)(dispatcher.WorkItem{}, dispatcher.SessionOutcome{})
+	want := []string{"second", "first", "second"}
+	if len(called) != len(want) {
+		t.Fatalf("called = %v, want %v", called, want)
+	}
+	for index := range want {
+		if called[index] != want[index] {
+			t.Fatalf("called = %v, want %v", called, want)
+		}
+	}
+}
+
+// TestGiteaTargetUsesReviewAgentModelAndBin 断言 agents 池里的 review 定义在
+// **独立执行**（调度引擎自己起会话）时生效：模型与 claude 可执行文件都取自
+// agents.review，而不是运行时的默认值。评审用什么模型是项目自己的决定（比如
+// 分诊用更便宜的模型），装配处漏接等于把这份配置静默丢掉。
+func TestGiteaTargetUsesReviewAgentModelAndBin(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	root := t.TempDir()
+	t.Setenv("GITEA_ACCESS_TOKEN", "env-token")
+
+	file := &instances.File{
+		Agents: map[string]instances.Agent{
+			"review": {Model: "review-模型", ClaudeBin: "/opt/claude-review"},
+		},
+		Channels: []instances.Channel{{
+			Type: instances.ChannelGitea, Host: "https://gitea.example.com", Reviewer: "ai",
+			Token: "$GITEA_ACCESS_TOKEN",
+			Repos: []instances.Repo{{Name: "acme/rocket"}},
+		}},
+		Runtimes: map[string]instances.Runtime{"main": {Root: root}},
+	}
+	runtime, err := file.ResolveRuntime("")
+	if err != nil {
+		t.Fatalf("ResolveRuntime: %v", err)
+	}
+
+	command := &cobra.Command{}
+	command.SetOut(&bytes.Buffer{})
+	command.SetErr(&bytes.Buffer{})
+	target, err := giteaTarget(command, file, "", runtime, &file.Channels[0], file.Channels[0].Repos[0], &dispatcherOptions{})
+	if err != nil {
+		t.Fatalf("giteaTarget: %v", err)
+	}
+	if target.config.Model != "review-模型" {
+		t.Errorf("Model = %q, want agents.review 的模型", target.config.Model)
+	}
+	if target.config.ClaudeBin != "/opt/claude-review" {
+		t.Errorf("ClaudeBin = %q, want agents.review 的可执行文件", target.config.ClaudeBin)
+	}
+
+	// 命令行显式给了 --model 时不能被 agents 池翻案（显式 > 配置）。
+	explicit, err := giteaTarget(command, file, "", runtime, &file.Channels[0], file.Channels[0].Repos[0],
+		&dispatcherOptions{Model: "命令行模型"})
+	if err != nil {
+		t.Fatalf("giteaTarget(--model): %v", err)
+	}
+	if explicit.config.Model != "命令行模型" {
+		t.Errorf("Model = %q, want 命令行显式值", explicit.config.Model)
+	}
+}
+
+// TestResolveDispatchTargetsRejectsBrokenConfigAndUnknownRuntime 断言目标解析的
+// 两条硬失败姿态：配置语法坏掉时必须报错，而不是当成「没有配置」退回环境变量
+// 单实例模式（那会让 run 对着另一套站点跑）；--runtime 点名了配置里不存在的
+// 运行时同样要报错，静默改用默认运行时等于把评审挂到别的运行树上。
+func TestResolveDispatchTargetsRejectsBrokenConfigAndUnknownRuntime(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	command := &cobra.Command{}
+	command.SetOut(&bytes.Buffer{})
+	command.SetErr(&bytes.Buffer{})
+
+	broken := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(broken, []byte("{ 这不是 JSON"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveDispatchTargets(command, "", broken, &dispatcherOptions{}); err == nil {
+		t.Error("坏配置应报错，而不是退回环境变量单实例模式")
+	}
+
+	valid := filepath.Join(t.TempDir(), "config.json")
+	if err := instances.Save(valid, &instances.File{
+		Channels: []instances.Channel{{
+			Type: instances.ChannelGitea, Host: "https://gitea.example.com", Reviewer: "ai",
+			Repos: []instances.Repo{{Name: "acme/rocket"}},
+		}},
+		Runtimes: map[string]instances.Runtime{"main": {Root: t.TempDir()}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveDispatchTargets(command, "", valid, &dispatcherOptions{Runtime: "不存在"}); err == nil {
+		t.Error("未知 --runtime 应报错")
+	}
+}
+
+// TestResolveDispatchTargetsSkipsDisabledAndUnreferencedChannels 断言调度只吃
+// 「本 runtime 引用且启用」的 gitea 通道：停用的通道保留定义但不产生目标，
+// 未被子 runtime 引用的通道同理。两类漏判都会让 run 在操作者明示的范围之外
+// 起会话——那是把会话开到别人没打算监控的站点上。
+func TestResolveDispatchTargetsSkipsDisabledAndUnreferencedChannels(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	data := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", data)
+	disabled := false
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := instances.Save(configPath, &instances.File{
+		Channels: []instances.Channel{
+			{ // 未命名 gitea（key=gitea）：被 runtime 引用，应当产出目标。
+				Type: instances.ChannelGitea, Host: "https://gitea.example.com", Reviewer: "ai",
+				Repos: []instances.Repo{{Name: "acme/rocket"}},
+			},
+			{ // 启用但未被 runtime 引用：跳过。
+				Type: instances.ChannelGitea, Name: "extra", Host: "https://gitea-extra.example.com",
+				Reviewer: "ai", Repos: []instances.Repo{{Name: "acme/extra"}},
+			},
+			{ // 已停用：即使定义还在也不碰。
+				Type: instances.ChannelGitea, Name: "off", Host: "https://gitea-off.example.com",
+				Enabled: &disabled, Reviewer: "ai", Repos: []instances.Repo{{Name: "acme/off"}},
+			},
+		},
+		Runtimes: map[string]instances.Runtime{"main": {Root: data, Channels: []string{"gitea"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	withReviewCredential(t, "https://gitea.example.com")
+
+	command := &cobra.Command{}
+	command.SetOut(&bytes.Buffer{})
+	command.SetErr(&bytes.Buffer{})
+
+	targets, err := resolveDispatchTargets(command, "", configPath, &dispatcherOptions{})
+	if err != nil {
+		t.Fatalf("resolveDispatchTargets: %v", err)
+	}
+	if len(targets) != 1 || targets[0].repo.Name != "acme/rocket" {
+		t.Fatalf("targets = %+v, want 只留被引用且启用的 acme/rocket", targets)
 	}
 }

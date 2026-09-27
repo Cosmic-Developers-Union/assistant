@@ -43,6 +43,7 @@ tempdir 里也不会失败。**已覆盖**的部分：空/非法内容被 `Valid
 | `internal/setup` | `RandomPassword` 75% | Go 1.24+ 的 `crypto/rand.Read` 不返回错误（失败即 panic），无法注入 |
 | `internal/setup` | `do` 89.3%、`userTokenRequest` 89.3% | `json.Marshal`（入参类型固定）/ `http.NewRequestWithContext`（host 已由 `validate` 保证可解析）/ `io.ReadAll`（httptest 下无法构造读取失败） |
 | `internal/status` | `getJSON` 的相关分支 | 同上；**已覆盖** 403→`PermissionError`、非 2xx 带响应体、JSON 解析失败带路径、`out` 为 nil 与空体不解析 |
+| `cmd/assistant` | `newDispatchClient` 的 `status.NewClient` 失败臂 | 与 `internal/setup` 同因：`gitea.NewClient` 只在 ClientOption 出错时返回 error，而这里只传 `SetHTTPClient`/`SetToken`/`SetUserAgent`/`SetGiteaVersion`（皆恒返回 nil）。实测该行 0 次命中——不是漏测，是无从触发 |
 
 ## 四、需要真实进程 / 网络 / 计时器
 
@@ -60,27 +61,28 @@ tempdir 里也不会失败。**已覆盖**的部分：空/非法内容被 `Valid
 
 ## 五、`cmd/assistant` 的剩余缺口
 
-该包阈值 90%，实测 **89.0%**（3284 条语句，未覆盖 360），**距阈值还差 32 条**。
+该包阈值 90%，实测 **90.0%**（3200 条语句，未覆盖 319）。下表是**尚未覆盖**的
+部分——目标是让每一块的形态都说得清，而不是把数字凑到线以上。
 
 | 文件 | 未覆盖语句 | 主要形态 |
 |---|---|---|
-| `cmd/assistant/daemon.go` | 104 | `runWeixinLogin`（交互式扫码登录）等 |
-| `cmd/assistant/dispatch.go` | 103 | 调度器装配后的回调路径（需真实待办与 Gitea 往返） |
+| `cmd/assistant/daemon.go` | 105 | `runWeixinLogin`（交互式扫码登录）等 |
+| `cmd/assistant/dispatch.go` | 61 | 装配后回调里需要真实待办/失败注入的分支（状态库故障臂、PR worktree 的 fetch） |
 | `main.go` | 25 | `main()` 全体：signal 接线 + `ExecuteContext` + `os.Exit`，无返回路径 |
 | `config.go` | 16 | `readAPIKey` 的 pty 分支、备份/写盘失败臂 |
-| `serve.go` / `login_identity.go` / `init.go` / `login.go` 等 | 各 12–15 | 注缝之外的 IO 失败臂、真 pty |
+| `serve.go` / `login_identity.go` / `login.go` / `init.go` 等 | 各 12–15 | 注缝之外的 IO 失败臂、真 pty |
 
 **注意措辞**：这些是「当前注入缝之外」的路径，不是「原则上不可达」。其中两类确有
 可达路径，只是各有代价：
 
 - `main.go` 的 25 条可用**子进程**方式驱动（`go test` 里 exec 自己编译出的二进制、
   发信号、断言退出码），代价是引入一个真实子进程测试装置；
-- `daemon.go` / `dispatch.go` 的 207 条（占未覆盖的 57%）需要真实扫码或真实 Gitea
-  往返，只能走 `make test-e2e`。
+- `daemon.go` / `dispatch.go` 的 166 条（占未覆盖的 52%）需要真实扫码、失败注入或
+  真实 Gitea 往返，只能走 `make test-e2e`。
 
 按 `AGENTS.md`：这类边界用可注入的缝把逻辑测到、真实调用交给 e2e，**不为凑数字写
-无意义的测试**。因此本包的缺口如实登记；是否需要为那 32 条引入子进程装置，是取舍
-问题而非「漏测」。
+无意义的测试**。因此本包的缺口如实登记；是否需要为 `main.go` 那 25 条引入子进程
+装置，是取舍问题而非「漏测」。
 
 ## 六、形式化规格约束的语义核
 

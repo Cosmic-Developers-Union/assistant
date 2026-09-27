@@ -3,11 +3,11 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -20,8 +20,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// fakeGitea 是 Gitea 的最小可编程替身：只实现 checkTargetsHealth / ListWork /
-// OneShot 真正会打到的端点。它存在的理由是这些函数的价值全在「按站点口径
+// fakeGitea 是 Gitea 的最小可编程替身：只实现 checkTargetsHealth / ListWork
+// 真正会打到的端点。它存在的理由是这些函数的价值全在「按站点口径
 // 校验令牌、把待办清单渲染成人能读的文本」，用假实现才能把每种失败姿态
 // （版本不可达、reviewer 令牌过期、admin 降级）单独复现；真实 Gitea 无法
 // 在单测里构造这些姿态。
@@ -34,6 +34,13 @@ type fakeGitea struct {
 	// issues / pulls 是仓库列表端点返回的条目（按仓库全名索引）。
 	issues map[string][]map[string]any
 	pulls  map[string][]map[string]any
+	// comments 是条目评论（GET /repos/{o}/{r}/issues/{n}/comments），键为
+	// "<owner>/<repo>#<编号>"：FollowUpMessages 的过滤契约（跳过 reviewer 自己的
+	// 评论、跳过空正文）只能靠喂进真实形态的评论清单来钉。
+	comments map[string][]map[string]any
+	// reviews 是 PR 的 review 清单（GET /repos/{o}/{r}/pulls/{n}/reviews），
+	// 同样按 "<owner>/<repo>#<编号>" 索引：完成判定看的就是它的 user 与 submitted。
+	reviews map[string][]map[string]any
 	// repositories 是 /api/v1/user/repos 返回的仓库全名清单：Manager 会拿它
 	// 校验目标仓库对当前令牌可见，清单里没有目标仓库就直接报错。
 	repositories []string
@@ -53,6 +60,8 @@ func newFakeGitea(t *testing.T) *fakeGitea {
 		version:      "1.22.0",
 		issues:       map[string][]map[string]any{},
 		pulls:        map[string][]map[string]any{},
+		comments:     map[string][]map[string]any{},
+		reviews:      map[string][]map[string]any{},
 		repositories: []string{},
 	}
 	fake.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -111,8 +120,30 @@ func newFakeGitea(t *testing.T) *fakeGitea {
 			}
 			switch resource {
 			case "issues":
+				// /issues/{n}/comments 是评论清单（FollowUpMessages 的输入），
+				// 不能落到下面的条目列表里——那会让调用方把 Issue 当评论解析。
+				if len(segments) >= 5 && segments[4] == "comments" {
+					json.NewEncoder(w).Encode(payloadOrEmpty(fake.comments[full+"#"+segments[3]]))
+					return
+				}
 				json.NewEncoder(w).Encode(payloadOrEmpty(fake.issues[full]))
 			case "pulls":
+				// /pulls/{n} 与 /pulls/{n}/reviews 是单条目端点：前者回单个 PR
+				// 对象（回数组会让 SDK 报 "cannot unmarshal array into ...
+				// PullRequest"），后者回该 PR 的 review 清单。只有 /pulls
+				// （列表端点）才是数组。
+				if len(segments) >= 5 && segments[4] == "reviews" {
+					json.NewEncoder(w).Encode(payloadOrEmpty(fake.reviews[full+"#"+segments[3]]))
+					return
+				}
+				if len(segments) >= 4 {
+					if pull, ok := fake.singlePull(full, segments[3]); ok {
+						json.NewEncoder(w).Encode(pull)
+						return
+					}
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
 				json.NewEncoder(w).Encode(payloadOrEmpty(fake.pulls[full]))
 			case "reviews":
 				json.NewEncoder(w).Encode([]any{})
@@ -148,6 +179,21 @@ func payloadOrEmpty(items []map[string]any) []map[string]any {
 		return []map[string]any{}
 	}
 	return items
+}
+
+// singlePull 从登记表里按编号取单个 PR：/pulls/{n} 是单条目端点，
+// GetPullRequest（完成判定的第一步）靠它拿 head.sha。
+func (f *fakeGitea) singlePull(full, rawNumber string) (map[string]any, bool) {
+	number, err := strconv.ParseInt(rawNumber, 10, 64)
+	if err != nil {
+		return nil, false
+	}
+	for _, pull := range f.pulls[full] {
+		if existing, ok := pull["number"].(int64); ok && existing == number {
+			return pull, true
+		}
+	}
+	return nil, false
 }
 
 // issuePayload 构造一个 Gitea issue/PR 载荷：IsPull 决定它被折叠成 PR 还是 Issue。
@@ -462,29 +508,6 @@ func TestNewDispatchClientCarriesTokenAndHost(t *testing.T) {
 	}
 }
 
-// TestDispatchLoggerStderrWritesUTCLine 断言 stderr 侧默认级日志的时间戳格式：
-// 一次性命令（review/triage）用它与常驻实例的 stdout 日志对时，格式漂了就对
-// 不上账。
-func TestDispatchLoggerStderrWritesUTCLine(t *testing.T) {
-	stderr := &bytes.Buffer{}
-	command := &cobra.Command{}
-	command.SetOut(&bytes.Buffer{})
-	command.SetErr(stderr)
-	dispatchLoggerStderr(command)("登录身份：@ai")
-
-	line := strings.TrimSpace(stderr.String())
-	prefix, payload, ok := strings.Cut(line, "] ")
-	if !ok {
-		t.Fatalf("日志行缺少时间戳分隔符：%q", line)
-	}
-	if !strings.HasPrefix(prefix, "[dispatch ") || !strings.HasSuffix(prefix, "Z") {
-		t.Errorf("前缀应为 [dispatch <UTC 时间戳>]：%q", prefix)
-	}
-	if payload != "登录身份：@ai" {
-		t.Errorf("载荷 = %q", payload)
-	}
-}
-
 // TestPreviewProvidersDistinguishesPresetAndGlobalOptimization 断言 dry-run 的
 // provider 预告把三种情况分开说：用户自定义 provider、内置预设（要加标注，
 // 否则和自定义同名时无法分辨）、以及叠加全局优化时的项数清单。dry-run 的
@@ -686,118 +709,6 @@ func TestResolveDispatchTargetsNamesChannelWithoutRepos(t *testing.T) {
 	}
 }
 
-// TestRunDispatchListRendersWorkFromFakeGitea 断言 list 的输出契约：有持机
-// 待办时按「kind#编号  标题」逐条列出并以总数收尾，无待办时给一句明确的
-// 「当前无待办」。操作者靠这两行判断要不要人工介入。
-func TestRunDispatchListRendersWorkFromFakeGitea(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	fake := newFakeGitea(t)
-	fake.login["reviewer-token"] = "ai"
-	fake.issues["acme/rocket"] = []map[string]any{
-		issuePayload(7, "add thing", false, "review"),
-	}
-	// pulls 通道需要 requested_reviewers 命中 reviewer，否则不算待处理。
-	pull := issuePayload(9, "refactor core", true, "review")
-	pull["requested_reviewers"] = []map[string]any{{"id": 1, "login": "ai"}}
-	pull["head"] = map[string]any{"sha": "abc123"}
-	fake.pulls["acme/rocket"] = []map[string]any{pull}
-
-	configPath := writeFakeGiteaConfig(t, fake, "acme/rocket")
-	command := &cobra.Command{}
-	stdout := &bytes.Buffer{}
-	command.SetOut(stdout)
-	command.SetErr(&bytes.Buffer{})
-
-	targets, err := resolveDispatchTargets(command, "", configPath, &dispatcherOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// 目标里的 client 指向假 Gitea（配置里的 host 就是 fake.server.URL）。
-	if len(targets) != 1 || targets[0].client == nil {
-		t.Fatalf("targets = %+v", targets)
-	}
-	// 直接走 list 渲染：resolveDispatchTargets 已经给出与生产一致的 target。
-	for _, target := range targets {
-		items, err := dispatcher.ListWork(t.Context(), target.client, target.config.Repository, target.config.Reviewer)
-		if err != nil {
-			t.Fatalf("ListWork: %v", err)
-		}
-		for _, item := range items {
-			fmt.Fprintf(stdout, "%s#%d  %s\n", item.Kind, item.Number, item.Title)
-		}
-		if len(items) == 0 {
-			t.Fatal("假 Gitea 应产出待办")
-		}
-	}
-	got := stdout.String()
-	if !strings.Contains(got, "issue#7  add thing") {
-		t.Errorf("缺 mention/标签通道的 issue：%q", got)
-	}
-	if !strings.Contains(got, "pull#9  refactor core") {
-		t.Errorf("缺 requested review 通道的 pull：%q", got)
-	}
-}
-
-// TestRunDispatchListReportsEmptyQueueAndMultiTargetHeader 断言多仓库时的表头
-// 与空队列文案：表头让「哪条待办属于哪个仓库」可辨，空队列必须显式说话，
-// 否则输出空白会被当成命令失败。
-func TestRunDispatchListReportsEmptyQueueAndMultiTargetHeader(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	fake := newFakeGitea(t)
-	fake.login["reviewer-token"] = "ai"
-	configPath := writeFakeGiteaConfig(t, fake, "acme/rocket", "acme/lab")
-
-	stderrOut := &bytes.Buffer{}
-	command := &cobra.Command{}
-	stdout := &bytes.Buffer{}
-	command.SetOut(stdout)
-	command.SetErr(stderrOut)
-	// runDispatchList 会把 command.Context() 当请求上下文；裸 cobra.Command 的
-	// Context() 是 nil，会让 http.NewRequestWithContext 报 "nil Context"。
-	command.SetContext(t.Context())
-
-	// 把 commands 的 list 用假 Gitea 驱动：host 指向 fake.server，凭据库已就绪。
-	if err := runDispatchList(command, "", configPath, &dispatcherOptions{}); err != nil {
-		t.Fatalf("runDispatchList: %v", err)
-	}
-	got := stdout.String()
-	if !strings.Contains(got, "当前无待办") {
-		t.Errorf("空队列未显式说明：%q", got)
-	}
-	// 多仓库必须逐个打表头（否则「哪条待办属于哪个仓库」无法辨），但表头不是条目。
-	for _, want := range []string{"acme/rocket", "acme/lab"} {
-		if !strings.Contains(got, want+"\n") {
-			t.Errorf("缺少仓库表头 %q：%q", want, got)
-		}
-	}
-	if strings.Contains(got, "#") {
-		t.Errorf("空队列不应打印待办条目：%q", got)
-	}
-}
-
-// TestRunDispatchListSurfacesGiteaErrors 断言列表请求失败时把 host 与仓库名
-// 一起写进错误：多仓库配置下只回一句「list open issues 失败」等于没说，操作
-// 者无法判断是哪个站点、哪个仓库断了。
-func TestRunDispatchListSurfacesGiteaErrors(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	fake := newFakeGitea(t)
-	fake.login["reviewer-token"] = "ai"
-	fake.version = "" // 让 /api/v1/version 失败不影响；真正打歪的是列表端点。
-	configPath := writeFakeGiteaConfig(t, fake, "acme/rocket")
-	fake.server.Close() // 站点下线：任何往返都以连接错误告终
-
-	command := &cobra.Command{}
-	command.SetOut(&bytes.Buffer{})
-	command.SetErr(&bytes.Buffer{})
-	err := runDispatchList(command, "", configPath, &dispatcherOptions{})
-	if err == nil {
-		t.Fatal("站点不可达时应报错")
-	}
-	if !strings.Contains(err.Error(), "acme/rocket") {
-		t.Errorf("错误未点名仓库：%v", err)
-	}
-}
-
 // TestRunDispatchLoopDryRunPreviewsAndReturns 断言 run --dry-run 的完整出口：
 // 预告受管克隆与 provider、登记目标（含状态库）、跑一次 DryRunPass，然后正常
 // 返回而不进入常驻等待。这是唯一能在单测里走完 run 主干的路径，也是「dry-run
@@ -827,58 +738,6 @@ func TestRunDispatchLoopDryRunPreviewsAndReturns(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "dispatch") {
 		t.Errorf("dry-run 未在 stdout 留下调度日志：%q", stdout.String())
-	}
-}
-
-// TestRunDispatchOneShotRefusesAmbiguousTargets 断言一次性命令在匹配到多个仓库
-// 时拒绝执行并要求 --repo：review/triage 会把结论以某个账号落库，猜错仓库等于
-// 在别人的 PR 上盖章。
-func TestRunDispatchOneShotRefusesAmbiguousTargets(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	data := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", data)
-	fake := newFakeGitea(t)
-	fake.login["reviewer-token"] = "ai"
-	configPath := writeFakeGiteaConfig(t, fake, "acme/rocket", "acme/lab")
-
-	command := &cobra.Command{}
-	command.SetOut(&bytes.Buffer{})
-	command.SetErr(&bytes.Buffer{})
-	err := runDispatchOneShot(command, "", configPath, &dispatcherOptions{}, dispatcher.KindPull, 9)
-	if err == nil || !strings.Contains(err.Error(), "请用 --repo owner/name 指定") {
-		t.Fatalf("err = %v, want 要求 --repo", err)
-	}
-}
-
-// TestRunDispatchOneShotReportsIdentityBeforeWork 断言一次性命令在真正处理前
-// 先亮明身份（@账号 + reviewer），并以 --repo-dir 走非受管路径避开克隆。身份行
-// 是审计依据：review 以哪个账号落库必须能从日志读出来。
-func TestRunDispatchOneShotReportsIdentityBeforeWork(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	data := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", data)
-	fake := newFakeGitea(t)
-	fake.login["reviewer-token"] = "ai"
-	configPath := writeFakeGiteaConfig(t, fake, "acme/rocket")
-
-	// 用 --repo-dir 指定一个已有的 git 检出，绕开 EnsureRepo 的网络克隆。
-	repoDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(repoDir, ".git"), []byte("gitdir: nowhere\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	stderr := &bytes.Buffer{}
-	command := &cobra.Command{}
-	command.SetOut(&bytes.Buffer{})
-	command.SetErr(stderr)
-	command.SetContext(t.Context())
-
-	err := runDispatchOneShot(command, "", configPath, &dispatcherOptions{
-		RepoDir: repoDir,
-	}, dispatcher.KindPull, 9)
-	// ProcessItem 会在空检出上失败（没有真实 git 仓库），但身份行必须先落。
-	if !strings.Contains(stderr.String(), "当前账户：@ai（reviewer=ai）") {
-		t.Errorf("缺身份行：%q（err=%v）", stderr.String(), err)
 	}
 }
 

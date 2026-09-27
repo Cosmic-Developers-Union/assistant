@@ -173,7 +173,7 @@ func AcquireLock(lockFile string, log func(string)) error {
 	}
 }
 
-// ReleaseLock 释放单飞锁（一次性命令 review/triage 用；RunLoop 退出时自管）。
+// ReleaseLock 释放单飞锁（RunLoop 退出时自管）。
 func ReleaseLock(lockFile string) {
 	_ = os.Remove(lockFile)
 }
@@ -720,7 +720,7 @@ func (d Deps) selectDispatch(ctx context.Context, guards *guardState, item WorkI
 	return item, true
 }
 
-// ProcessItem 处理单个待办（主循环逐项调用；review/triage 一次性命令也走这里）。
+// ProcessItem 处理单个待办（主循环逐项调用）。
 // 会话进度两路落点：控制台实时显示基础进度，完整明细实时写待办日志。
 // 每个待办每次只起一个会话：处理完即放行等待下一轮检测，同一请求的重复信号
 // 由主循环的双通道守卫吸收（标签 settled / mention 水位线，见 guardState）。

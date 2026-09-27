@@ -49,11 +49,19 @@ func TestRootCommandShowsHelpWithoutArguments(t *testing.T) {
 		!strings.Contains(output, "doctor") ||
 		!strings.Contains(output, "login") ||
 		!strings.Contains(output, "init") ||
-		!strings.Contains(output, "run") ||
-		!strings.Contains(output, "list") ||
-		!strings.Contains(output, "review") ||
-		!strings.Contains(output, "triage") {
+		!strings.Contains(output, "run") {
 		t.Errorf("help output = %q", output)
+	}
+	// 只读列出与单条目重跑（list / review / triage）不再对用户暴露：help 里的
+	// review/triage 字样来自 check 的说明文案，所以这里按命令树而不是按文案断言。
+	topLevel := map[string]bool{}
+	for _, child := range command.Commands() {
+		topLevel[child.Name()] = true
+	}
+	for _, removed := range []string{"list", "review", "triage"} {
+		if topLevel[removed] {
+			t.Errorf("命令 %s 已移除，不应再挂在命令树上", removed)
+		}
 	}
 	// 上面只能证明 help 文案出现，这里直接确认 action 及其子命令挂在命令树上。
 	if _, _, err := command.Find([]string{"action", "label-sync"}); err != nil {

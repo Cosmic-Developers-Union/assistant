@@ -87,9 +87,10 @@ func countRepos(file *instances.File, referenced map[string]bool) int {
 	return total
 }
 
-// newDispatcherCommands 构造调度引擎子命令：run（常驻）/ list（只读列出）/
-// review（立即评审单个 PR）/ triage（立即分诊单个 Issue）。
-func newDispatcherCommands(repoFlag, configFlag *string) []*cobra.Command {
+// newDispatcherCommand 构造调度引擎主命令 run：常驻主循环，检测待办 → 每个待办
+// 一个会话 → 验证 → 清理。只读列出与单条目重跑（list / review / triage）不对
+// 用户暴露——待办的产生与处理都由主循环按同一套守卫负责。
+func newDispatcherCommand(repoFlag, configFlag *string) *cobra.Command {
 	runOptions := &dispatcherOptions{}
 	runCommand := &cobra.Command{
 		Use:   "run",
@@ -133,54 +134,7 @@ func newDispatcherCommands(repoFlag, configFlag *string) []*cobra.Command {
 		"daemon 状态 API 监听地址（Bearer 鉴权，端点写入配置目录 daemon.json；缺省取 runtime 的 api_listen=127.0.0.1:8770；off 关闭）",
 	)
 
-	listOptions := &dispatcherOptions{}
-	listCommand := &cobra.Command{
-		Use:   "list",
-		Short: "只读列出当前待办（快速验证 host/仓库/令牌/标签链路）",
-		Args:  cobra.NoArgs,
-		RunE: func(command *cobra.Command, _ []string) error {
-			return runDispatchList(command, *repoFlag, *configFlag, listOptions)
-		},
-	}
-	addDispatcherConnectionFlags(listCommand, listOptions)
-
-	reviewOptions := &dispatcherOptions{}
-	reviewCommand := &cobra.Command{
-		Use:   "review <number>",
-		Short: "立即评审单个 PR（跳过检测，端到端调试用）",
-		Args:  cobra.ExactArgs(1),
-		// 编号是数字参数：不触发文件补全
-		ValidArgsFunction: cobra.NoFileCompletions,
-		RunE: func(command *cobra.Command, args []string) error {
-			number, err := parseItemNumber(args[0])
-			if err != nil {
-				return err
-			}
-			return runDispatchOneShot(command, *repoFlag, *configFlag, reviewOptions, dispatcher.KindPull, number)
-		},
-	}
-	addDispatcherConnectionFlags(reviewCommand, reviewOptions)
-	reviewCommand.Flags().StringVar(&reviewOptions.Timeout, "timeout", "", "单会话超时（缺省 30m）")
-
-	triageOptions := &dispatcherOptions{}
-	triageCommand := &cobra.Command{
-		Use:   "triage <number>",
-		Short: "立即分诊单个 Issue（跳过检测）",
-		Args:  cobra.ExactArgs(1),
-		// 编号是数字参数：不触发文件补全
-		ValidArgsFunction: cobra.NoFileCompletions,
-		RunE: func(command *cobra.Command, args []string) error {
-			number, err := parseItemNumber(args[0])
-			if err != nil {
-				return err
-			}
-			return runDispatchOneShot(command, *repoFlag, *configFlag, triageOptions, dispatcher.KindIssue, number)
-		},
-	}
-	addDispatcherConnectionFlags(triageCommand, triageOptions)
-	triageCommand.Flags().StringVar(&triageOptions.Timeout, "timeout", "", "单会话超时（缺省 30m）")
-
-	return []*cobra.Command{runCommand, listCommand, reviewCommand, triageCommand}
+	return runCommand
 }
 
 func addDispatcherConnectionFlags(command *cobra.Command, options *dispatcherOptions) {
@@ -219,14 +173,6 @@ func addDispatcherConnectionFlags(command *cobra.Command, options *dispatcherOpt
 		false,
 		"每轮检测前把宿主检出强制对齐 origin 基线（fetch --prune + checkout -f -B + clean -fd；部署形态开启，共享开发检出勿开）",
 	)
-}
-
-func parseItemNumber(raw string) (int64, error) {
-	number, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || number <= 0 {
-		return 0, fmt.Errorf("无效的编号：%s", raw)
-	}
-	return number, nil
 }
 
 // resolveEnvDispatcher 是环境变量单实例模式的配置装配：host/仓库缺省时从 cwd
@@ -512,14 +458,10 @@ func giteaTarget(
 	if flags.Concurrency == "" {
 		flags.Concurrency = strconv.Itoa(runtime.Workers())
 	}
-	config, err := dispatcher.ResolveConfig(flags, repoDir, os.Getenv, func() (string, string, bool) {
-		return channel.Host, repo.Name, true
-	})
-	if err != nil {
-		return dispatchTarget{}, err
-	}
 	// review agent 定义（agents 池，用户同名覆盖内置）：独立执行时它的
-	// model/claude_bin 生效；provider 仍走 repo > 通道 > runtime > 全局链
+	// model/claude_bin 生效；provider 仍走 repo > 通道 > runtime > 全局链。
+	// 必须在 ResolveConfig 之前落进 flags——它按值接收，之后再改 flags 是
+	// 死代码（agents.review 的覆盖会静默失效）。
 	if reviewAgent, ok := file.Agents["review"]; ok {
 		if flags.Model == "" {
 			flags.Model = reviewAgent.Model
@@ -527,6 +469,12 @@ func giteaTarget(
 		if flags.ClaudeBin == "" {
 			flags.ClaudeBin = reviewAgent.ClaudeBin
 		}
+	}
+	config, err := dispatcher.ResolveConfig(flags, repoDir, os.Getenv, func() (string, string, bool) {
+		return channel.Host, repo.Name, true
+	})
+	if err != nil {
+		return dispatchTarget{}, err
 	}
 	providerName := file.GiteaProviderName(runtime, channel, &repo)
 	effective, err := file.EffectiveOverrides(providerName)
@@ -854,14 +802,6 @@ func newDispatchLoggers(w io.Writer, verbose, debug bool) dispatchLoggers {
 		info:    newLogger("dispatch", true),
 		verbose: newLogger("dispatch:v", verbose),
 		debug:   newLogger("dispatch:d", debug),
-	}
-}
-
-// dispatchLoggerStderr 是 stderr 上的 default 级日志（run.yaml 解析期提示）。
-func dispatchLoggerStderr(command *cobra.Command) func(string) {
-	return func(line string) {
-		fmt.Fprintf(command.ErrOrStderr(), "[dispatch %s] %s\n",
-			time.Now().UTC().Format("2006-01-02T15:04:05.000Z"), line)
 	}
 }
 
@@ -1208,82 +1148,4 @@ func runDispatchLoop(command *cobra.Command, repoFlag, configPath string, option
 		return nil
 	}
 	return dispatcher.RunAll(command.Context(), depsList)
-}
-
-func runDispatchList(command *cobra.Command, repoFlag, configPath string, options *dispatcherOptions) error {
-	targets, err := resolveDispatchTargets(command, repoFlag, configPath, options)
-	if err != nil {
-		return err
-	}
-	stdout := command.OutOrStdout()
-	work := 0
-	for _, target := range targets {
-		items, err := dispatcher.ListWork(command.Context(), target.client, target.config.Repository, target.config.Reviewer)
-		if err != nil {
-			return fmt.Errorf("%s %s: %w", target.config.Host, target.config.Repository.FullName(), err)
-		}
-		if len(targets) > 1 {
-			fmt.Fprintf(stdout, "%s %s\n", target.config.Host, target.config.Repository.FullName())
-		}
-		for _, item := range items {
-			fmt.Fprintf(stdout, "%s#%d  %s\n", item.Kind, item.Number, item.Title)
-		}
-		work += len(items)
-	}
-	if work == 0 {
-		fmt.Fprintln(stdout, "当前无待办")
-	} else {
-		fmt.Fprintf(stdout, "共 %d 个待办\n", work)
-	}
-	return nil
-}
-
-// runDispatchOneShot 处理 review/triage 一次性命令：跳过检测直接处理指定编号，
-// 与常驻实例互斥（共单飞锁），且与常驻实例同口径先对齐基线（fail-closed）。
-func runDispatchOneShot(
-	command *cobra.Command,
-	repoFlag, configPath string,
-	options *dispatcherOptions,
-	kind string,
-	number int64,
-) error {
-	targets, err := resolveDispatchTargets(command, repoFlag, configPath, options)
-	if err != nil {
-		return err
-	}
-	if len(targets) != 1 {
-		return fmt.Errorf("匹配到 %d 个仓库，请用 --repo owner/name 指定要处理的仓库", len(targets))
-	}
-	target := targets[0]
-	if target.managed {
-		targets = prepareManagedTargets(command, targets)
-		target = targets[0]
-		if target.skipReason != "" {
-			return fmt.Errorf("仓库 %s 未就绪：%s", target.repo.Name, target.skipReason)
-		}
-	}
-	config := target.config
-	log := dispatchLoggerStderr(command)
-	// 一次性命令同样亮明身份：review 以该账号落库
-	if login, err := target.client.AuthenticatedUser(command.Context()); err == nil {
-		log(fmt.Sprintf("当前账户：@%s（reviewer=%s）", login, config.Reviewer))
-	}
-	if config.SyncMirror || target.managed {
-		if _, err := dispatcher.SyncMirror(target.repoDir, config.BaseBranch, targetToken(target)); err != nil {
-			return err
-		}
-	}
-	if err := os.MkdirAll(config.LogDir, 0o755); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(config.WorktreeRoot, 0o755); err != nil {
-		return err
-	}
-	if err := dispatcher.AcquireLock(config.LockFile, log); err != nil {
-		return err
-	}
-	defer dispatcher.ReleaseLock(config.LockFile)
-	deps := newDispatchDeps(target, command.OutOrStdout(), nil, nil, options.Verbose, options.Debug)
-	dispatcher.ProcessItem(command.Context(), deps, dispatcher.WorkItem{Kind: kind, Number: number})
-	return nil
 }

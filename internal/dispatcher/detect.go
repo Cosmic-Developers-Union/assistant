@@ -51,8 +51,8 @@ type WorkItem struct {
 	// 未变化条目跳过新评论细查。
 	Updated time.Time
 	// FollowUp 为真表示以追问轮执行（仅 mention 通道派发）：不重跑全量协议，
-	// 把 Since 之后他人新消息喂给同一会话续聊。由检测守卫设置，外部调用方
-	// （review/triage 一次性命令）恒为全量模式。
+	// 把 Since 之后他人新消息喂给同一会话续聊。由检测守卫设置，未经检测构造的
+	// 待办恒为全量模式。
 	FollowUp bool
 	// Since 是追问轮读取新消息的起点（该条目的 mention 水位线）。
 	Since time.Time

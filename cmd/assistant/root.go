@@ -43,8 +43,7 @@ func newRootCommand(stdout, stderr io.Writer, checker, labelSyncer, merger manag
 		Example: "  assistant check\n" +
 			"  assistant action label-sync --verbose\n" +
 			"  assistant action automerge --verbose\n" +
-			"  assistant run --dry-run\n" +
-			"  assistant review 58",
+			"  assistant run --dry-run",
 	}
 	command.SetOut(stdout)
 	command.SetErr(stderr)
@@ -112,7 +111,7 @@ func newRootCommand(stdout, stderr io.Writer, checker, labelSyncer, merger manag
 		newAutomationCommand("automerge", "已弃用：请改用 assistant action automerge",
 			"请改用 assistant action automerge", merger, &options, stdout, stderr),
 	)
-	command.AddCommand(newDispatcherCommands(&options.Repository, &options.ConfigPath)...)
+	command.AddCommand(newDispatcherCommand(&options.Repository, &options.ConfigPath))
 	command.AddCommand(newLoginCommand(&options.ConfigPath))
 	command.AddCommand(newWeixinCommand(&options.ConfigPath))
 	command.AddCommand(newQQCommand(&options.ConfigPath))

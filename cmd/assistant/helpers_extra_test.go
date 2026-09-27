@@ -72,44 +72,6 @@ func TestShortGiteaPathStripsAPIPrefix(t *testing.T) {
 	}
 }
 
-// TestParseItemNumberRejectsNonPositive 断言 --item 的入参只在正整数时成立：
-// 0 与负数在 Gitea 里不存在（number 从 1 起），放过去只会换来一次无意义往返。
-func TestParseItemNumberRejectsNonPositive(t *testing.T) {
-	for _, testCase := range []struct {
-		input   string
-		want    int64
-		wantErr bool
-	}{
-		{"1", 1, false},
-		{"9007199254740993", 9007199254740993, false},
-		{"0", 0, true},
-		{"-3", 0, true},
-		{"abc", 0, true},
-		{"", 0, true},
-		{"1.5", 0, true},
-		{"9223372036854775808", 0, true},
-	} {
-		t.Run(testCase.input, func(t *testing.T) {
-			got, err := parseItemNumber(testCase.input)
-			if testCase.wantErr {
-				if err == nil {
-					t.Fatalf("parseItemNumber(%q) error = nil", testCase.input)
-				}
-				if !strings.Contains(err.Error(), "无效的编号") {
-					t.Errorf("error = %v, 缺少语境", err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("parseItemNumber(%q) error = %v", testCase.input, err)
-			}
-			if got != testCase.want {
-				t.Errorf("parseItemNumber(%q) = %d, want %d", testCase.input, got, testCase.want)
-			}
-		})
-	}
-}
-
 // TestFirstNonEmptyPrefersTrimmedValue 断言回退链取的是去掉空白后的值：配置里
 // 的空串与全空格都应视为未设置，否则会把 "--repo ”" 这种空值当成有效仓库名。
 func TestFirstNonEmptyPrefersTrimmedValue(t *testing.T) {
