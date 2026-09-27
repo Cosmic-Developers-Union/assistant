@@ -184,6 +184,12 @@ func (r execRunner) Run(ctx context.Context, spec Spec, onLine func([]byte)) err
 		return waitErr
 	case timedOut.Load():
 		return fmt.Errorf("会话超时（>%dms），已 SIGTERM 终止", spec.Timeout.Milliseconds())
+	case ctx.Err() != nil:
+		// ctx 到时限时（daemon 的路径：它用 ctx 限时而非 Spec.Timeout），
+		// os/exec 对进程发的是 SIGKILL，退出状态里只剩「被信号终止」。直接照搬
+		// 会把超时报成「被信号杀死」——用户按字面去查「谁杀了我」，而真正该看
+		// 的是「这一轮跑太久了」。所以先认 ctx：到点了就说超时。
+		return fmt.Errorf("会话超时（%s），已终止", describeContextEnd(ctx.Err()))
 	}
 
 	if exitCode := command.ProcessState.ExitCode(); exitCode != 0 {
@@ -194,6 +200,18 @@ func (r execRunner) Run(ctx context.Context, spec Spec, onLine func([]byte)) err
 		return fmt.Errorf("claude %s", how)
 	}
 	return nil
+}
+
+// describeContextEnd 把 ctx 的结束原因折成可读短语。
+func describeContextEnd(err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "已达该轮时限"
+	case errors.Is(err, context.Canceled):
+		return "已被取消"
+	default:
+		return "上下文已结束"
+	}
 }
 
 // followInterval 是跟随 stdout 的轮询间隔。文件读写没有事件通知，只能轮询；

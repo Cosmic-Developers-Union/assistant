@@ -3,6 +3,7 @@ package claude
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -286,6 +287,88 @@ func TestExecRunnerContextCancellation(t *testing.T) {
 	}
 	if len(*lines) == 0 || !strings.Contains((*lines)[0], "working") {
 		t.Errorf("取消前已产出的行应仍交付：%v", *lines)
+	}
+	if !strings.Contains(err.Error(), "超时") || strings.Contains(err.Error(), "信号") {
+		t.Errorf("ctx 取消应报超时而非信号：%v", err)
+	}
+}
+
+// ctx 到时限（daemon 的真实路径：它用 ctx 限时、Spec.Timeout 留 0）必须报
+// **超时**，不能报「被信号终止」。
+//
+// 这条守着一个用户可见的缺陷：os/exec 在 ctx 到期时对进程发 SIGKILL，退出状态里
+// 只剩「被信号终止」。照搬它，用户会看到「claude 被信号 SIGKILL 终止」——按字面
+// 去查「谁杀了我」，而真正该看的是「这一轮跑太久了」。对话默认超时 3 分钟，超时
+// 是常见路径，误导代价不小。
+func TestExecRunnerContextDeadlineReportsTimeout(t *testing.T) {
+	requireShell(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := NewExecRunner().Run(ctx, Spec{
+		Bin:  "sh",
+		Args: []string{"-c", "sleep 30"},
+	}, nil)
+	if err == nil {
+		t.Fatal("ctx 到期应报错")
+	}
+	if !strings.Contains(err.Error(), "超时") {
+		t.Errorf("ctx 到期应报超时：%v", err)
+	}
+	if strings.Contains(err.Error(), "信号") {
+		t.Errorf("ctx 到期不应报成被信号终止：%v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Errorf("ctx 到期应立即返回，实际 %v", elapsed)
+	}
+}
+
+// Spec.Timeout 与 ctx 两条超时路径都落到「超时」文案（一条 SIGTERM、一条
+// SIGKILL），调用方不必区分是谁先到点。
+func TestExecRunnerBothTimeoutPathsSayTimeout(t *testing.T) {
+	requireShell(t)
+	specTimeoutErr := NewExecRunner().Run(context.Background(), Spec{
+		Bin:     "sh",
+		Args:    []string{"-c", "sleep 30"},
+		Timeout: 80 * time.Millisecond,
+	}, nil)
+	if specTimeoutErr == nil || !strings.Contains(specTimeoutErr.Error(), "超时") {
+		t.Errorf("Spec.Timeout 到期应报超时：%v", specTimeoutErr)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	ctxErr := NewExecRunner().Run(ctx, Spec{
+		Bin:  "sh",
+		Args: []string{"-c", "sleep 30"},
+	}, nil)
+	if ctxErr == nil || !strings.Contains(ctxErr.Error(), "超时") {
+		t.Errorf("ctx 到期应报超时：%v", ctxErr)
+	}
+	if strings.Contains(ctxErr.Error(), "信号") {
+		t.Errorf("两条路径都不该报成信号：%v", ctxErr)
+	}
+}
+
+// describeContextEnd 的三条出口。
+func TestDescribeContextEnd(t *testing.T) {
+	cases := []struct {
+		err  error
+		want string
+	}{
+		{context.DeadlineExceeded, "已达该轮时限"},
+		{context.Canceled, "已被取消"},
+		{errors.New("别的"), "上下文已结束"},
+	}
+	for _, testCase := range cases {
+		if got := describeContextEnd(testCase.err); got != testCase.want {
+			t.Errorf("describeContextEnd(%v) = %q, want %q", testCase.err, got, testCase.want)
+		}
+	}
+	// 包装过的错误也要认得（调用方常带语境再包一层）
+	wrapped := fmt.Errorf("跑会话: %w", context.DeadlineExceeded)
+	if got := describeContextEnd(wrapped); got != "已达该轮时限" {
+		t.Errorf("包装错误应经 errors.Is 识别：%q", got)
 	}
 }
 
