@@ -192,8 +192,6 @@ type Comment struct {
 
 type API interface {
 	ListRepositories(context.Context) ([]Repository, error)
-	ListTriageIssues(context.Context, Repository) ([]Issue, error)
-	ListReviewPullRequests(context.Context, Repository) ([]Issue, error)
 	ListOpenIssues(context.Context, Repository) ([]Issue, error)
 	CloseIssue(context.Context, Repository, int64) error
 	ListOpenPullRequests(context.Context, Repository) ([]PullRequest, error)

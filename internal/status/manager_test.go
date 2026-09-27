@@ -28,8 +28,6 @@ type reviewRequestChange struct {
 
 type fakeAPI struct {
 	repositories    []Repository
-	triageIssues    map[string][]Issue
-	reviewPulls     map[string][]Issue
 	openIssues      map[string][]Issue
 	pullRequests    map[string][]PullRequest
 	current         map[string]PullRequest
@@ -53,16 +51,15 @@ type fakeAPI struct {
 	reviewError     error
 	// armedPulls 是 ArmAutoMerge 的服务端排定状态；armResult 覆盖下一次武装
 	// 的结果（默认 AutoMergeArmed），armHeads 记录武装钉定的 head。
-	armedPulls     map[int64]bool
-	armResult      AutoMergeArmResult
-	armError       error
-	armCalls       []int64
-	armHeads       []string
-	disarmError    error
-	issueListError map[string]error
-	pullListError  map[string]error
-	protectError   map[string]error
-	nextLabelID    int64
+	armedPulls    map[int64]bool
+	armResult     AutoMergeArmResult
+	armError      error
+	armCalls      []int64
+	armHeads      []string
+	disarmError   error
+	pullListError map[string]error
+	protectError  map[string]error
+	nextLabelID   int64
 	// requestEvents 预置 PR 上针对 reviewer 的评审请求时刻（时间线
 	// review_request 事件）；timelineError 模拟时间线读取失败。
 	requestEvents map[string][]time.Time
@@ -80,17 +77,6 @@ type fakeAPI struct {
 
 func (f *fakeAPI) ListRepositories(context.Context) ([]Repository, error) {
 	return f.repositories, nil
-}
-
-func (f *fakeAPI) ListTriageIssues(_ context.Context, repository Repository) ([]Issue, error) {
-	if err := f.issueListError[repository.FullName()]; err != nil {
-		return nil, err
-	}
-	return f.triageIssues[repository.FullName()], nil
-}
-
-func (f *fakeAPI) ListReviewPullRequests(_ context.Context, repository Repository) ([]Issue, error) {
-	return f.reviewPulls[repository.FullName()], nil
 }
 
 func (f *fakeAPI) ListOpenIssues(_ context.Context, repository Repository) ([]Issue, error) {
@@ -1561,8 +1547,6 @@ func TestManagerReportsProgress(t *testing.T) {
 func newFakeAPI(repository Repository, labels []Label) *fakeAPI {
 	return &fakeAPI{
 		repositories:    []Repository{repository},
-		triageIssues:    map[string][]Issue{},
-		reviewPulls:     map[string][]Issue{},
 		openIssues:      map[string][]Issue{},
 		pullRequests:    map[string][]PullRequest{},
 		current:         map[string]PullRequest{},
@@ -1572,7 +1556,6 @@ func newFakeAPI(repository Repository, labels []Label) *fakeAPI {
 		protections:     map[string][]BranchProtection{},
 		statuses:        map[string][]CheckStatus{},
 		armedPulls:      map[int64]bool{},
-		issueListError:  map[string]error{},
 		pullListError:   map[string]error{},
 		protectError:    map[string]error{},
 		requestEvents:   map[string][]time.Time{},
@@ -1674,7 +1657,6 @@ func TestManagerDeletesUnexpectedLabels(t *testing.T) {
 func TestManagerReconcileLabelsCreatesMissingAndTouchesNothingElse(t *testing.T) {
 	repository := Repository{Owner: "acme", Name: "video"}
 	api := newFakeAPI(repository, nil) // 仓库上还没有任何标签
-	api.triageIssues[repository.FullName()] = []Issue{{Index: 9, Title: "待分诊"}}
 	api.pullRequests[repository.FullName()] = []PullRequest{{Index: 9}}
 
 	if err := NewManager(api).ReconcileLabels(t.Context(), repository); err != nil {
@@ -1817,45 +1799,6 @@ func TestManagerWithRepositoryVisibility(t *testing.T) {
 	})
 }
 
-// Check 只读检索待办：三路取数任一失败都要带回语境，且不影响其它仓库的结果。
-func TestManagerCheckReportsWork(t *testing.T) {
-	repository := Repository{Owner: "acme", Name: "video"}
-	api := newFakeAPI(repository, completeLabels())
-	api.triageIssues[repository.FullName()] = []Issue{
-		{Index: 3, Title: "待分诊", HTMLURL: "u3"},
-	}
-	api.reviewPulls[repository.FullName()] = []Issue{
-		{Index: 5, Title: "待评审", HTMLURL: "u5"},
-	}
-
-	report, err := NewManager(api).Check(t.Context())
-	if err != nil {
-		t.Fatalf("Check() error = %v", err)
-	}
-	if !report.HasWork() {
-		t.Fatal("HasWork() = false, want true")
-	}
-	if len(report.NeedsTriage) != 1 || report.NeedsTriage[0].Index != 3 {
-		t.Errorf("NeedsTriage = %+v", report.NeedsTriage)
-	}
-	if len(report.NeedsReview) != 1 || report.NeedsReview[0].Index != 5 {
-		t.Errorf("NeedsReview = %+v", report.NeedsReview)
-	}
-}
-
-// 所有可见仓库都失败时，错误要能定位到仓库（各仓库的错误用 errors.Join 汇总）。
-func TestManagerCheckJoinsRepositoryErrors(t *testing.T) {
-	repository := Repository{Owner: "acme", Name: "video"}
-	api := newFakeAPI(repository, completeLabels())
-	api.issueListError[repository.FullName()] = errors.New("boom")
-
-	if _, err := NewManager(api).Check(t.Context()); err == nil {
-		t.Fatal("Check() error = nil, want 汇总错误")
-	} else if !strings.Contains(err.Error(), repository.FullName()) {
-		t.Errorf("error = %v, want 含仓库名", err)
-	}
-}
-
 // reconcileRepository 的错误聚合：标签准备失败即中止（后续步骤没有标签可用），
 // 其余步骤各自记错并继续（一个 PR 失败不应拖住其它 PR）。
 func TestManagerReconcileRepositoryErrorAggregation(t *testing.T) {
@@ -1908,55 +1851,6 @@ func TestManagerReconcileRepositoryErrorAggregation(t *testing.T) {
 			}
 		}
 	})
-}
-
-// Check 的错误路径：任一仓库检索失败都要带上仓库名并继续其余仓库，最后聚合返回。
-func TestManagerCheckErrorBranches(t *testing.T) {
-	repository := Repository{Owner: "acme", Name: "video"}
-	other := Repository{Owner: "acme", Name: "video2"}
-
-	t.Run("triage 与 review 两侧都失败仍聚合", func(t *testing.T) {
-		api := newFakeAPI(repository, completeLabels())
-		api.repositories = []Repository{repository}
-		api.issueListError[repository.FullName()] = errors.New("triage 不可用")
-		manager := NewManager(api, WithContentReviewer("ai"))
-		report, err := manager.Check(t.Context())
-		if err == nil {
-			t.Fatal("error = nil, want 检索失败")
-		}
-		if !strings.Contains(err.Error(), repository.FullName()) {
-			t.Errorf("error = %v, want 含仓库名", err)
-		}
-		if report.HasWork() {
-			t.Errorf("report = %+v, want 空", report)
-		}
-	})
-
-	t.Run("一个仓库失败其余照常返回", func(t *testing.T) {
-		api := newFakeAPI(repository, completeLabels())
-		api.repositories = []Repository{repository, other}
-		api.issueListError[repository.FullName()] = errors.New("triage 不可用")
-		api.triageIssues[other.FullName()] = []Issue{{Index: 5, Title: "待分诊"}}
-		manager := NewManager(api, WithContentReviewer("ai"))
-		report, err := manager.Check(t.Context())
-		if err == nil {
-			t.Fatal("error = nil, want 至少一个仓库失败")
-		}
-		if len(report.NeedsTriage) != 1 || report.NeedsTriage[0].Repository.FullName() != other.FullName() {
-			t.Errorf("report.NeedsTriage = %+v, want 仅 video2#5", report.NeedsTriage)
-		}
-	})
-}
-
-// WriteReport 的写入失败必须暴露：报告写不出去（管道断开/磁盘满）时不能静默成功。
-func TestWriteReportPropagatesWriteErrors(t *testing.T) {
-	report := Report{
-		NeedsTriage: []IssueSummary{{Repository: Repository{Owner: "acme", Name: "video"}, Index: 1, Title: "t"}},
-		NeedsReview: []PullRequestSummary{{Repository: Repository{Owner: "acme", Name: "video"}, Index: 2, Title: "p"}},
-	}
-	if err := WriteReport(failingWriter{}, report); err == nil {
-		t.Error("error = nil, want 写入失败上抛")
-	}
 }
 
 // requiredContexts：目标分支匹配才取必要检查；无匹配分支时返回空（不误用其它

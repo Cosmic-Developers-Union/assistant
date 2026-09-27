@@ -245,7 +245,6 @@ func newInitLeafForTest(t *testing.T, name, configPath string, args ...string) i
 		&bytes.Buffer{}, &bytes.Buffer{},
 		initTestRunner(),
 		initTestRunner(),
-		initTestRunner(),
 	)
 	// root 默认用 root options.ConfigPath 构造了 init 子树，但它必然解析不到
 	// 本测试的配置；把 root 默认挂上的子命令全部摘掉（含 init），只保留下面这个

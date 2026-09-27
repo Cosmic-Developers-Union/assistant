@@ -11,8 +11,8 @@
 
 assistant 是一个 Go 单二进制，两块能力：
 
-- **仓库机器人**：`assistant action label-sync` / `assistant action automerge` / `assistant check` 在 Gitea Actions 里按
-  事件与定时运行（标签收敛、评审状态同步、机械合并、待办查询）；
+- **仓库机器人**：`assistant action label-sync` / `assistant action automerge` 在 Gitea Actions 里按
+  事件与定时运行（标签收敛、评审状态同步、机械合并）；
 - **评审调度引擎 + 对话服务端**：`assistant run` 常驻宿主机，检测待办 → 为每个
   待办拉起 headless `claude` 会话 → 验证结论 → 清理；同一进程并行承载多个消息通道
   （微信 / QQ / Telegram / Gitea），会话之间并发、同会话串行。

@@ -3,14 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
-	"github.com/Cosmic-Developers-Union/assistant/internal/status"
 )
 
 func TestRootCommandShowsHelpWithoutArguments(t *testing.T) {
@@ -18,10 +15,6 @@ func TestRootCommandShowsHelpWithoutArguments(t *testing.T) {
 	command := newRootCommand(
 		&stdout,
 		&bytes.Buffer{},
-		func(context.Context, io.Writer, io.Writer, commandOptions) error {
-			t.Fatal("check runner was called")
-			return nil
-		},
 		func(context.Context, io.Writer, io.Writer, commandOptions) error {
 			t.Fatal("sync runner was called")
 			return nil
@@ -38,7 +31,6 @@ func TestRootCommandShowsHelpWithoutArguments(t *testing.T) {
 	}
 	output := stdout.String()
 	if !strings.Contains(output, "Available Commands:") ||
-		!strings.Contains(output, "check") ||
 		// 不能用字面量 "action" 断言：root 的 Example 里就含
 		// `assistant action label-sync`，cobra 会把 Example 一并打印进 help。
 		!strings.Contains(output, "执行仓库自动化动作") ||
@@ -52,13 +44,14 @@ func TestRootCommandShowsHelpWithoutArguments(t *testing.T) {
 		!strings.Contains(output, "run") {
 		t.Errorf("help output = %q", output)
 	}
-	// 只读列出与单条目重跑（list / review / triage）不再对用户暴露：help 里的
-	// review/triage 字样来自 check 的说明文案，所以这里按命令树而不是按文案断言。
+	// 只读旁路（check / list / review / triage）不再对用户暴露，按命令树而不是
+	// 按文案断言：help 里仍有 review/triage 字样（来自 review skill 与 session
+	// 相关说明），按文案断言会误判。
 	topLevel := map[string]bool{}
 	for _, child := range command.Commands() {
 		topLevel[child.Name()] = true
 	}
-	for _, removed := range []string{"list", "review", "triage"} {
+	for _, removed := range []string{"check", "list", "review", "triage"} {
 		if topLevel[removed] {
 			t.Errorf("命令 %s 已移除，不应再挂在命令树上", removed)
 		}
@@ -86,10 +79,6 @@ func TestDeprecatedAutomationCommandsStillDispatch(t *testing.T) {
 			command := newRootCommand(
 				&bytes.Buffer{},
 				&bytes.Buffer{},
-				func(context.Context, io.Writer, io.Writer, commandOptions) error {
-					called = append(called, "check")
-					return nil
-				},
 				func(context.Context, io.Writer, io.Writer, commandOptions) error {
 					called = append(called, "label-sync")
 					return nil
@@ -119,7 +108,7 @@ func TestDeprecatedAutomationCommandsHiddenFromHelp(t *testing.T) {
 		t.Fatal("runner was called")
 		return nil
 	}
-	command := newRootCommand(&stdout, &bytes.Buffer{}, runner, runner, runner)
+	command := newRootCommand(&stdout, &bytes.Buffer{}, runner, runner)
 	command.SetArgs(nil)
 
 	if err := command.ExecuteContext(t.Context()); err != nil {
@@ -145,7 +134,7 @@ func TestCompletionCommandGeneratesScript(t *testing.T) {
 		t.Fatal("runner was called")
 		return nil
 	}
-	command := newRootCommand(&stdout, &bytes.Buffer{}, runner, runner, runner)
+	command := newRootCommand(&stdout, &bytes.Buffer{}, runner, runner)
 	command.SetArgs([]string{"completion", "bash"})
 	if err := command.ExecuteContext(t.Context()); err != nil {
 		t.Fatalf("ExecuteContext() error = %v", err)
@@ -160,7 +149,7 @@ func TestUnknownCommandFails(t *testing.T) {
 		t.Fatal("runner was called")
 		return nil
 	}
-	command := newRootCommand(&bytes.Buffer{}, &bytes.Buffer{}, runner, runner, runner)
+	command := newRootCommand(&bytes.Buffer{}, &bytes.Buffer{}, runner, runner)
 	command.SetArgs([]string{"nope"})
 	if err := command.ExecuteContext(t.Context()); err == nil {
 		t.Fatal("ExecuteContext() error = nil")
@@ -172,7 +161,6 @@ func TestCommandsAcceptVerboseAndRepoFlags(t *testing.T) {
 		name string
 		args []string
 	}{
-		{"check", []string{"check"}},
 		{"action label-sync", []string{"action", "label-sync"}},
 		{"action automerge", []string{"action", "automerge"}},
 	} {
@@ -182,7 +170,7 @@ func TestCommandsAcceptVerboseAndRepoFlags(t *testing.T) {
 				got = options
 				return nil
 			}
-			command := newRootCommand(&bytes.Buffer{}, &bytes.Buffer{}, runner, runner, runner)
+			command := newRootCommand(&bytes.Buffer{}, &bytes.Buffer{}, runner, runner)
 			args := append([]string{"--repo", "acme/video"}, testCase.args...)
 			command.SetArgs(append(args, "-v"))
 
@@ -202,7 +190,6 @@ func TestCommandsDispatchToMatchingRunner(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"check", []string{"check"}, "check"},
 		{"action label-sync", []string{"action", "label-sync"}, "label-sync"},
 		{"action automerge", []string{"action", "automerge"}, "automerge"},
 	} {
@@ -211,10 +198,6 @@ func TestCommandsDispatchToMatchingRunner(t *testing.T) {
 			command := newRootCommand(
 				&bytes.Buffer{},
 				&bytes.Buffer{},
-				func(context.Context, io.Writer, io.Writer, commandOptions) error {
-					called = append(called, "check")
-					return nil
-				},
 				func(context.Context, io.Writer, io.Writer, commandOptions) error {
 					called = append(called, "label-sync")
 					return nil
@@ -241,7 +224,6 @@ func TestCommandsRejectInvalidRepository(t *testing.T) {
 		name string
 		args []string
 	}{
-		{"check", []string{"check"}},
 		{"action label-sync", []string{"action", "label-sync"}},
 		{"action automerge", []string{"action", "automerge"}},
 	} {
@@ -250,7 +232,7 @@ func TestCommandsRejectInvalidRepository(t *testing.T) {
 				t.Fatal("runner was called")
 				return nil
 			}
-			command := newRootCommand(&bytes.Buffer{}, &bytes.Buffer{}, runner, runner, runner)
+			command := newRootCommand(&bytes.Buffer{}, &bytes.Buffer{}, runner, runner)
 			command.SetArgs(append([]string{"--repo", "video"}, testCase.args...))
 			if err := command.ExecuteContext(t.Context()); err == nil {
 				t.Fatal("ExecuteContext() error = nil")
@@ -259,243 +241,6 @@ func TestCommandsRejectInvalidRepository(t *testing.T) {
 	}
 }
 
-func TestCheckCommandAcceptsWaitAndIntervalFlags(t *testing.T) {
-	var got commandOptions
-	runner := func(_ context.Context, _, _ io.Writer, options commandOptions) error {
-		got = options
-		return nil
-	}
-	command := newRootCommand(&bytes.Buffer{}, &bytes.Buffer{}, runner, runner, runner)
-	command.SetArgs([]string{"check", "--wait", "--interval", "5s"})
-
-	if err := command.ExecuteContext(t.Context()); err != nil {
-		t.Fatalf("ExecuteContext() error = %v", err)
-	}
-	if !got.Wait || got.Timeout != 0 || got.Interval != 5*time.Second {
-		t.Errorf("options = %+v", got)
-	}
-}
-
-func TestCheckCommandAcceptsDayDurationTimeout(t *testing.T) {
-	var got commandOptions
-	runner := func(_ context.Context, _, _ io.Writer, options commandOptions) error {
-		got = options
-		return nil
-	}
-	command := newRootCommand(&bytes.Buffer{}, &bytes.Buffer{}, runner, runner, runner)
-	command.SetArgs([]string{"check", "--timeout", "1d1m1s"})
-
-	if err := command.ExecuteContext(t.Context()); err != nil {
-		t.Fatalf("ExecuteContext() error = %v", err)
-	}
-	want := 24*time.Hour + time.Minute + time.Second
-	if got.Timeout != want {
-		t.Errorf("Timeout = %v, want %v", got.Timeout, want)
-	}
-}
-
-func TestCheckCommandRejectsWaitTogetherWithTimeout(t *testing.T) {
-	runner := func(context.Context, io.Writer, io.Writer, commandOptions) error {
-		t.Fatal("runner was called")
-		return nil
-	}
-	command := newRootCommand(&bytes.Buffer{}, &bytes.Buffer{}, runner, runner, runner)
-	command.SetArgs([]string{"check", "--wait", "--timeout", "10m"})
-	if err := command.ExecuteContext(t.Context()); err == nil {
-		t.Fatal("ExecuteContext() error = nil")
-	}
-}
-
-func TestCheckCommandRejectsNonPositiveIntervalWhenWaiting(t *testing.T) {
-	for _, args := range [][]string{
-		{"check", "--wait", "--interval", "0s"},
-		{"check", "--timeout", "10m", "--interval", "0s"},
-	} {
-		runner := func(context.Context, io.Writer, io.Writer, commandOptions) error {
-			t.Fatal("runner was called")
-			return nil
-		}
-		command := newRootCommand(&bytes.Buffer{}, &bytes.Buffer{}, runner, runner, runner)
-		command.SetArgs(args)
-		if err := command.ExecuteContext(t.Context()); err == nil {
-			t.Fatalf("ExecuteContext(%v) error = nil", args)
-		}
-	}
-}
-
-func TestParseDayDuration(t *testing.T) {
-	tests := []struct {
-		input   string
-		want    time.Duration
-		wantErr bool
-	}{
-		{"1d1m1s", 24*time.Hour + time.Minute + time.Second, false},
-		{"2w", 14 * 24 * time.Hour, false},
-		{"1.5d", 36 * time.Hour, false},
-		{"90m", 90 * time.Minute, false},
-		{"500ms", 500 * time.Millisecond, false},
-		{"0s", 0, false},
-		{"0", 0, false},
-		{"1000000w", 0, true},
-		{"106751d106751d", 0, true},
-		{"1x", 0, true},
-		{"d", 0, true},
-		{"", 0, true},
-	}
-	for _, test := range tests {
-		t.Run(test.input, func(t *testing.T) {
-			got, err := parseDayDuration(test.input)
-			if test.wantErr {
-				if err == nil {
-					t.Fatalf("parseDayDuration(%q) error = nil", test.input)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("parseDayDuration(%q) error = %v", test.input, err)
-			}
-			if got != test.want {
-				t.Errorf("parseDayDuration(%q) = %v, want %v", test.input, got, test.want)
-			}
-		})
-	}
-}
-
-// fakeChecker 按调用顺序逐条返回预置报告；报告用尽后重复最后一条。
-type fakeChecker struct {
-	reports []status.Report
-	calls   int
-}
-
-func (f *fakeChecker) Check(context.Context) (status.Report, error) {
-	report := f.reports[min(f.calls, len(f.reports)-1)]
-	f.calls++
-	return report, nil
-}
-
-var workReport = status.Report{
-	NeedsReview: []status.PullRequestSummary{{
-		Repository: status.Repository{Owner: "acme", Name: "video"},
-		Index:      7,
-		Title:      "add thing",
-		HTMLURL:    "https://gitea.example/acme/video/pulls/7",
-	}},
-}
-
-func TestWaitForReportReturnsImmediatelyWhenWorkExists(t *testing.T) {
-	checker := &fakeChecker{reports: []status.Report{workReport}}
-	var stdout bytes.Buffer
-
-	if err := waitForReport(t.Context(), &stdout, checker, false, 10*time.Minute, 10*time.Millisecond); err != nil {
-		t.Fatalf("waitForReport() error = %v", err)
-	}
-	if checker.calls != 1 {
-		t.Errorf("calls = %d, want 1", checker.calls)
-	}
-	if !strings.Contains(stdout.String(), "acme/video#7") {
-		t.Errorf("output = %q", stdout.String())
-	}
-}
-
-func TestWaitForReportWithoutWaitingKeepsImmediateEmptyResult(t *testing.T) {
-	checker := &fakeChecker{reports: []status.Report{{}}}
-	var stdout bytes.Buffer
-
-	if err := waitForReport(t.Context(), &stdout, checker, false, 0, 10*time.Millisecond); err != nil {
-		t.Fatalf("waitForReport() error = %v", err)
-	}
-	if checker.calls != 1 {
-		t.Errorf("calls = %d, want 1", checker.calls)
-	}
-	if !strings.Contains(stdout.String(), "没有 Issue 或 PR 需要处理") {
-		t.Errorf("output = %q", stdout.String())
-	}
-}
-
-func TestWaitForReportPollsUntilWorkAppears(t *testing.T) {
-	checker := &fakeChecker{reports: []status.Report{{}, {}, workReport}}
-	var stdout bytes.Buffer
-
-	if err := waitForReport(t.Context(), &stdout, checker, false, 10*time.Second, time.Millisecond); err != nil {
-		t.Fatalf("waitForReport() error = %v", err)
-	}
-	if checker.calls != 3 {
-		t.Errorf("calls = %d, want 3", checker.calls)
-	}
-	if !strings.Contains(stdout.String(), "acme/video#7") {
-		t.Errorf("output = %q", stdout.String())
-	}
-}
-
-func TestWaitForReportForeverPollsUntilWorkAppears(t *testing.T) {
-	checker := &fakeChecker{reports: []status.Report{{}, {}, workReport}}
-	var stdout bytes.Buffer
-
-	if err := waitForReport(t.Context(), &stdout, checker, true, 0, time.Millisecond); err != nil {
-		t.Fatalf("waitForReport() error = %v", err)
-	}
-	if checker.calls != 3 {
-		t.Errorf("calls = %d, want 3", checker.calls)
-	}
-	if !strings.Contains(stdout.String(), "acme/video#7") {
-		t.Errorf("output = %q", stdout.String())
-	}
-}
-
-func TestWaitForReportStopsAtTimeout(t *testing.T) {
-	checker := &fakeChecker{reports: []status.Report{{}}}
-	var stdout bytes.Buffer
-
-	if err := waitForReport(t.Context(), &stdout, checker, false, 20*time.Millisecond, 5*time.Millisecond); err != nil {
-		t.Fatalf("waitForReport() error = %v", err)
-	}
-	if checker.calls < 2 {
-		t.Errorf("calls = %d, want >= 2", checker.calls)
-	}
-	if !strings.Contains(stdout.String(), "超时") {
-		t.Errorf("output = %q", stdout.String())
-	}
-}
-
-func TestWaitForReportStopsOnCancellation(t *testing.T) {
-	checker := &fakeChecker{reports: []status.Report{{}}}
-	ctx, cancel := context.WithCancel(t.Context())
-	var stdout bytes.Buffer
-
-	go func() {
-		time.Sleep(15 * time.Millisecond)
-		cancel()
-	}()
-	if err := waitForReport(ctx, &stdout, checker, true, 0, 5*time.Millisecond); err != nil {
-		t.Fatalf("waitForReport() error = %v", err)
-	}
-	if !strings.Contains(stdout.String(), "已中断等待") {
-		t.Errorf("output = %q", stdout.String())
-	}
-}
-
-// cancelledChecker 模拟 Check 的网络往返执行到一半时 ctx 被取消，
-// 返回包装过的 context.Canceled（真实场景是 *url.Error）。
-type cancelledChecker struct{}
-
-func (cancelledChecker) Check(context.Context) (status.Report, error) {
-	return status.Report{}, fmt.Errorf("列表 Issue: %w", context.Canceled)
-}
-
-func TestWaitForReportStopsWhenCheckIsCancelled(t *testing.T) {
-	var stdout bytes.Buffer
-
-	if err := waitForReport(t.Context(), &stdout, cancelledChecker{}, true, 0, 10*time.Millisecond); err != nil {
-		t.Fatalf("waitForReport() error = %v", err)
-	}
-	if !strings.Contains(stdout.String(), "已中断等待") {
-		t.Errorf("output = %q", stdout.String())
-	}
-}
-
-// withReviewCredential 在凭据库（平台标准配置目录，测试经 TestMain 隔离）写入
-// (host, ai, review) 令牌：dispatcher 的令牌全部来自凭据库，测试用目标解析前
-// 需要先有它。
 func withReviewCredential(t *testing.T, host string) {
 	t.Helper()
 	path, err := credentials.Path()

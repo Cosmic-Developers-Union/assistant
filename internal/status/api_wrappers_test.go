@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -867,41 +866,6 @@ func TestUseSeparateTokens(t *testing.T) {
 		t.Fatalf("UseBranchProtectionToken() error = %v", err)
 	}
 }
-
-// WriteReport 的写入失败必须返回错误：调用方据此判断输出是否完整。
-// （正常路径与格式已由 check_test.go 的 TestWriteReport 覆盖。）
-func TestWriteReportReportsWriteFailure(t *testing.T) {
-	repository := Repository{Owner: "acme", Name: "video"}
-
-	for _, test := range []struct {
-		name   string
-		report Report
-	}{
-		{name: "空清单", report: Report{}},
-		{
-			name: "有待办",
-			report: Report{NeedsTriage: []IssueSummary{
-				{Repository: repository, Index: 3, Title: "t"},
-			}},
-		},
-		{
-			name: "待评审条目写入失败",
-			report: Report{NeedsTriage: []IssueSummary{{Repository: repository, Index: 3, Title: "t"}},
-				NeedsReview: []PullRequestSummary{{Repository: repository, Index: 5, Title: "p"}}},
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			if err := WriteReport(failingWriter{}, test.report); err == nil {
-				t.Error("WriteReport() error = nil, want 写入失败")
-			}
-		})
-	}
-}
-
-// failingWriter 模拟输出不可写（磁盘满、管道断开）。
-type failingWriter struct{}
-
-func (failingWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
 
 // keepOnlyPrefixedLabel 的契约：目标标签缺失时报错（不能静默跳过——那会让
 // 状态机分叉）；已带目标标签时不重复添加；同前缀的其它标签被移除。

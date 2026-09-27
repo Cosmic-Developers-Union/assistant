@@ -191,23 +191,3 @@ func runManagerAction(
 	}
 	return errors.Join(runErrors...)
 }
-
-// instanceChecker 把多个 Manager 的 Check 聚合成一份报告，供 check --wait 轮询。
-type instanceChecker struct {
-	managers []*status.Manager
-}
-
-func (c *instanceChecker) Check(ctx context.Context) (status.Report, error) {
-	var report status.Report
-	var checkErrors []error
-	for _, manager := range c.managers {
-		item, err := manager.Check(ctx)
-		if err != nil {
-			checkErrors = append(checkErrors, err)
-			continue
-		}
-		report.NeedsTriage = append(report.NeedsTriage, item.NeedsTriage...)
-		report.NeedsReview = append(report.NeedsReview, item.NeedsReview...)
-	}
-	return report, errors.Join(checkErrors...)
-}

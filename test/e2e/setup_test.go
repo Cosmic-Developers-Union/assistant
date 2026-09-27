@@ -269,7 +269,7 @@ func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 		}
 	}
 
-	// 完整流程：建 Issue → sync 打 status/triage → check 列待办
+	// 完整流程：建 Issue → sync 打 status/triage → 进待分诊队列
 	sdkClient, err := gitea.NewClient(host, gitea.SetToken(adminToken))
 	if err != nil {
 		t.Fatal(err)
@@ -309,12 +309,14 @@ func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 			t.Errorf("非规范标签未被删除：%+v", afterSync)
 		}
 	}
-	report, err := manager.Check(ctx)
+	// sync 之后新建的 Issue 应进待分诊队列。走调度引擎同一条取数路径
+	// （ListTriageIssues），断言与引擎看到的完全一致。
+	triage, err := syncClient.ListTriageIssues(ctx, repository)
 	if err != nil {
-		t.Fatalf("Check() error = %v", err)
+		t.Fatalf("ListTriageIssues() error = %v", err)
 	}
-	if len(report.NeedsTriage) != 1 || report.NeedsTriage[0].Index != 1 {
-		t.Errorf("NeedsTriage = %+v, want issue #1", report.NeedsTriage)
+	if len(triage) != 1 || triage[0].Index != 1 {
+		t.Errorf("待 triage Issue = %+v, want issue #1", triage)
 	}
 
 	// 评审请求不被门禁阻断：必要检查失败 + /review 评论 → 仍进 status/review

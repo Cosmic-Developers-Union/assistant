@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -53,7 +54,7 @@ func TestSetupConfigWritePathPrefersExplicitOverEnv(t *testing.T) {
 //
 // review 令牌是同步待办的基础：缺它时 Manager 根本构造不出来（不是降级），所以错误
 // 必须让操作者去 login add 补凭据，而不是去查网络连通性——错误若被写成「站点不可达」
-// 或干脆吞掉，label-sync/check 会在无令牌的客户端上继续，把所有请求都发成匿名。
+// 或干脆吞掉，label-sync 会在无令牌的客户端上继续，把所有请求都发成匿名。
 func TestNewInstanceManagerReportsMissingReviewToken(t *testing.T) {
 	storePath := isolateCredentials(t)
 	if err := credentials.Save(storePath, &credentials.File{}); err != nil {
@@ -71,43 +72,38 @@ func TestNewInstanceManagerReportsMissingReviewToken(t *testing.T) {
 	}
 }
 
-// TestRunCheckFailsWhenStoreIsCorrupt 断言 env 模式（无配置文件）下，巡检真的
-// 跑不动时 check 必须报错，而不是报告「没有问题需要处理」。
+// TestRunLabelSyncFailsWhenStoreIsCorrupt 断言 env 模式（无配置文件）下，动作命令
+// 真的跑不动时必须报错，而不是静默成功退出 0。
 //
 // env 模式是「裸跑 CI」的形态：只有 GITEA_HOST / GITEA_ACCESS_TOKEN，没有配置文件，
 // 这里也刻意不放任何凭据——裸跑的操作者拿不到登录态是常态。危险不在于「没令牌」，
-// 而在于把「一个仓库都没检查成」降级成「待办为空」：站点拒绝可见仓库查询时若被吞掉，
-// waitForReport 会输出「没有 Issue 或 PR 需要处理」并以 0 退出，巡检失败与巡检通过
-// 长得一模一样，操作者拿到的是绿色结论。
+// 而在于把「一个仓库都没同步成」降级成绿色退出：站点拒绝可见仓库查询时若被吞掉，
+// 操作者拿到的是「跑过了且没问题」的结论，而实际上一次同步根本没发生。
 //
 // 站点用可达的本地替身（而不是随便一个域名）：本机 DNS 不通的话会先冒出解析错误，
 // 测出来的就成了网络分支。断言错误文本必须来自站点拒绝，才能证明这条链真的走到了
-// Manager.Check。
-func TestRunCheckFailsWhenStoreIsCorrupt(t *testing.T) {
+// 可见仓库查询。
+func TestRunLabelSyncFailsWhenStoreIsCorrupt(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	isolateCredentials(t)
 
 	fake := newFakeGitea(t)
 	fake.login["base-token"] = "ai"
-	// 站点侧拒绝可见仓库查询：这是 Manager.Check 的第一个调用，也是 check 唯一的入口，
-	// 它在 403 下失败意味着一次巡检根本没发生。
+	// 站点侧拒绝可见仓库查询：这是 Manager 的第一个调用，也是动作命令唯一的入口，
+	// 它在 403 下失败意味着一次同步根本没发生。
 	fake.reposStatus = http.StatusForbidden
 
 	t.Setenv("GITEA_HOST", fake.server.URL)
 	t.Setenv("GITEA_ACCESS_TOKEN", "base-token")
 	t.Setenv("GITEA_REPOSITORY", "acme/rocket")
 
-	var stdout, stderr strings.Builder
-	err := runCheck(t.Context(), &stdout, &stderr, commandOptions{Repository: "acme/rocket"})
+	var stderr strings.Builder
+	err := runLabelSync(t.Context(), io.Discard, &stderr, commandOptions{Repository: "acme/rocket"})
 	if err == nil {
-		t.Fatalf("巡检失败时 check 应报错，而不是报「没有待办」：\n%s%s", stdout.String(), stderr.String())
+		t.Fatalf("同步失败时 label-sync 应报错，而不是静默成功：\n%s", stderr.String())
 	}
 	if !strings.Contains(err.Error(), "repositories rejected") {
 		t.Errorf("错误应来自站点拒绝这次查询：%v", err)
-	}
-	// 结论文本必须缺席：它一旦出现，操作者就再也分不清失败与通过。
-	if strings.Contains(stdout.String(), "没有 Issue 或 PR 需要处理") {
-		t.Errorf("失败不该被写成「没有待办」：\n%s", stdout.String())
 	}
 }

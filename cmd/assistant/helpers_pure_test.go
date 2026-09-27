@@ -3,49 +3,9 @@ package main
 import (
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
 )
-
-// dayDuration.Type 是 pflag 的取值形态名：CLI 帮助里显示的单位说明靠它，
-// 返回错的话 `--interval` 之类参数在 --help 里会显示成莫名的类型。
-func TestDayDurationType(t *testing.T) {
-	var value time.Duration
-	duration := dayDuration{value: &value}
-	if got := duration.Type(); got != "duration" {
-		t.Errorf("Type() = %q, want duration", got)
-	}
-	// String() 走 value 指针；Set 之后应反映新值（help 与错误信息都读它）
-	if err := duration.Set("1d1h"); err != nil {
-		t.Fatalf("Set() error = %v", err)
-	}
-	if got, want := duration.String(), (25 * time.Hour).String(); got != want {
-		t.Errorf("String() = %q, want %q", got, want)
-	}
-}
-
-// dayDuration.Set 必须把解析结果写回被指向的变量（pflag 的契约：Set 的副作用
-// 就是它唯一的产出），并且解析失败时不能改动原值。
-func TestDayDurationSetWritesThrough(t *testing.T) {
-	var value time.Duration
-	duration := dayDuration{value: &value}
-
-	if err := duration.Set("2w"); err != nil {
-		t.Fatalf("Set(2w) error = %v", err)
-	}
-	if value != 14*24*time.Hour {
-		t.Errorf("value = %v, want 2 周", value)
-	}
-
-	value = 0
-	if err := duration.Set("不是时长"); err == nil {
-		t.Fatal("Set(非法) error = nil, want 解析失败")
-	}
-	if value != 0 {
-		t.Errorf("解析失败不应改动原值：%v", value)
-	}
-}
 
 // sameGiteaHost：同站判定只看规范化后的地址（去空白、去尾斜杠），不接受
 // 「https://a 与 https://b」或「有 scheme 与无 scheme」这类不同形态。

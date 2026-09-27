@@ -2,12 +2,10 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/Cosmic-Developers-Union/assistant/internal/config"
 	"github.com/Cosmic-Developers-Union/assistant/internal/status"
@@ -20,14 +18,11 @@ type managerRunner func(context.Context, io.Writer, io.Writer, commandOptions) e
 type commandOptions struct {
 	Repository string
 	Verbose    bool
-	Wait       bool
-	Timeout    time.Duration
-	Interval   time.Duration
 	// ConfigPath 是配置文件路径（--config / ASSISTANT_CONFIG / 当前目录的 ./config.json）
 	ConfigPath string
 }
 
-func newRootCommand(stdout, stderr io.Writer, checker, labelSyncer, merger managerRunner) *cobra.Command {
+func newRootCommand(stdout, stderr io.Writer, labelSyncer, merger managerRunner) *cobra.Command {
 	options := commandOptions{}
 	command := &cobra.Command{
 		Use:           "assistant",
@@ -40,8 +35,7 @@ func newRootCommand(stdout, stderr io.Writer, checker, labelSyncer, merger manag
 			// 无子命令时打印帮助；未知命令由 NoArgs 校验报错（与 yargs strict 同义）
 			return command.Help()
 		},
-		Example: "  assistant check\n" +
-			"  assistant action label-sync --verbose\n" +
+		Example: "  assistant action label-sync --verbose\n" +
 			"  assistant action automerge --verbose\n" +
 			"  assistant run --dry-run",
 	}
@@ -60,34 +54,6 @@ func newRootCommand(stdout, stderr io.Writer, checker, labelSyncer, merger manag
 	// 以及命令/旗标的动态补全。
 	command.CompletionOptions.DisableDefaultCmd = false
 
-	checkCommand := &cobra.Command{
-		Use:   "check",
-		Short: "按标签检索待 triage 的 Issue 和待 review 的 PR（只读）",
-		Args:  cobra.NoArgs,
-		RunE: func(command *cobra.Command, _ []string) error {
-			if err := options.validate(); err != nil {
-				return err
-			}
-			return checker(command.Context(), stdout, stderr, options)
-		},
-	}
-	checkCommand.Flags().BoolVar(
-		&options.Wait,
-		"wait",
-		false,
-		"没有待办时持续等待直到出现待办（与 --timeout 互斥）",
-	)
-	checkCommand.Flags().Var(
-		dayDuration{&options.Timeout},
-		"timeout",
-		"没有待办时持续等待的时长（如 10m、1d12h）；0 表示立即返回",
-	)
-	checkCommand.Flags().DurationVar(
-		&options.Interval,
-		"interval",
-		15*time.Second,
-		"等待模式下的轮询间隔（仅在 --wait 或 --timeout > 0 时生效）",
-	)
 	actionCommand := &cobra.Command{
 		Use:   "action",
 		Short: "执行仓库自动化动作（标签同步与自动合并）",
@@ -101,7 +67,7 @@ func newRootCommand(stdout, stderr io.Writer, checker, labelSyncer, merger manag
 			"合并门禁全绿且分支未过期的已批准 PR（一次运行至多一个，squash；供 CI schedule 驱动）",
 			"", merger, &options, stdout, stderr),
 	)
-	command.AddCommand(checkCommand, actionCommand)
+	command.AddCommand(actionCommand)
 	// 旧的顶层入口：已 install 的目标仓库里 workflow 仍写着 `assistant sync` /
 	// `assistant automerge`，容器镜像更新后不能直接变成 unknown command——
 	// 那会让门禁在无人察觉的情况下停摆，直到重跑 install。
@@ -155,84 +121,7 @@ func (options commandOptions) validate() error {
 			return err
 		}
 	}
-	if options.Wait && options.Timeout > 0 {
-		return fmt.Errorf("--wait 与 --timeout 互斥，只能指定其一")
-	}
-	if options.Timeout < 0 {
-		return fmt.Errorf("--timeout 不能为负")
-	}
-	if (options.Wait || options.Timeout > 0) && options.Interval <= 0 {
-		return fmt.Errorf("--interval 必须大于 0")
-	}
 	return nil
-}
-
-func runCheck(ctx context.Context, stdout, stderr io.Writer, options commandOptions) error {
-	_, file, err := resolveInstanceFile(options)
-	if err != nil {
-		return err
-	}
-	if file == nil {
-		return withManager(ctx, stderr, options, func(ctx context.Context, manager *status.Manager) error {
-			return waitForReport(ctx, stdout, manager, options.Wait, options.Timeout, options.Interval)
-		})
-	}
-	managers, err := instanceManagers(ctx, options.ConfigPath, file, options.Repository, stderr)
-	if err != nil {
-		return err
-	}
-	return waitForReport(ctx, stdout, &instanceChecker{managers: managers}, options.Wait, options.Timeout, options.Interval)
-}
-
-// workChecker 抽象 *status.Manager 的检索能力，便于为等待逻辑写单元测试。
-type workChecker interface {
-	Check(context.Context) (status.Report, error)
-}
-
-// waitForReport 检索并输出待办报告。没有待办时按 interval 轮询等待：forever 为 true
-// 时一直等到出现待办；否则等到超时（timeout <= 0 表示不等待，立即返回）。等待期间
-// ctx 被取消（Ctrl+C / SIGTERM，由 main 的 signal.NotifyContext 触发）同样结束。
-// 三种结束方式都以 nil 返回，退出码 0。
-func waitForReport(
-	ctx context.Context,
-	stdout io.Writer,
-	checker workChecker,
-	forever bool,
-	timeout, interval time.Duration,
-) error {
-	var deadline <-chan time.Time
-	if !forever && timeout > 0 {
-		timer := time.NewTimer(timeout)
-		defer timer.Stop()
-		deadline = timer.C
-	}
-	for {
-		report, err := checker.Check(ctx)
-		if err != nil {
-			// Check 内部的网络往返也可能撞上 Ctrl+C（ctx 已取消），此时与等待
-			// 期间被中断一样，按「已中断等待」以退出码 0 结束。
-			if errors.Is(err, context.Canceled) {
-				fmt.Fprintln(stdout, "已中断等待")
-				return nil
-			}
-			return err
-		}
-		if report.HasWork() || (!forever && timeout <= 0) {
-			if err := status.WriteReport(stdout, report); err != nil {
-				return fmt.Errorf("输出报告: %w", err)
-			}
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			fmt.Fprintln(stdout, "已中断等待")
-			return nil
-		case <-deadline:
-			fmt.Fprintf(stdout, "没有 Issue 或 PR 需要处理（等待 %s 后超时）\n", timeout)
-			return nil
-		case <-time.After(interval):
-		}
-	}
 }
 
 func runLabelSync(ctx context.Context, _, stderr io.Writer, options commandOptions) error {
