@@ -64,6 +64,8 @@ declare -A thresholds=(
 declare -A asset_only=(
 	[content]=1
 	[schema]=1
+	# 测试替身包：只被 _test.go 引用，没有生产代码（覆盖率对它无意义）
+	[internal/integration/qq/qqtestsupport]=1
 )
 
 module="$(go list -m)"

@@ -95,8 +95,3 @@ func (o chatOutcome) FailureMessage() string {
 	}
 	return "会话执行失败"
 }
-
-// singleLine 把多行文本压成一行（日志一行一条，便于 grep）。
-func singleLine(text string) string {
-	return strings.Join(strings.Fields(strings.ReplaceAll(text, "\n", " ")), " ")
-}
