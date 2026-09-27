@@ -1,4 +1,4 @@
-package daemon
+package qq
 
 import (
 	"context"
@@ -11,15 +11,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Cosmic-Developers-Union/assistant/internal/qq"
+	qqtestsupport "github.com/Cosmic-Developers-Union/assistant/internal/integration/qq/qqtestsupport"
 )
 
-// TestNewQQChannelDefaultsAndAccessors 钉住公开构造 NewQQChannel 的装配缺省：
+// TestNewAdapterDefaultsAndAccessors 钉住公开构造 NewAdapter 的装配缺省：
 // 空 key 归一化成 "qq"、SplitLimit<=0 回落到平台上限 1000、用户标识为空则拒绝。
-// 这条路径此前零覆盖（既有测试都走 newQQChannelWithClient），而 daemon 装配真实
+// 这条路径此前零覆盖（既有测试都走 newAdapterWithClient），而 daemon 装配真实
 // 通道用的正是它——缺省错了会让通道注册键对不上配置里的名字。
-func TestNewQQChannelDefaultsAndAccessors(t *testing.T) {
-	channel := NewQQChannel(QQChannelConfig{AppID: "app", AppSecret: "sec", APIBaseURL: "http://127.0.0.1:1"}, "", false, nil)
+func TestNewAdapterDefaultsAndAccessors(t *testing.T) {
+	channel := NewAdapter(AdapterConfig{AppID: "app", AppSecret: "sec", APIBaseURL: "http://127.0.0.1:1"}, "", false, nil)
 	if channel.Name() != "qq" {
 		t.Errorf("空 key 应归一化成 qq：%q", channel.Name())
 	}
@@ -30,7 +30,7 @@ func TestNewQQChannelDefaultsAndAccessors(t *testing.T) {
 		t.Errorf("空用户标识应拒绝：%v %q", allowed, reason)
 	}
 
-	named := NewQQChannel(QQChannelConfig{SplitLimit: 50, AdminUsers: []string{"*"}}, " qq/alt ", false, nil)
+	named := NewAdapter(AdapterConfig{SplitLimit: 50, AdminUsers: []string{"*"}}, " qq/alt ", false, nil)
 	if named.Name() != "qq/alt" {
 		t.Errorf("自定义 key 应去空白后原样：%q", named.Name())
 	}
@@ -43,10 +43,10 @@ func TestNewQQChannelDefaultsAndAccessors(t *testing.T) {
 }
 
 // TestQQAllowedWhitelistBranches 钉住 Allowed 的白名单两条分支：命中放行、未命中
-// 拒绝，以及完全未配置时的文案（必须点出 qq.admin_users 这个配置键，否则操作者
+// 拒绝，以及完全未配置时的文案（必须点出 admin_users 这个配置键，否则操作者
 // 不知道该去哪加人）。
 func TestQQAllowedWhitelistBranches(t *testing.T) {
-	channel := NewQQChannel(QQChannelConfig{AdminUsers: []string{"u1", "u2"}}, "", false, nil)
+	channel := NewAdapter(AdapterConfig{AdminUsers: []string{"u1", "u2"}}, "", false, nil)
 	if allowed, reason := channel.Allowed("u2"); !allowed || reason != "" {
 		t.Errorf("白名单命中应放行：%v %q", allowed, reason)
 	}
@@ -54,26 +54,26 @@ func TestQQAllowedWhitelistBranches(t *testing.T) {
 		t.Errorf("白名单外应拒绝：%v %q", allowed, reason)
 	}
 
-	empty := NewQQChannel(QQChannelConfig{}, "", false, nil)
-	if allowed, reason := empty.Allowed("u1"); allowed || !strings.Contains(reason, "qq.admin_users") {
+	empty := NewAdapter(AdapterConfig{}, "", false, nil)
+	if allowed, reason := empty.Allowed("u1"); allowed || !strings.Contains(reason, "admin_users") {
 		t.Errorf("未配置白名单应拒绝并提示配置键：%v %q", allowed, reason)
 	}
 }
 
-// TestQQChannelStartFatalErrorPropagates 钉住 Start 的致命路径：网关因不可恢复的
+// TestAdapterStartFatalErrorPropagates 钉住 Start 的致命路径：网关因不可恢复的
 // 错误退出（这里是 token 端点被平台拒绝）时必须记下 fatalErr 并关闭 dead，让
 // Receive 把原因交给通用桥。若吞掉错误，通道会永远静默——用户发消息没有任何反应
 // 也没有任何日志，最坏的一种故障。
-func TestQQChannelStartFatalErrorPropagates(t *testing.T) {
-	fake := newFakeQQ(t)
+func TestAdapterStartFatalErrorPropagates(t *testing.T) {
+	fake := qqtestsupport.New(t)
 	// 让 gateway 拿不到凭据：token 端点直接 401（网关重试耗尽后返回错误）
-	fake.server.Config.Handler = deniedTokenHandler()
-	client := qq.NewClient(qq.Config{
+	fake.Server().Config.Handler = deniedTokenHandler()
+	client := NewClient(Config{
 		AppID: "app", AppSecret: "sec",
-		APIBaseURL: fake.server.URL, TokenURL: fake.server.URL + "/token",
-		HTTPClient: fake.server.Client(), Log: t.Logf,
+		APIBaseURL: fake.URL(), TokenURL: fake.URL() + "/token",
+		HTTPClient: fake.Client(), Log: t.Logf,
 	})
-	channel := newQQChannelWithClient(QQChannelConfig{}, client, "", false, t.Logf)
+	channel := newAdapterWithClient(AdapterConfig{}, client, "", false, t.Logf)
 	if err := channel.Start(t.Context()); err != nil {
 		t.Fatalf("Start 应立刻返回 nil（网关在后台）：%v", err)
 	}
@@ -110,11 +110,11 @@ func deniedTokenHandler() interface {
 	})
 }
 
-// TestQQChannelReceiveDeadAndContext 钉住 Receive 的两条非队列分支：dead 关闭时
+// TestAdapterReceiveDeadAndContext 钉住 Receive 的两条非队列分支：dead 关闭时
 // 交出 fatalErr（网关致命退出的交接点），ctx 取消时交出 ctx.Err()（daemon 停机
 // 不能让桥挂死）。两条都不经网络，直接构造通道状态即可。
-func TestQQChannelReceiveDeadAndContext(t *testing.T) {
-	channel := NewQQChannel(QQChannelConfig{}, "", false, nil)
+func TestAdapterReceiveDeadAndContext(t *testing.T) {
+	channel := NewAdapter(AdapterConfig{}, "", false, nil)
 
 	// 手工模拟网关致命退出
 	channel.fatalErr = errors.New("网关重连耗尽")
@@ -124,7 +124,7 @@ func TestQQChannelReceiveDeadAndContext(t *testing.T) {
 	}
 
 	// ctx 已取消
-	other := NewQQChannel(QQChannelConfig{}, "", false, nil)
+	other := NewAdapter(AdapterConfig{}, "", false, nil)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if _, err := other.Receive(ctx); !errors.Is(err, context.Canceled) {
@@ -132,7 +132,7 @@ func TestQQChannelReceiveDeadAndContext(t *testing.T) {
 	}
 
 	// 事件队列有条目时优先交出（dead 未关闭）
-	other.events <- &qqInbound{channel: other, userOpenID: "u", msgID: "m", text: "内容"}
+	other.events <- &adapterInbound{channel: other, userOpenID: "u", msgID: "m", text: "内容"}
 	message, err := other.Receive(t.Context())
 	if err != nil || message.Text() != "内容" {
 		t.Errorf("队列有消息应先交出：%v %+v", err, message)
@@ -145,15 +145,15 @@ func TestQQChannelReceiveDeadAndContext(t *testing.T) {
 // 必须落进队列并按群/私聊取正确的用户标识。
 func TestQQOnEventFiltersAndDelivers(t *testing.T) {
 	var logs []string
-	channel := NewQQChannel(QQChannelConfig{}, "", false, func(format string, arguments ...any) {
+	channel := NewAdapter(AdapterConfig{}, "", false, func(format string, arguments ...any) {
 		logs = append(logs, format)
 	})
 	channel.runCtx = t.Context()
 
 	channel.onEvent("FRIEND_ADD", json.RawMessage(`{"id":"m"}`)) // 不关心的事件类型
-	channel.onEvent(qq.EventC2CMessage, json.RawMessage(`{不是 JSON`))
-	channel.onEvent(qq.EventC2CMessage, json.RawMessage(`{"content":"没有用户"}`))
-	channel.onEvent(qq.EventC2CMessage, json.RawMessage(`{"id":"m-1","content":"   ","author":{"user_openid":"u1"}}`))
+	channel.onEvent(EventC2CMessage, json.RawMessage(`{不是 JSON`))
+	channel.onEvent(EventC2CMessage, json.RawMessage(`{"content":"没有用户"}`))
+	channel.onEvent(EventC2CMessage, json.RawMessage(`{"id":"m-1","content":"   ","author":{"user_openid":"u1"}}`))
 	if len(channel.events) != 0 {
 		t.Fatalf("四条都应被丢弃，实际 %d 条", len(channel.events))
 	}
@@ -163,19 +163,19 @@ func TestQQOnEventFiltersAndDelivers(t *testing.T) {
 	}
 
 	// 私聊：user_openid 优先
-	channel.onEvent(qq.EventC2CMessage, json.RawMessage(
+	channel.onEvent(EventC2CMessage, json.RawMessage(
 		`{"id":"m-1","content":" 你好 ","author":{"user_openid":"u1","id":"ignored"}}`))
 	// 群聊：成员 openid 优先，且残留提及前缀被清理
-	channel.onEvent(qq.EventGroupAtMessage, json.RawMessage(
+	channel.onEvent(EventGroupAtMessage, json.RawMessage(
 		`{"id":"m-2","content":"<@!BOT> 群里的问题","group_openid":"G1","author":{"member_openid":"mem1"}}`))
 	if len(channel.events) != 2 {
 		t.Fatalf("两条合法消息都应投递：%d", len(channel.events))
 	}
-	private := (<-channel.events).(*qqInbound)
+	private := (<-channel.events).(*adapterInbound)
 	if private.User() != "u1" || private.Text() != "你好" || private.groupOpenID != "" {
 		t.Errorf("私聊归一化 = %+v", private)
 	}
-	group := (<-channel.events).(*qqInbound)
+	group := (<-channel.events).(*adapterInbound)
 	if group.User() != "mem1" || group.Text() != "群里的问题" || group.groupOpenID != "G1" {
 		t.Errorf("群聊归一化 = %+v", group)
 	}
@@ -188,12 +188,12 @@ func TestQQOnEventFiltersAndDelivers(t *testing.T) {
 // onEvent 会阻塞，必须靠 runCtx 取消解围——否则 daemon 停机时网关回调协程永久
 // 卡住，进程关不掉。这里把队列灌满再取消上下文，onEvent 必须立刻返回。
 func TestQQOnEventUnblocksOnRunContextDone(t *testing.T) {
-	channel := NewQQChannel(QQChannelConfig{}, "", false, nil)
+	channel := NewAdapter(AdapterConfig{}, "", false, nil)
 	ctx, cancel := context.WithCancel(t.Context())
 	channel.runCtx = ctx
 	payload := json.RawMessage(`{"id":"m","content":"x","author":{"user_openid":"u"}}`)
 	for range qqEventQueueSize {
-		channel.onEvent(qq.EventC2CMessage, payload)
+		channel.onEvent(EventC2CMessage, payload)
 	}
 	if len(channel.events) != qqEventQueueSize {
 		t.Fatalf("队列应恰好打满：%d", len(channel.events))
@@ -202,7 +202,7 @@ func TestQQOnEventUnblocksOnRunContextDone(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		channel.onEvent(qq.EventC2CMessage, payload) // 队列满 → 只能等 runCtx
+		channel.onEvent(EventC2CMessage, payload) // 队列满 → 只能等 runCtx
 	}()
 	select {
 	case <-done:
@@ -226,15 +226,15 @@ func TestQQOnEventUnblocksOnRunContextDone(t *testing.T) {
 // 计数也被一并抹掉，于是清空后的下一条回复又从 1 开始（现状，见断言注释）。
 // 群聊回复必须走群接口、私聊走 C2C 接口。
 func TestQQInboundReplySeqAndGroupRouting(t *testing.T) {
-	fake := newFakeQQ(t)
-	client := qq.NewClient(qq.Config{
+	fake := qqtestsupport.New(t)
+	client := NewClient(Config{
 		AppID: "app", AppSecret: "sec",
-		APIBaseURL: fake.server.URL, TokenURL: fake.server.URL + "/token",
-		HTTPClient: fake.server.Client(), Log: t.Logf,
+		APIBaseURL: fake.URL(), TokenURL: fake.URL() + "/token",
+		HTTPClient: fake.Client(), Log: t.Logf,
 	})
-	channel := newQQChannelWithClient(QQChannelConfig{}, client, "", false, t.Logf)
+	channel := newAdapterWithClient(AdapterConfig{}, client, "", false, t.Logf)
 
-	private := &qqInbound{channel: channel, userOpenID: "u1", msgID: "m-1", text: "问"}
+	private := &adapterInbound{channel: channel, userOpenID: "u1", msgID: "m-1", text: "问"}
 	for want := 1; want <= 2; want++ {
 		if err := private.Reply(t.Context(), "分块"); err != nil {
 			t.Fatalf("Reply: %v", err)
@@ -243,18 +243,18 @@ func TestQQInboundReplySeqAndGroupRouting(t *testing.T) {
 			t.Errorf("msg_seq 应递增到 %d，实际 %d", want, got)
 		}
 	}
-	group := &qqInbound{channel: channel, userOpenID: "mem", groupOpenID: "G1", msgID: "g-1", text: "问"}
+	group := &adapterInbound{channel: channel, userOpenID: "mem", groupOpenID: "G1", msgID: "g-1", text: "问"}
 	if err := group.Reply(t.Context(), "群里的回复"); err != nil {
 		t.Fatalf("群聊 Reply: %v", err)
 	}
-	sent := fake.waitSent(t, 3)
+	sent := fake.WaitSent(t, 3)
 	// fake 只记录 /v2/ 的发送（token 请求走 /token，不入账），索引即发送顺序：
 	// 私聊 m-1 的两块在前，群聊 g-1 在后。
 	// 收信方不在请求体里——SendC2CText/SendGroupText 把 user_openid / group_openid
 	// 编进 URL 路径（/v2/users/<id>/messages 与 /v2/groups/<id>/messages），体里
 	// 只有 content/msg_type/msg_id/msg_seq。群聊必须打群接口（回到群里），私聊
 	// 必须打 C2C 接口（回到发信人），打错接口等于把群里的回复私发给某个人。
-	paths := fake.sentPaths()
+	paths := fake.SentPaths()
 	if want := []string{
 		"/v2/users/u1/messages", "/v2/users/u1/messages", "/v2/groups/G1/messages",
 	}; !slices.Equal(paths, want) {
@@ -273,7 +273,7 @@ func TestQQInboundReplySeqAndGroupRouting(t *testing.T) {
 
 	// 缓存超过上限：整体清空。注意 clear 紧跟在写入之后，因此当下这条计数也一并
 	// 被抹掉（现状，见 Reply）——清空后的下一条回复又从 1 开始。
-	flood := &qqInbound{channel: channel, userOpenID: "u", msgID: "触发清空", text: "x"}
+	flood := &adapterInbound{channel: channel, userOpenID: "u", msgID: "触发清空", text: "x"}
 	channel.seqMu.Lock()
 	channel.msgSeq[flood.msgID] = 1 // 自身先占一条
 	for index := range qqMsgSeqCacheLimit + 1 - 3 {
@@ -301,8 +301,8 @@ func TestQQInboundReplySeqAndGroupRouting(t *testing.T) {
 // TestQQInboundTypingIsNoop 钉住 Typing 的空实现：QQ 开放平台没有「正在输入」
 // 协议，必须静默无事（发不出请求也不能 panic 或报错）。
 func TestQQInboundTypingIsNoop(t *testing.T) {
-	channel := NewQQChannel(QQChannelConfig{}, "", false, nil)
-	inbound := &qqInbound{channel: channel, userOpenID: "u", msgID: "m"}
+	channel := NewAdapter(AdapterConfig{}, "", false, nil)
+	inbound := &adapterInbound{channel: channel, userOpenID: "u", msgID: "m"}
 	inbound.Typing(t.Context(), true)
 	inbound.Typing(t.Context(), false)
 	if inbound.User() != "u" || inbound.Text() != "" {

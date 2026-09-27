@@ -1,4 +1,4 @@
-package daemon
+package weixin
 
 import (
 	"context"
@@ -9,8 +9,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/Cosmic-Developers-Union/assistant/internal/weixin"
 )
 
 // fakeIlink 返回一个最小 ilink 服务端：把每个请求的路径记进 paths（按顺序），
@@ -33,9 +31,9 @@ func fakeIlink(t *testing.T, handler func(path string, body map[string]any) (int
 }
 
 // weixinChannelForTest 造一个指向测试服务端的微信通道。
-func weixinChannelForTest(server *httptest.Server, config WeixinChannelConfig, log func(string, ...any)) *WeixinChannel {
-	config.Weixin = weixin.Config{BaseURL: server.URL, HTTPClient: server.Client(), BotToken: "bot-tok"}
-	return NewWeixinChannel(config, log)
+func weixinChannelForTest(server *httptest.Server, config AdapterConfig, log func(string, ...any)) *Adapter {
+	config.ClientConfig = Config{BaseURL: server.URL, HTTPClient: server.Client(), BotToken: "bot-tok"}
+	return NewAdapter(config, log)
 }
 
 // TestWeixinAllowedLoginFallback 钉住 Allowed 的后半条链：白名单为空时只能靠
@@ -43,7 +41,7 @@ func weixinChannelForTest(server *httptest.Server, config WeixinChannelConfig, l
 // 以为是自己没配白名单）；两者都空时彻底拒绝并点名两个配置键。这条兜底是扫码
 // 登录模式下唯一能用的准入规则。
 func TestWeixinAllowedLoginFallback(t *testing.T) {
-	channel := &WeixinChannel{loginUserID: "owner"}
+	channel := &Adapter{loginUserID: "owner"}
 	if allowed, reason := channel.Allowed("owner"); !allowed || reason != "" {
 		t.Errorf("登录者本人应放行：%v %q", allowed, reason)
 	}
@@ -51,13 +49,13 @@ func TestWeixinAllowedLoginFallback(t *testing.T) {
 		t.Errorf("非登录者应拒绝：%v %q", allowed, reason)
 	}
 
-	empty := &WeixinChannel{}
+	empty := &Adapter{}
 	allowed, reason := empty.Allowed("任何")
-	if allowed || reason != "未配置 weixin.admin_users 且无 login_user_id" {
+	if allowed || reason != "未配置 admin_users 且无 login_user_id" {
 		t.Errorf("两者都空应拒绝并点名配置：%v %q", allowed, reason)
 	}
 	// 空白用户标识在进白名单判断之前就被拒（"*" 通配也不例外）
-	wildcard := &WeixinChannel{adminUsers: []string{"*"}}
+	wildcard := &Adapter{adminUsers: []string{"*"}}
 	if allowed, reason := wildcard.Allowed("   "); allowed || reason != "用户标识为空" {
 		t.Errorf("空白标识应拒绝：%v %q", allowed, reason)
 	}
@@ -70,7 +68,7 @@ func TestWeixinCloseLogsNotifyFailure(t *testing.T) {
 		return http.StatusInternalServerError, `{}`
 	})
 	var logs []string
-	channel := weixinChannelForTest(server, WeixinChannelConfig{}, func(format string, arguments ...any) {
+	channel := weixinChannelForTest(server, AdapterConfig{}, func(format string, arguments ...any) {
 		logs = append(logs, format)
 	})
 	channel.Close(t.Context())
@@ -87,7 +85,7 @@ func TestWeixinCloseLogsNotifyFailure(t *testing.T) {
 		return http.StatusOK, `{"ret":0}`
 	})
 	logs = nil
-	weixinChannelForTest(ok, WeixinChannelConfig{}, func(format string, arguments ...any) {
+	weixinChannelForTest(ok, AdapterConfig{}, func(format string, arguments ...any) {
 		logs = append(logs, format)
 	}).Close(t.Context())
 	if len(logs) != 0 {
@@ -102,7 +100,7 @@ func TestWeixinStartNotifyFailurePropagates(t *testing.T) {
 	server, paths := fakeIlink(t, func(path string, _ map[string]any) (int, string) {
 		return http.StatusOK, `{"ret":100,"errmsg":"未登录"}`
 	})
-	err := weixinChannelForTest(server, WeixinChannelConfig{}, nil).Start(t.Context())
+	err := weixinChannelForTest(server, AdapterConfig{}, nil).Start(t.Context())
 	if err == nil || !strings.Contains(err.Error(), "ret=100") {
 		t.Errorf("上线通知失败应上抛并带 ret：%v", err)
 	}
@@ -113,7 +111,7 @@ func TestWeixinStartNotifyFailurePropagates(t *testing.T) {
 	ok, _ := fakeIlink(t, func(string, map[string]any) (int, string) {
 		return http.StatusOK, `{"ret":0}`
 	})
-	if err := weixinChannelForTest(ok, WeixinChannelConfig{}, nil).Start(t.Context()); err != nil {
+	if err := weixinChannelForTest(ok, AdapterConfig{}, nil).Start(t.Context()); err != nil {
 		t.Errorf("上线通知成功不应报错：%v", err)
 	}
 }
@@ -124,12 +122,12 @@ func TestWeixinStartNotifyFailurePropagates(t *testing.T) {
 // 打环。cursor 必须随平台返回值前进，否则每轮都重取同一批消息。
 func TestWeixinReceivePendingDrainAndCursor(t *testing.T) {
 	// 手工塞入 pending：不经网络，直接覆盖 drain 分支
-	channel := &WeixinChannel{name: "weixin", typing: &typingCache{tickets: map[string]string{}}, log: func(string, ...any) {}}
-	channel.pending = []weixin.Message{
-		{FromUserID: "u1", MessageType: messageTypeUser, ItemList: []weixin.MessageItem{{Type: 1, TextItem: &struct {
+	channel := &Adapter{name: "weixin", typing: &typingCache{tickets: map[string]string{}}, log: func(string, ...any) {}}
+	channel.pending = []Message{
+		{FromUserID: "u1", MessageType: messageTypeUser, ItemList: []MessageItem{{Type: 1, TextItem: &struct {
 			Text string `json:"text"`
 		}{Text: "第一条"}}}},
-		{FromUserID: "u2", MessageType: messageTypeUser, ContextToken: "ctx-2", ItemList: []weixin.MessageItem{{Type: 1, TextItem: &struct {
+		{FromUserID: "u2", MessageType: messageTypeUser, ContextToken: "ctx-2", ItemList: []MessageItem{{Type: 1, TextItem: &struct {
 			Text string `json:"text"`
 		}{Text: "第二条"}}}},
 	}
@@ -159,7 +157,7 @@ func TestWeixinReceivePendingDrainAndCursor(t *testing.T) {
 		}
 		return http.StatusOK, `{"ret":0,"get_updates_buf":"cursor-2","msgs":[` + user + `,` + bot + `]}`
 	})
-	live := weixinChannelForTest(server, WeixinChannelConfig{}, t.Logf)
+	live := weixinChannelForTest(server, AdapterConfig{}, t.Logf)
 	inbound, err := live.Receive(t.Context())
 	if err != nil {
 		t.Fatalf("Receive: %v", err)
@@ -179,7 +177,7 @@ func TestWeixinReceiveContextCanceled(t *testing.T) {
 		// 总是空批次：让 Receive 的 continue 分支成立，从而最终落到 ctxDone 判断
 		return http.StatusOK, `{"ret":0,"msgs":[]}`
 	})
-	channel := weixinChannelForTest(server, WeixinChannelConfig{}, nil)
+	channel := weixinChannelForTest(server, AdapterConfig{}, nil)
 	ctx, cancel := context.WithCancel(t.Context())
 	go func() {
 		time.Sleep(20 * time.Millisecond)
@@ -190,7 +188,7 @@ func TestWeixinReceiveContextCanceled(t *testing.T) {
 	}
 }
 
-// TestWeixinInboundReplyAndTyping 钉住 weixinInbound 的两条网络路径：Reply 必须
+// TestWeixinInboundReplyAndTyping 钉住 adapterInbound 的两条网络路径：Reply 必须
 // 带 context_token 回到原会话（平台靠它定位会话，漏掉就发不出去），Typing 走
 // typing 票据缓存并区分开关状态；非用户消息（Bot 自己）直接早退、不发 typing。
 func TestWeixinInboundReplyAndTyping(t *testing.T) {
@@ -204,8 +202,8 @@ func TestWeixinInboundReplyAndTyping(t *testing.T) {
 			return http.StatusOK, `{"ret":0}`
 		}
 	})
-	channel := weixinChannelForTest(server, WeixinChannelConfig{}, nil)
-	message := weixin.Message{FromUserID: "u1", ContextToken: "ctx-1", MessageType: messageTypeUser}
+	channel := weixinChannelForTest(server, AdapterConfig{}, nil)
+	message := Message{FromUserID: "u1", ContextToken: "ctx-1", MessageType: messageTypeUser}
 	inbound := channel.inbound(message)
 	if err := inbound.Reply(t.Context(), "回复内容"); err != nil {
 		t.Fatalf("Reply: %v", err)
@@ -232,7 +230,7 @@ func TestWeixinInboundReplyAndTyping(t *testing.T) {
 
 	// 非用户消息：Typing 直接早退，不打任何请求
 	before := len(bodies)
-	botInbound := channel.inbound(weixin.Message{FromUserID: "bot", MessageType: 2})
+	botInbound := channel.inbound(Message{FromUserID: "bot", MessageType: 2})
 	botInbound.Typing(t.Context(), true)
 	if len(bodies) != before {
 		t.Errorf("Bot 自己的消息不应触发 typing：%d → %d", before, len(bodies))
@@ -248,7 +246,7 @@ func TestWeixinTypingTicketCacheAndFailure(t *testing.T) {
 		calls++
 		return http.StatusOK, `{"ret":0,"typing_ticket":"ticket-1"}`
 	})
-	client := weixin.NewClient(weixin.Config{BaseURL: server.URL, HTTPClient: server.Client(), BotToken: "tok"})
+	client := NewClient(Config{BaseURL: server.URL, HTTPClient: server.Client(), BotToken: "tok"})
 	cache := &typingCache{tickets: map[string]string{}}
 	for range 2 {
 		ticket, err := cache.ticket(t.Context(), client, "u1", "ctx")
@@ -263,7 +261,7 @@ func TestWeixinTypingTicketCacheAndFailure(t *testing.T) {
 	failing, _ := fakeIlink(t, func(string, map[string]any) (int, string) {
 		return http.StatusInternalServerError, `{}`
 	})
-	failClient := weixin.NewClient(weixin.Config{BaseURL: failing.URL, HTTPClient: failing.Client()})
+	failClient := NewClient(Config{BaseURL: failing.URL, HTTPClient: failing.Client()})
 	if _, err := (&typingCache{tickets: map[string]string{}}).ticket(t.Context(), failClient, "u2", "ctx"); err == nil {
 		t.Errorf("取票据失败应上抛错误")
 	}

@@ -1,4 +1,4 @@
-package daemon
+package telegram
 
 import (
 	"context"
@@ -7,8 +7,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/Cosmic-Developers-Union/assistant/internal/telegram"
 )
 
 // TestTelegramAllowedWhitelistAndFallback 钉住 Allowed 的两条此前零覆盖分支：
@@ -16,7 +14,7 @@ import (
 // （文案必须点出 qq/telegram 配置键名，操作者才知道去哪加人）；顺带钉住
 // 数字 id 白名单是精确匹配、不是前缀匹配。
 func TestTelegramAllowedWhitelistAndFallback(t *testing.T) {
-	whitelisted := NewTelegramChannel(TelegramChannelConfig{AdminUsers: []string{"1001", "1002"}}, nil)
+	whitelisted := NewAdapter(AdapterConfig{AdminUsers: []string{"1001", "1002"}}, nil)
 	if allowed, reason := whitelisted.Allowed("1002"); !allowed || reason != "" {
 		t.Errorf("白名单命中应放行：%v %q", allowed, reason)
 	}
@@ -24,8 +22,8 @@ func TestTelegramAllowedWhitelistAndFallback(t *testing.T) {
 		t.Errorf("前缀不算命中：%v %q", allowed, reason)
 	}
 
-	// 未配置白名单：必须拒绝并提示配置方法（含 telegram.admin_users）
-	empty := NewTelegramChannel(TelegramChannelConfig{}, nil)
+	// 未配置白名单：必须拒绝并提示配置方法（含 admin_users）
+	empty := NewAdapter(AdapterConfig{}, nil)
 	allowed, reason := empty.Allowed("1001")
 	if allowed || !strings.Contains(reason, "admin_users") {
 		t.Errorf("未配置白名单应拒绝并提示配置：%v %q", allowed, reason)
@@ -42,10 +40,10 @@ func TestTelegramAllowedWhitelistAndFallback(t *testing.T) {
 // 的消息必须先逐条交付完（保持平台顺序），再去长轮询新更新——pending 里的消息
 // 被跳过就等于丢消息。Receive 的 pending 分支不经任何网络，直接手工塞入。
 func TestTelegramReceiveDrainsPendingFirst(t *testing.T) {
-	channel := NewTelegramChannel(TelegramChannelConfig{BotToken: "tok-1", APIBaseURL: "http://127.0.0.1:1"}, t.Logf)
-	channel.pending = []telegram.Message{
-		{MessageID: 1, From: &telegram.User{ID: 11}, Chat: telegram.Chat{ID: 11}, Text: "第一条"},
-		{MessageID: 2, From: &telegram.User{ID: 22}, Chat: telegram.Chat{ID: 22}, Text: "第二条"},
+	channel := NewAdapter(AdapterConfig{BotToken: "tok-1", APIBaseURL: "http://127.0.0.1:1"}, t.Logf)
+	channel.pending = []Message{
+		{MessageID: 1, From: &User{ID: 11}, Chat: Chat{ID: 11}, Text: "第一条"},
+		{MessageID: 2, From: &User{ID: 22}, Chat: Chat{ID: 22}, Text: "第二条"},
 	}
 	for _, want := range []string{"第一条", "第二条"} {
 		message, err := channel.Receive(t.Context())
@@ -94,7 +92,7 @@ func TestTelegramReceiveSkipsNonTextUpdates(t *testing.T) {
 	}))
 	defer server.Close()
 
-	channel := NewTelegramChannel(TelegramChannelConfig{
+	channel := NewAdapter(AdapterConfig{
 		BotToken: "tok", APIBaseURL: server.URL, HTTPClient: server.Client(),
 	}, t.Logf)
 	message, err := channel.Receive(t.Context())
@@ -116,7 +114,7 @@ func TestTelegramReceiveSkipsNonTextUpdates(t *testing.T) {
 	}
 }
 
-// TestTelegramInboundTypingAndReply 钉住 telegramInbound 的两条零覆盖交互：
+// TestTelegramInboundTypingAndReply 钉住 adapterInbound 的两条零覆盖交互：
 // Typing(false) 必须是空操作（Telegram 无关闭语义，发个假动作只会浪费配额），
 // Typing(true) 必须真的打 sendChatAction；Reply 必须打到该消息的 chat id
 // （群聊里回到群里，而不是发给发送者本人）。
@@ -133,12 +131,12 @@ func TestTelegramInboundTypingAndReply(t *testing.T) {
 	}))
 	defer server.Close()
 
-	channel := NewTelegramChannel(TelegramChannelConfig{
+	channel := NewAdapter(AdapterConfig{
 		BotToken: "tok", APIBaseURL: server.URL, HTTPClient: server.Client(),
 	}, t.Logf)
 	// 群聊消息：chat id 与 from id 不同，Reply 必须回到 chat
-	inbound := channel.inbound(telegram.Message{
-		From: &telegram.User{ID: 42}, Chat: telegram.Chat{ID: -100500}, Text: "群里的问题",
+	inbound := channel.inbound(Message{
+		From: &User{ID: 42}, Chat: Chat{ID: -100500}, Text: "群里的问题",
 	})
 	inbound.Typing(t.Context(), false)
 	if len(paths) != 0 {
@@ -156,7 +154,7 @@ func TestTelegramInboundTypingAndReply(t *testing.T) {
 		t.Errorf("回复正文应带到请求里：%v", bodies)
 	}
 	// 空白文本消息：Text 原样返回（过滤在 Receive 里做，不在 Inbound 上）
-	if got := channel.inbound(telegram.Message{From: &telegram.User{ID: 1}, Text: "  "}).Text(); got != "  " {
+	if got := channel.inbound(Message{From: &User{ID: 1}, Text: "  "}).Text(); got != "  " {
 		t.Errorf("Inbound.Text 应透传原文：%q", got)
 	}
 }

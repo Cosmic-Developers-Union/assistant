@@ -10,6 +10,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Cosmic-Developers-Union/assistant/internal/integration"
+	"github.com/Cosmic-Developers-Union/assistant/internal/integration/telegram"
 )
 
 // newFakeTelegram 返回最小 Bot API 服务端：第一批 getUpdates 投递一条私聊文本，
@@ -61,9 +64,9 @@ func newFakeTelegram(t *testing.T, fromUserID int64, text string) (*httptest.Ser
 	return server, snapshot
 }
 
-func newTelegramChannelForTest(t *testing.T, server *httptest.Server, adminUsers []string) (*TelegramChannel, *Chat) {
+func newTelegramAdapterForTest(t *testing.T, server *httptest.Server, adminUsers []string) (*telegram.Adapter, *Chat) {
 	t.Helper()
-	channel := NewTelegramChannel(TelegramChannelConfig{
+	channel := telegram.NewAdapter(telegram.AdapterConfig{
 		BotToken:   "tok-1",
 		APIBaseURL: server.URL,
 		AdminUsers: adminUsers,
@@ -80,19 +83,19 @@ func newTelegramChannelForTest(t *testing.T, server *httptest.Server, adminUsers
 	return channel, chat
 }
 
-func runTelegram(t *testing.T, channel *TelegramChannel, chat *Chat) (context.CancelFunc, chan error) {
+func runTelegram(t *testing.T, channel *telegram.Adapter, chat *Chat) (context.CancelFunc, chan error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- RunChannel(ctx, channel, ChannelConfig{Chat: chat, Log: t.Logf})
+		done <- integration.RunChat(ctx, channel, integration.Options{Conversations: IntegrateConversations(chat), Log: t.Logf})
 	}()
 	return cancel, done
 }
 
 // 私聊：白名单用户 → claude 回复经 sendMessage 发回原会话；会话键为通道实例键。
-func TestTelegramChannelReplies(t *testing.T) {
+func TestTelegramAdapterReplies(t *testing.T) {
 	server, sent := newFakeTelegram(t, 7, "状态")
-	channel, chat := newTelegramChannelForTest(t, server, []string{"7"})
+	channel, chat := newTelegramAdapterForTest(t, server, []string{"7"})
 	cancel, done := runTelegram(t, channel, chat)
 
 	deadline := time.Now().Add(3 * time.Second)
@@ -118,9 +121,9 @@ func TestTelegramChannelReplies(t *testing.T) {
 }
 
 // 白名单外用户：不回复。
-func TestTelegramChannelDenies(t *testing.T) {
+func TestTelegramAdapterDenies(t *testing.T) {
 	server, sent := newFakeTelegram(t, 999, "你好")
-	channel, chat := newTelegramChannelForTest(t, server, []string{"7"})
+	channel, chat := newTelegramAdapterForTest(t, server, []string{"7"})
 	cancel, done := runTelegram(t, channel, chat)
 	time.Sleep(300 * time.Millisecond)
 	cancel()
@@ -130,17 +133,17 @@ func TestTelegramChannelDenies(t *testing.T) {
 	}
 }
 
-// 命名实例的键：NewTelegramChannel 空 name 回退 telegram，显式 key 原样保留。
-func TestTelegramChannelKey(t *testing.T) {
-	channel := NewTelegramChannel(TelegramChannelConfig{BotToken: "t"}, nil)
+// 命名实例的键：telegram.NewAdapter 空 name 回退 telegram，显式 key 原样保留。
+func TestTelegramAdapterKey(t *testing.T) {
+	channel := telegram.NewAdapter(telegram.AdapterConfig{BotToken: "t"}, nil)
 	if channel.Name() != "telegram" {
 		t.Errorf("缺省键 = %q", channel.Name())
 	}
-	channel = NewTelegramChannel(TelegramChannelConfig{Name: "telegram/alt", BotToken: "t"}, nil)
+	channel = telegram.NewAdapter(telegram.AdapterConfig{Name: "telegram/alt", BotToken: "t"}, nil)
 	if channel.Name() != "telegram/alt" {
 		t.Errorf("命名键 = %q", channel.Name())
 	}
-	if channel.SplitLimit() != DefaultTelegramSplitLimit {
+	if channel.SplitLimit() != telegram.DefaultTelegramSplitLimit {
 		t.Errorf("SplitLimit = %d", channel.SplitLimit())
 	}
 	if allowed, reason := channel.Allowed(""); allowed || !strings.Contains(reason, "用户标识") {

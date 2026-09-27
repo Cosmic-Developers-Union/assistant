@@ -1,4 +1,4 @@
-package daemon
+package weixin
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Cosmic-Developers-Union/assistant/internal/weixin"
+	"github.com/Cosmic-Developers-Union/assistant/internal/integration"
 )
 
 // messageTypeUser 是 WeixinMessage.message_type 中「用户」的取值（2 是 Bot）。
@@ -16,12 +16,12 @@ const messageTypeUser = 1
 // DefaultWeixinSplitLimit 是微信回复切块的缺省上限。
 const DefaultWeixinSplitLimit = 1800
 
-// WeixinChannelConfig 是微信通道的适配配置（通道私有部分；通用部分见 ChannelConfig）。
-type WeixinChannelConfig struct {
+// AdapterConfig 是微信通道的适配配置（通道私有部分；通用部分见 integration.Options）。
+type AdapterConfig struct {
 	// Name 是通道实例键（会话映射层的 transport 键）：空 = "weixin"；多开
 	// 同平台账号时为 "weixin/<name>"
-	Name   string
-	Weixin weixin.Config
+	Name         string
+	ClientConfig Config
 	// AdminUsers 是允许对话的用户白名单；空时只允许 LoginUserID；含 "*" 放开所有人
 	AdminUsers []string
 	// LoginUserID 是扫码登录的微信用户
@@ -30,11 +30,11 @@ type WeixinChannelConfig struct {
 	SplitLimit int
 }
 
-// WeixinChannel 是微信（openclaw ilink）通道：长轮询收消息、SendText 回复、
+// Adapter 是微信（openclaw ilink）通道：长轮询收消息、SendText 回复、
 // typing 票据缓存与上下线通知。
-type WeixinChannel struct {
+type Adapter struct {
 	name        string
-	client      *weixin.Client
+	client      *Client
 	adminUsers  []string
 	loginUserID string
 	splitLimit  int
@@ -43,11 +43,11 @@ type WeixinChannel struct {
 
 	// cursor 与 pending 只在 Receive（通用桥的单消费协程）里访问
 	cursor  string
-	pending []weixin.Message
+	pending []Message
 }
 
-// NewWeixinChannel 创建微信通道。
-func NewWeixinChannel(config WeixinChannelConfig, log func(string, ...any)) *WeixinChannel {
+// NewAdapter 创建微信通道。
+func NewAdapter(config AdapterConfig, log func(string, ...any)) *Adapter {
 	if log == nil {
 		log = func(string, ...any) {}
 	}
@@ -59,9 +59,9 @@ func NewWeixinChannel(config WeixinChannelConfig, log func(string, ...any)) *Wei
 	if name == "" {
 		name = "weixin"
 	}
-	return &WeixinChannel{
+	return &Adapter{
 		name:        name,
-		client:      weixin.NewClient(config.Weixin),
+		client:      NewClient(config.ClientConfig),
 		adminUsers:  config.AdminUsers,
 		loginUserID: config.LoginUserID,
 		splitLimit:  limit,
@@ -71,13 +71,13 @@ func NewWeixinChannel(config WeixinChannelConfig, log func(string, ...any)) *Wei
 }
 
 // Name 实现 Channel：会话映射层的 transport 键。
-func (c *WeixinChannel) Name() string { return c.name }
+func (c *Adapter) Name() string { return c.name }
 
 // SplitLimit 实现 Channel。
-func (c *WeixinChannel) SplitLimit() int { return c.splitLimit }
+func (c *Adapter) SplitLimit() int { return c.splitLimit }
 
 // Allowed 实现 Channel："*" 通配 → 白名单 → 登录者兜底 → 全部拒绝。
-func (c *WeixinChannel) Allowed(user string) (bool, string) {
+func (c *Adapter) Allowed(user string) (bool, string) {
 	if strings.TrimSpace(user) == "" {
 		return false, "用户标识为空"
 	}
@@ -96,16 +96,16 @@ func (c *WeixinChannel) Allowed(user string) (bool, string) {
 		}
 		return true, ""
 	}
-	return false, "未配置 weixin.admin_users 且无 login_user_id"
+	return false, "未配置 admin_users 且无 login_user_id"
 }
 
 // Start 实现 starter：上线通知（尽力而为，失败由通用桥记日志）。
-func (c *WeixinChannel) Start(ctx context.Context) error {
+func (c *Adapter) Start(ctx context.Context) error {
 	return c.client.Notify(ctx, true)
 }
 
 // Close 实现 closer：下线通知（尽力而为）。
-func (c *WeixinChannel) Close(ctx context.Context) {
+func (c *Adapter) Close(ctx context.Context) {
 	if err := c.client.Notify(ctx, false); err != nil {
 		c.log("通知下线失败（忽略）：%v", err)
 	}
@@ -113,20 +113,20 @@ func (c *WeixinChannel) Close(ctx context.Context) {
 
 // Receive 实现 Channel：长轮询 ilink。会话被暂停（ret=-14）时挂起 1 小时后
 // 重试；空轮询立即再取；一次批量取到的消息逐条交付。
-func (c *WeixinChannel) Receive(ctx context.Context) (Inbound, error) {
+func (c *Adapter) Receive(ctx context.Context) (integration.Inbound, error) {
 	if len(c.pending) > 0 {
 		next := c.pending[0]
 		c.pending = c.pending[1:]
 		return c.inbound(next), nil
 	}
-	for !ctxDone(ctx) {
+	for !integration.CtxDone(ctx) {
 		updates, err := c.client.GetUpdates(ctx, c.cursor)
 		if err != nil {
 			return nil, err
 		}
 		if updates.Ret == -14 || updates.ErrCode == -14 {
 			c.log("账号会话被暂停（ret=-14），1 小时后重试")
-			sleepCtx(ctx, time.Hour)
+			integration.SleepCtx(ctx, time.Hour)
 			continue
 		}
 		if updates.Cursor != "" {
@@ -149,30 +149,30 @@ func (c *WeixinChannel) Receive(ctx context.Context) (Inbound, error) {
 }
 
 // inbound 把微信消息包装成通用入站消息（回复绑定该消息的 context_token）。
-func (c *WeixinChannel) inbound(message weixin.Message) Inbound {
-	return &weixinInbound{channel: c, message: message}
+func (c *Adapter) inbound(message Message) integration.Inbound {
+	return &adapterInbound{channel: c, message: message}
 }
 
-// weixinInbound 是 Inbound 的微信实现。
-type weixinInbound struct {
-	channel *WeixinChannel
-	message weixin.Message
+// adapterInbound 是 integration.Inbound 的微信实现。
+type adapterInbound struct {
+	channel *Adapter
+	message Message
 }
 
-func (m *weixinInbound) Transport() string { return m.channel.Name() }
+func (m *adapterInbound) Transport() string { return m.channel.Name() }
 
-func (m *weixinInbound) User() string { return m.message.FromUserID }
+func (m *adapterInbound) User() string { return m.message.FromUserID }
 
-func (m *weixinInbound) Text() string { return m.message.Text() }
+func (m *adapterInbound) Text() string { return m.message.Text() }
 
 // Reply 发送一块回复。
-func (m *weixinInbound) Reply(ctx context.Context, text string) error {
+func (m *adapterInbound) Reply(ctx context.Context, text string) error {
 	return m.channel.client.SendText(ctx, m.message.FromUserID, m.message.ContextToken, text)
 }
 
 // Typing 显示/停止「正在输入」：票据走缓存（getConfig 不便宜），任何失败静默
 // （typing 状态尽力而为，不影响回复）。
-func (m *weixinInbound) Typing(ctx context.Context, on bool) {
+func (m *adapterInbound) Typing(ctx context.Context, on bool) {
 	if m.message.MessageType != messageTypeUser {
 		return
 	}
@@ -180,9 +180,9 @@ func (m *weixinInbound) Typing(ctx context.Context, on bool) {
 	if err != nil || ticket == "" {
 		return
 	}
-	status := weixin.TypingOff
+	status := TypingOff
 	if on {
-		status = weixin.TypingOn
+		status = TypingOn
 	}
 	_ = m.channel.client.SendTyping(ctx, m.message.FromUserID, ticket, status)
 }
@@ -193,7 +193,7 @@ type typingCache struct {
 	tickets map[string]string
 }
 
-func (t *typingCache) ticket(ctx context.Context, client *weixin.Client, userID, contextToken string) (string, error) {
+func (t *typingCache) ticket(ctx context.Context, client *Client, userID, contextToken string) (string, error) {
 	t.mu.Lock()
 	if ticket, ok := t.tickets[userID]; ok && ticket != "" {
 		t.mu.Unlock()

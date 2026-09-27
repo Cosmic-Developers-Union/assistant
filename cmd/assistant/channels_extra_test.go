@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
-	"github.com/Cosmic-Developers-Union/assistant/internal/qq"
+	"github.com/Cosmic-Developers-Union/assistant/internal/integration/qq"
 )
 
 // writeChannelConfig 写出只含一个对话通道的配置：频道状态命令只看 channels，

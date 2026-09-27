@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Cosmic-Developers-Union/assistant/internal/integration"
 )
 
 // fakeChannel 是内存通道：测试用 push 逐条投递消息，Reply 收集回复。
@@ -20,7 +22,7 @@ type fakeChannel struct {
 	replies func() []string
 
 	mu      sync.Mutex
-	queue   []Inbound
+	queue   []integration.Inbound
 	sent    []string
 	notify  chan struct{}
 	runDone chan error
@@ -51,7 +53,7 @@ func (f *fakeChannel) Allowed(user string) (bool, string) {
 	return false, "白名单外用户"
 }
 
-func (f *fakeChannel) Receive(ctx context.Context) (Inbound, error) {
+func (f *fakeChannel) Receive(ctx context.Context) (integration.Inbound, error) {
 	for {
 		f.mu.Lock()
 		if len(f.queue) > 0 {
@@ -167,7 +169,7 @@ type dyingChannel struct {
 func (d *dyingChannel) Name() string                  { return d.name }
 func (d *dyingChannel) SplitLimit() int               { return 0 }
 func (d *dyingChannel) Allowed(string) (bool, string) { return true, "" }
-func (d *dyingChannel) Receive(context.Context) (Inbound, error) {
+func (d *dyingChannel) Receive(context.Context) (integration.Inbound, error) {
 	d.calls.Add(1)
 	return nil, d.err
 }
@@ -178,7 +180,7 @@ func TestRunChannelStopsOnFatalError(t *testing.T) {
 	dying := &dyingChannel{name: "dying", err: fatalStubError{"凭据被拒绝"}}
 	done := make(chan error, 1)
 	go func() {
-		done <- RunChannel(context.Background(), dying, ChannelConfig{Chat: chat})
+		done <- integration.RunChat(context.Background(), dying, integration.Options{Conversations: IntegrateConversations(chat)})
 	}()
 	select {
 	case err := <-done:
@@ -201,7 +203,7 @@ func TestRunChannelEndToEnd(t *testing.T) {
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		channel.runDone <- RunChannel(ctx, channel, ChannelConfig{Chat: chat, Log: t.Logf})
+		channel.runDone <- integration.RunChat(ctx, channel, integration.Options{Conversations: IntegrateConversations(chat), Log: t.Logf})
 	}()
 
 	// 普通对话：主 agent 生效（模型进 claude 参数）
@@ -232,7 +234,7 @@ func TestRunChannelDeniesUser(t *testing.T) {
 	channel.allow = func(user string) bool { return user == "user-1" }
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		channel.runDone <- RunChannel(ctx, channel, ChannelConfig{Chat: chat, Log: t.Logf})
+		channel.runDone <- integration.RunChat(ctx, channel, integration.Options{Conversations: IntegrateConversations(chat), Log: t.Logf})
 	}()
 	channel.push("intruder", "你好")
 	time.Sleep(150 * time.Millisecond)
@@ -247,7 +249,7 @@ func TestRunChannelCommands(t *testing.T) {
 	chat, channel, stub := startChat(t, ChatConfig{})
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		channel.runDone <- RunChannel(ctx, channel, ChannelConfig{Chat: chat, Log: t.Logf})
+		channel.runDone <- integration.RunChat(ctx, channel, integration.Options{Conversations: IntegrateConversations(chat), Log: t.Logf})
 	}()
 	channel.push("user-1", "/help")
 	replies := channel.waitReplies(t, 1)
@@ -277,7 +279,7 @@ func TestRunChannelInjectsSubagents(t *testing.T) {
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		channel.runDone <- RunChannel(ctx, channel, ChannelConfig{Chat: chat, Log: t.Logf})
+		channel.runDone <- integration.RunChat(ctx, channel, integration.Options{Conversations: IntegrateConversations(chat), Log: t.Logf})
 	}()
 	channel.push("user-1", "你好")
 	channel.waitReplies(t, 1)
@@ -331,10 +333,10 @@ func TestRunChannelInjectsSubagents(t *testing.T) {
 // 切块：超限回复按 rune 在换行处切开，逐块回复。
 func TestRunChannelSplitsLongReply(t *testing.T) {
 	chat, channel, _ := startChat(t, ChatConfig{})
-	config := ChannelConfig{Chat: chat, Log: t.Logf}
+	config := integration.Options{Conversations: IntegrateConversations(chat), Log: t.Logf}
 	message := &fakeInbound{channel: channel, user: "user-1"}
 	chat.config.Claude = runnerSuccess("第一行\n第二行内容很长")
-	handleInbound(context.Background(), splitLimitChannel{channel}, config, message, "你好")
+	integration.HandleInbound(context.Background(), splitLimitChannel{channel}, config, message, "你好")
 	replies := channel.replies()
 	if len(replies) < 2 || replies[0] != "第一行" {
 		t.Errorf("超限回复应切块：%v", replies)
@@ -348,39 +350,39 @@ func (splitLimitChannel) SplitLimit() int { return 5 }
 
 // 控制命令解析：斜杠与直白说法都认，普通聊天不受影响。
 func TestParseCommand(t *testing.T) {
-	for text, want := range map[string]command{
-		"/new":     {name: "reset"},
-		" /reset ": {name: "reset"},
-		"重新开始":     {name: "reset"},
-		"新会话":      {name: "reset"},
-		"/clear":   {name: "reset"},
-		"/help":    {name: "help"},
-		"帮助":       {name: "help"},
+	for text, want := range map[string]integration.Command{
+		"/new":     {Name: "reset"},
+		" /reset ": {Name: "reset"},
+		"重新开始":     {Name: "reset"},
+		"新会话":      {Name: "reset"},
+		"/clear":   {Name: "reset"},
+		"/help":    {Name: "help"},
+		"帮助":       {Name: "help"},
 	} {
-		if got := parseCommand(text); got != want {
-			t.Errorf("parseCommand(%q) = %+v, want %+v", text, got, want)
+		if got := integration.ParseCommand(text); got != want {
+			t.Errorf("integration.ParseCommand(%q) = %+v, want %+v", text, got, want)
 		}
 	}
 	for _, text := range []string{"继续", "new", "重新开始吧，但先回答我", "/news", "/agents", "/agentx ops", ""} {
-		if got := parseCommand(text); got.name != "" {
-			t.Errorf("parseCommand(%q) 不该识别为命令：+%v", text, got)
+		if got := integration.ParseCommand(text); got.Name != "" {
+			t.Errorf("integration.ParseCommand(%q) 不该识别为命令：+%v", text, got)
 		}
 	}
 }
 
 // 切块逻辑：按 rune 切、尽量在换行处切、短文本不切。
 func TestSplitText(t *testing.T) {
-	chunks := splitText("第一行\n第二行内容很长", 5)
+	chunks := integration.SplitText("第一行\n第二行内容很长", 5)
 	if len(chunks) < 2 || chunks[0] != "第一行" {
 		t.Errorf("splitText = %q", chunks)
 	}
-	if chunks := splitText("短", 10); len(chunks) != 1 || chunks[0] != "短" {
+	if chunks := integration.SplitText("短", 10); len(chunks) != 1 || chunks[0] != "短" {
 		t.Errorf("短文本不该切：%q", chunks)
 	}
-	if chunks := splitText("无换行的长文本内容", 5); len(chunks) != 2 {
+	if chunks := integration.SplitText("无换行的长文本内容", 5); len(chunks) != 2 {
 		t.Errorf("无换行也要能切：%q", chunks)
 	}
-	if chunks := splitText("任意", 0); len(chunks) != 1 {
+	if chunks := integration.SplitText("任意", 0); len(chunks) != 1 {
 		t.Errorf("上限 <=0 表示不切：%q", chunks)
 	}
 }

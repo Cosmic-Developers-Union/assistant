@@ -11,7 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Cosmic-Developers-Union/assistant/internal/weixin"
+	"github.com/Cosmic-Developers-Union/assistant/internal/integration"
+	"github.com/Cosmic-Developers-Union/assistant/internal/integration/weixin"
 )
 
 // sentRecorder 是并发安全的发送记录（服务端协程写、测试协程读）。
@@ -74,7 +75,7 @@ func newFakeWeixin(t *testing.T, fromUser string) (*httptest.Server, *sentRecord
 	return server, sent, &updatesCalls
 }
 
-func TestWeixinChannelRepliesToLoginUser(t *testing.T) {
+func TestWeixinAdapterRepliesToLoginUser(t *testing.T) {
 	server, sent, _ := newFakeWeixin(t, "user-1")
 	chat, err := NewChat(ChatConfig{
 		StateDir:   t.TempDir(),
@@ -84,14 +85,14 @@ func TestWeixinChannelRepliesToLoginUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	channel := NewWeixinChannel(WeixinChannelConfig{
-		Weixin:      weixin.Config{BaseURL: server.URL, BotToken: "tok", HTTPClient: server.Client()},
-		LoginUserID: "user-1",
+	channel := weixin.NewAdapter(weixin.AdapterConfig{
+		ClientConfig: weixin.Config{BaseURL: server.URL, BotToken: "tok", HTTPClient: server.Client()},
+		LoginUserID:  "user-1",
 	}, t.Logf)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- RunChannel(ctx, channel, ChannelConfig{Chat: chat, Log: t.Logf})
+		done <- integration.RunChat(ctx, channel, integration.Options{Conversations: IntegrateConversations(chat), Log: t.Logf})
 	}()
 
 	deadline := time.Now().Add(3 * time.Second)
@@ -116,7 +117,7 @@ func TestWeixinChannelRepliesToLoginUser(t *testing.T) {
 	}
 }
 
-func TestWeixinChannelIgnoresOtherUsers(t *testing.T) {
+func TestWeixinAdapterIgnoresOtherUsers(t *testing.T) {
 	server, sent, _ := newFakeWeixin(t, "intruder")
 	chat, err := NewChat(ChatConfig{
 		StateDir:   t.TempDir(),
@@ -126,14 +127,14 @@ func TestWeixinChannelIgnoresOtherUsers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	channel := NewWeixinChannel(WeixinChannelConfig{
-		Weixin:      weixin.Config{BaseURL: server.URL, BotToken: "tok", HTTPClient: server.Client()},
-		LoginUserID: "user-1",
+	channel := weixin.NewAdapter(weixin.AdapterConfig{
+		ClientConfig: weixin.Config{BaseURL: server.URL, BotToken: "tok", HTTPClient: server.Client()},
+		LoginUserID:  "user-1",
 	}, t.Logf)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- RunChannel(ctx, channel, ChannelConfig{Chat: chat, Log: t.Logf})
+		done <- integration.RunChat(ctx, channel, integration.Options{Conversations: IntegrateConversations(chat), Log: t.Logf})
 	}()
 	time.Sleep(300 * time.Millisecond)
 	cancel()
@@ -144,22 +145,22 @@ func TestWeixinChannelIgnoresOtherUsers(t *testing.T) {
 }
 
 // 准入判定："*" 通配放开一切，白名单其次，登录者兜底，什么都不配则全拒。
-func TestWeixinChannelAllowed(t *testing.T) {
-	channel := NewWeixinChannel(WeixinChannelConfig{LoginUserID: "owner"}, nil)
+func TestWeixinAdapterAllowed(t *testing.T) {
+	channel := weixin.NewAdapter(weixin.AdapterConfig{LoginUserID: "owner"}, nil)
 	if allowed, _ := channel.Allowed("owner"); !allowed {
 		t.Error("登录用户应放行")
 	}
 	if allowed, _ := channel.Allowed("other"); allowed {
 		t.Error("非登录用户应拒绝")
 	}
-	channel = NewWeixinChannel(WeixinChannelConfig{AdminUsers: []string{"a"}}, nil)
+	channel = weixin.NewAdapter(weixin.AdapterConfig{AdminUsers: []string{"a"}}, nil)
 	if allowed, _ := channel.Allowed("a"); !allowed {
 		t.Error("白名单用户应放行")
 	}
 	if allowed, _ := channel.Allowed("owner"); allowed {
 		t.Error("配置白名单后登录者兜底失效")
 	}
-	channel = NewWeixinChannel(WeixinChannelConfig{AdminUsers: []string{"*"}}, nil)
+	channel = weixin.NewAdapter(weixin.AdapterConfig{AdminUsers: []string{"*"}}, nil)
 	if allowed, _ := channel.Allowed("任何人"); !allowed {
 		t.Error(`"*" 应放开所有人`)
 	}
@@ -169,7 +170,7 @@ func TestWeixinChannelAllowed(t *testing.T) {
 }
 
 // Bot 自己的消息（message_type=2）在通道层丢弃："*" 放开时也不能自问自答打环。
-func TestWeixinChannelDropsBotMessages(t *testing.T) {
+func TestWeixinAdapterDropsBotMessages(t *testing.T) {
 	var updatesCalls int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
@@ -197,14 +198,14 @@ func TestWeixinChannelDropsBotMessages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	channel := NewWeixinChannel(WeixinChannelConfig{
-		Weixin:     weixin.Config{BaseURL: server.URL, BotToken: "tok", HTTPClient: server.Client()},
-		AdminUsers: []string{"*"},
+	channel := weixin.NewAdapter(weixin.AdapterConfig{
+		ClientConfig: weixin.Config{BaseURL: server.URL, BotToken: "tok", HTTPClient: server.Client()},
+		AdminUsers:   []string{"*"},
 	}, t.Logf)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- RunChannel(ctx, channel, ChannelConfig{Chat: chat, Log: t.Logf})
+		done <- integration.RunChat(ctx, channel, integration.Options{Conversations: IntegrateConversations(chat), Log: t.Logf})
 	}()
 	time.Sleep(300 * time.Millisecond)
 	cancel()

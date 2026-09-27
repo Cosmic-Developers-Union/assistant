@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
-	"github.com/Cosmic-Developers-Union/assistant/internal/telegram"
+	"github.com/Cosmic-Developers-Union/assistant/internal/integration/telegram"
 
 	"github.com/spf13/cobra"
 )

@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Cosmic-Developers-Union/assistant/internal/integration"
 )
 
 // ── 通道层（channel.go）补测 ─────────────────────────────────────────────
@@ -18,11 +20,11 @@ import (
 // 平台接口挂掉），必须有测试钉住。
 
 // stubChannel 是 channel.go 专用探针通道：Allowed/Receive/SplitLimit 由测试注入，
-// 可选实现 starter / closer 以覆盖 RunChannel 的两条可选钩子分支。
+// 可选实现 integration.Starter / integration.Closer 以覆盖 RunChannel 的两条可选钩子分支。
 type stubChannel struct {
 	name    string
 	allowed func(user string) (bool, string)
-	receive func(ctx context.Context) (Inbound, error)
+	receive func(ctx context.Context) (integration.Inbound, error)
 	limit   int
 
 	startErr error
@@ -41,7 +43,7 @@ func (s *stubChannel) Allowed(user string) (bool, string) {
 	return s.allowed(user)
 }
 
-func (s *stubChannel) Receive(ctx context.Context) (Inbound, error) {
+func (s *stubChannel) Receive(ctx context.Context) (integration.Inbound, error) {
 	return s.receive(ctx)
 }
 
@@ -82,19 +84,19 @@ func (s *stubInbound) Typing(context.Context, bool) { s.typingOn++ }
 // 收信时 panic，而 daemon 早已把「通道已启动」写进日志，故障点被掩盖。
 func TestRunChannelRejectsMissingDependencies(t *testing.T) {
 	chat, _, _ := startChat(t, ChatConfig{})
-	if err := RunChannel(t.Context(), nil, ChannelConfig{Chat: chat}); err == nil ||
+	if err := integration.RunChat(t.Context(), nil, integration.Options{Conversations: IntegrateConversations(chat)}); err == nil ||
 		!strings.Contains(err.Error(), "通道未初始化") {
 		t.Errorf("空通道应立刻报错：%v", err)
 	}
 	channel := &stubChannel{name: "stub"}
-	if err := RunChannel(t.Context(), channel, ChannelConfig{}); err == nil ||
+	if err := integration.RunChat(t.Context(), channel, integration.Options{}); err == nil ||
 		!strings.Contains(err.Error(), "对话会话未初始化") {
 		t.Errorf("空 Chat 应立刻报错：%v", err)
 	}
 }
 
 // TestRunChannelStartFailureAndCloser 钉住两条可选钩子的装配：Start 失败只记日志、
-// 不阻断消费（微信上线通知失败也要继续收信）；实现了 closer 的通道在 RunChannel
+// 不阻断消费（微信上线通知失败也要继续收信）；实现了 integration.Closer 的通道在 RunChannel
 // 退出时必须恰好被 Close 一次（下线通知，漏掉它平台会一直以为机器人还在线）。
 // 顺带钉住空 Log 的归一化：nil 日志函数不能 panic。
 func TestRunChannelStartFailureAndCloser(t *testing.T) {
@@ -104,16 +106,16 @@ func TestRunChannelStartFailureAndCloser(t *testing.T) {
 	channel := &stubChannel{
 		name:     "stub",
 		startErr: errors.New("上线通知被拒"),
-		receive: func(receiveCtx context.Context) (Inbound, error) {
+		receive: func(receiveCtx context.Context) (integration.Inbound, error) {
 			<-receiveCtx.Done()
 			return nil, receiveCtx.Err()
 		},
 	}
 	done := make(chan error, 1)
 	go func() {
-		done <- RunChannel(ctx, channel, ChannelConfig{
-			Chat: chat,
-			Log:  logs.Log,
+		done <- integration.RunChat(ctx, channel, integration.Options{
+			Conversations: IntegrateConversations(chat),
+			Log:           logs.Log,
 		})
 	}()
 	// 等 Start 的日志落袋，再取消
@@ -160,7 +162,7 @@ func TestRunChannelReceiveRetriesAndSkips(t *testing.T) {
 			}
 			return false, "白名单外用户"
 		},
-		receive: func(receiveCtx context.Context) (Inbound, error) {
+		receive: func(receiveCtx context.Context) (integration.Inbound, error) {
 			attempts++
 			switch attempts {
 			case 1:
@@ -180,9 +182,9 @@ func TestRunChannelReceiveRetriesAndSkips(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		done <- RunChannel(ctx, channel, ChannelConfig{
-			Chat: chat,
-			Log:  logs.Log,
+		done <- integration.RunChat(ctx, channel, integration.Options{
+			Conversations: IntegrateConversations(chat),
+			Log:           logs.Log,
 		})
 	}()
 	deadline := time.Now().Add(5 * time.Second)
@@ -208,18 +210,18 @@ func TestRunChannelReceiveRetriesAndSkips(t *testing.T) {
 	}
 }
 
-// TestRunChannelFatalErrorStopsWithStarterError 钉住「有 starter/closer 的通道」
+// TestRunChannelFatalErrorStopsWithStarterError 钉住「有 integration.Starter/integration.Closer 的通道」
 // 遇到致命错误时仍然走完整收尾：返回错误前必须 Close 一次（否则平台侧连接与
 // 「机器人在线」状态会残留）。这条把 fatal 分支与 defer Close 的组合钉住。
 func TestRunChannelFatalErrorStopsWithStarterError(t *testing.T) {
 	chat, _, _ := startChat(t, ChatConfig{})
 	channel := &stubChannel{
 		name: "stub",
-		receive: func(context.Context) (Inbound, error) {
+		receive: func(context.Context) (integration.Inbound, error) {
 			return nil, fatalStubError{"凭据被拒绝"}
 		},
 	}
-	err := RunChannel(t.Context(), channel, ChannelConfig{Chat: chat, Log: t.Logf})
+	err := integration.RunChat(t.Context(), channel, integration.Options{Conversations: IntegrateConversations(chat), Log: t.Logf})
 	if err == nil || err.Error() != "凭据被拒绝" {
 		t.Errorf("致命错误应上抛：%v", err)
 	}
@@ -245,7 +247,7 @@ func TestHandleInboundFailurePaths(t *testing.T) {
 		}
 		chat, _, _ := startChat(t, ChatConfig{})
 		logs := &logSink{}
-		config := ChannelConfig{Chat: chat, Log: func(format string, arguments ...any) {
+		config := integration.Options{Conversations: IntegrateConversations(chat), Log: func(format string, arguments ...any) {
 			logs.Log(format)
 		}}
 		message := &stubInbound{user: "u1", text: "你好"}
@@ -254,7 +256,7 @@ func TestHandleInboundFailurePaths(t *testing.T) {
 		chat.config.StateDir = filepath.Join(blocker, "chat")
 		workspaceRoot := t.TempDir()
 		chat.conversationWorkspace = func(string) string { return workspaceRoot }
-		handleInbound(context.Background(), &stubChannel{name: "stub"}, config, message, "你好")
+		integration.HandleInbound(context.Background(), &stubChannel{name: "stub"}, config, message, "你好")
 		if len(message.replies) != 1 || message.replies[0] != "OK" {
 			t.Errorf("映射失败仍应完成对话：%v", message.replies)
 		}
@@ -267,8 +269,8 @@ func TestHandleInboundFailurePaths(t *testing.T) {
 	t.Run("对话失败回发错误", func(t *testing.T) {
 		chat, _, _ := startChat(t, ChatConfig{Claude: runnerFailure(errors.New("claude 崩了"))})
 		message := &stubInbound{user: "u1", text: "你好"}
-		handleInbound(context.Background(), &stubChannel{name: "stub"},
-			ChannelConfig{Chat: chat, Log: t.Logf}, message, "你好")
+		integration.HandleInbound(context.Background(), &stubChannel{name: "stub"},
+			integration.Options{Conversations: IntegrateConversations(chat), Log: t.Logf}, message, "你好")
 		if len(message.replies) != 1 || !strings.Contains(message.replies[0], "处理失败：") ||
 			!strings.Contains(message.replies[0], "claude 崩了") {
 			t.Errorf("对话失败应回发错误：%v", message.replies)
@@ -279,8 +281,8 @@ func TestHandleInboundFailurePaths(t *testing.T) {
 	t.Run("空回复占位", func(t *testing.T) {
 		chat, _, _ := startChat(t, ChatConfig{Claude: runnerSuccess("   ")})
 		message := &stubInbound{user: "u1", text: "你好"}
-		handleInbound(context.Background(), &stubChannel{name: "stub"},
-			ChannelConfig{Chat: chat, Log: t.Logf}, message, "你好")
+		integration.HandleInbound(context.Background(), &stubChannel{name: "stub"},
+			integration.Options{Conversations: IntegrateConversations(chat), Log: t.Logf}, message, "你好")
 		if len(message.replies) != 1 || message.replies[0] != "（无回复）" {
 			t.Errorf("空回复应占位：%v", message.replies)
 		}
@@ -297,9 +299,9 @@ func TestHandleInboundReplyFailureAbortsChunks(t *testing.T) {
 		user: "u1", text: "你好",
 		replyErr: func(int) error { return errors.New("平台限流") },
 	}
-	handleInbound(context.Background(), splitLimitChannel{channel}, ChannelConfig{
-		Chat: chat,
-		Log:  logs.Log,
+	integration.HandleInbound(context.Background(), splitLimitChannel{channel}, integration.Options{
+		Conversations: IntegrateConversations(chat),
+		Log:           logs.Log,
 	}, message, "你好")
 	if len(message.replies) != 1 {
 		t.Errorf("首块失败后不应继续发送：%v", message.replies)
@@ -320,8 +322,8 @@ func TestHandleInboundReplyFailureAbortsChunks(t *testing.T) {
 //     否则平台侧「正在输入」会永远转下去。
 func TestHandleChatCommandResetAndTyping(t *testing.T) {
 	chat, _, _ := startChat(t, ChatConfig{})
-	config := ChannelConfig{Chat: chat, Log: t.Logf}
-	if got := handleChatCommand(config, "c1", command{}); got != "" {
+	config := integration.Options{Conversations: IntegrateConversations(chat), Log: t.Logf}
+	if got := integration.HandleCommand(config, "c1", integration.Command{}); got != "" {
 		t.Errorf("未知命令应返回空串：%q", got)
 	}
 
@@ -336,7 +338,7 @@ func TestHandleChatCommandResetAndTyping(t *testing.T) {
 	if before == "" {
 		t.Fatal("应已建立映射")
 	}
-	reply := handleChatCommand(config, "c1", command{name: "reset"})
+	reply := integration.HandleCommand(config, "c1", integration.Command{Name: "reset"})
 	if !strings.Contains(reply, "已开始新会话") || !strings.Contains(reply, "工作目录保留") {
 		t.Errorf("reset 回复文案 = %q", reply)
 	}
@@ -361,7 +363,7 @@ func TestHandleChatCommandResetAndTyping(t *testing.T) {
 	// Typing 成对：handleInbound 处理一条普通消息
 	message := &stubInbound{user: "u1", text: "你好"}
 	chat.config.Claude = runnerSuccess("好的")
-	handleInbound(context.Background(), &stubChannel{name: "stub"}, config, message, "你好")
+	integration.HandleInbound(context.Background(), &stubChannel{name: "stub"}, config, message, "你好")
 	if message.typingOn != 2 {
 		t.Errorf("Typing 应成对调用（开/关）：%d", message.typingOn)
 	}

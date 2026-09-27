@@ -196,20 +196,6 @@ func TestChatResetStartsFreshSession(t *testing.T) {
 	}
 }
 
-// 「重新开始」的触发词：斜杠命令与直白说法都认，普通聊天不受影响。
-func TestRestartRequested(t *testing.T) {
-	for _, text := range []string{"/new", " /reset ", "重新开始", "新会话", "/clear"} {
-		if !restartRequested(text) {
-			t.Errorf("%q 应触发重新开始", text)
-		}
-	}
-	for _, text := range []string{"继续", "new", "重新开始吧，但先回答我", "/news"} {
-		if restartRequested(text) {
-			t.Errorf("%q 不该触发重新开始", text)
-		}
-	}
-}
-
 // 早期版本把所有会话共用的 settings.json / mcp.json 放在 StateDir 根：新布局下
 // 它们已无人读取，启动时清掉，避免和会话工作目录里的同名文件混淆。
 func TestChatDropsLegacySharedConfig(t *testing.T) {

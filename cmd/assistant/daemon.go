@@ -16,10 +16,13 @@ import (
 	"github.com/Cosmic-Developers-Union/assistant/internal/daemon"
 	"github.com/Cosmic-Developers-Union/assistant/internal/envref"
 	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/integration"
+	"github.com/Cosmic-Developers-Union/assistant/internal/integration/qq"
+	"github.com/Cosmic-Developers-Union/assistant/internal/integration/telegram"
+	"github.com/Cosmic-Developers-Union/assistant/internal/integration/weixin"
 	"github.com/Cosmic-Developers-Union/assistant/internal/provider"
 	"github.com/Cosmic-Developers-Union/assistant/internal/sessionstore"
 	"github.com/Cosmic-Developers-Union/assistant/internal/statestore"
-	"github.com/Cosmic-Developers-Union/assistant/internal/weixin"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -516,9 +519,9 @@ func startChannelEntry(
 	}
 	switch entry.Type {
 	case instances.ChannelWeixin:
-		channel := daemon.NewWeixinChannel(daemon.WeixinChannelConfig{
+		channel := weixin.NewAdapter(weixin.AdapterConfig{
 			Name: key,
-			Weixin: weixin.Config{
+			ClientConfig: weixin.Config{
 				BaseURL:        entry.BaseURL,
 				BotToken:       entry.BotToken,
 				BotAgent:       entry.BotAgent,
@@ -531,7 +534,7 @@ func startChannelEntry(
 		}, logf)
 		startChannel(command, channel, chat, options.Debug, logf)
 	case instances.ChannelQQ:
-		channel := daemon.NewQQChannel(daemon.QQChannelConfig{
+		channel := qq.NewAdapter(qq.AdapterConfig{
 			AppID:      entry.AppID,
 			AppSecret:  entry.AppSecret,
 			APIBaseURL: entry.APIBaseURL,
@@ -541,7 +544,7 @@ func startChannelEntry(
 		}, key, options.Debug, logf)
 		startChannel(command, channel, chat, options.Debug, logf)
 	case instances.ChannelTelegram:
-		channel := daemon.NewTelegramChannel(daemon.TelegramChannelConfig{
+		channel := telegram.NewAdapter(telegram.AdapterConfig{
 			Name:       key,
 			BotToken:   entry.BotToken,
 			APIBaseURL: entry.APIBaseURL,
@@ -561,14 +564,14 @@ func startChannelEntry(
 // startChannel 是通道启动的公共包装：通用桥配置 + 后台协程。
 func startChannel(
 	command *cobra.Command,
-	channel daemon.Channel,
+	channel integration.ChatIntegration,
 	chat *daemon.Chat,
 	debug bool,
 	logf func(string, ...any),
 ) {
-	config := daemon.ChannelConfig{Chat: chat, Log: logf, Debug: debug}
+	config := integration.Options{Conversations: daemon.IntegrateConversations(chat), Log: logf, Debug: debug}
 	go func() {
-		if err := daemon.RunChannel(command.Context(), channel, config); err != nil {
+		if err := integration.RunChat(command.Context(), channel, config); err != nil {
 			logf("通道 %s 退出：%v", channel.Name(), err)
 		}
 	}()

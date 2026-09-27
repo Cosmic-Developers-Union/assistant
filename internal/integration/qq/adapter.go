@@ -1,14 +1,15 @@
-package daemon
+package qq
 
 import (
 	"context"
 	"encoding/json" // 仅用 RawMessage（json/v2 不提供）
 	jsonv2 "encoding/json/v2"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
 
-	"github.com/Cosmic-Developers-Union/assistant/internal/qq"
+	"github.com/Cosmic-Developers-Union/assistant/internal/integration"
 )
 
 // DefaultQQSplitLimit 是 QQ 回复切块的缺省上限（平台对 content 长度有限制）。
@@ -22,29 +23,33 @@ const qqEventQueueSize = 64
 // 超限整体清空（最坏情况是极旧消息的重发被平台去重）。
 const qqMsgSeqCacheLimit = 256
 
-// QQChannelConfig 是 QQ 通道的装配配置（形态对齐 WeixinChannelConfig/
-// TelegramChannelConfig）。
-type QQChannelConfig struct {
+// AdapterConfig 是 QQ 通道的装配配置（形态对齐 Weixinintegration.Options/
+// Telegramintegration.Options）。
+type AdapterConfig struct {
 	AppID      string
 	AppSecret  string
 	APIBaseURL string
+	// TokenURL 覆盖换 token 的端点（缺省官方地址）；自建环境或测试用假 API 时指定
+	TokenURL string
+	// HTTPClient 覆盖 HTTP 客户端（缺省按需新建）
+	HTTPClient *http.Client
 	Sandbox    bool
 	AdminUsers []string
 	SplitLimit int
 }
 
-// QQChannel 是 QQ 开放平台机器人通道：WebSocket 网关收事件（出站连接）、
+// Adapter 是 QQ 开放平台机器人通道：WebSocket 网关收事件（出站连接）、
 // REST 被动回复；准入靠 openid 白名单，群聊事件平台只在被 @ 时派发。
-type QQChannel struct {
+type Adapter struct {
 	name       string
-	client     *qq.Client
-	gateway    *qq.Gateway
+	client     *Client
+	gateway    *Gateway
 	adminUsers []string
 	splitLimit int
 	log        func(string, ...any)
 
 	// events 是网关事件 → Receive 的投递队列
-	events chan Inbound
+	events chan integration.Inbound
 	// runCtx 在 Start 时记录：队列满时 onEvent 借它感知关闭，避免永久阻塞
 	runCtx context.Context
 
@@ -58,22 +63,24 @@ type QQChannel struct {
 	msgSeq map[string]int
 }
 
-// NewQQChannel 创建 QQ 通道。config.APIBaseURL 需先填缺省（instances.Normalize
+// NewAdapter 创建 QQ 通道。config.APIBaseURL 需先填缺省（instances.Normalize
 // 已做）；token 端点用官方地址。key 是通道实例键（空 = "qq"；多开同平台
 // 机器人时为 "qq/<name>"）。
-func NewQQChannel(config QQChannelConfig, key string, debug bool, log func(string, ...any)) *QQChannel {
-	client := qq.NewClient(qq.Config{
+func NewAdapter(config AdapterConfig, key string, debug bool, log func(string, ...any)) *Adapter {
+	client := NewClient(Config{
 		AppID:      config.AppID,
 		AppSecret:  config.AppSecret,
 		APIBaseURL: config.APIBaseURL,
+		TokenURL:   config.TokenURL,
+		HTTPClient: config.HTTPClient,
 		Debug:      debug,
 		Log:        log,
 	})
-	return newQQChannelWithClient(config, client, key, debug, log)
+	return newAdapterWithClient(config, client, key, debug, log)
 }
 
-// newQQChannelWithClient 是可注入客户端的内部构造（测试用假 API）。
-func newQQChannelWithClient(config QQChannelConfig, client *qq.Client, key string, debug bool, log func(string, ...any)) *QQChannel {
+// newAdapterWithClient 是可注入客户端的内部构造（测试用假 API）。
+func newAdapterWithClient(config AdapterConfig, client *Client, key string, debug bool, log func(string, ...any)) *Adapter {
 	if log == nil {
 		log = func(string, ...any) {}
 	}
@@ -84,28 +91,28 @@ func newQQChannelWithClient(config QQChannelConfig, client *qq.Client, key strin
 	if limit <= 0 {
 		limit = DefaultQQSplitLimit
 	}
-	return &QQChannel{
+	return &Adapter{
 		name:       strings.TrimSpace(key),
 		client:     client,
-		gateway:    qq.NewGateway(client, qq.IntentGroupAndC2CEvent),
+		gateway:    NewGateway(client, IntentGroupAndC2CEvent),
 		adminUsers: config.AdminUsers,
 		splitLimit: limit,
 		log:        log,
-		events:     make(chan Inbound, qqEventQueueSize),
+		events:     make(chan integration.Inbound, qqEventQueueSize),
 		dead:       make(chan struct{}),
 		msgSeq:     map[string]int{},
 	}
 }
 
 // Name 实现 Channel：会话映射层的 transport 键。
-func (c *QQChannel) Name() string { return c.name }
+func (c *Adapter) Name() string { return c.name }
 
 // SplitLimit 实现 Channel。
-func (c *QQChannel) SplitLimit() int { return c.splitLimit }
+func (c *Adapter) SplitLimit() int { return c.splitLimit }
 
 // Allowed 实现 Channel："*" 通配 → 白名单 → 全部拒绝（QQ 没有登录者兜底：
 // 拿不到凭据就什么人都收不到）。
-func (c *QQChannel) Allowed(user string) (bool, string) {
+func (c *Adapter) Allowed(user string) (bool, string) {
 	if strings.TrimSpace(user) == "" {
 		return false, "用户标识为空"
 	}
@@ -118,12 +125,12 @@ func (c *QQChannel) Allowed(user string) (bool, string) {
 		}
 		return false, "白名单外用户"
 	}
-	return false, "未配置 qq.admin_users（配置 [\"*\"] 可放开所有人）"
+	return false, "未配置 admin_users（配置 [\"*\"] 可放开所有人）"
 }
 
 // Start 实现 starter：后台拉起网关（重连内建），事件经队列交付；网关因不可
 // 恢复错误退出时记录原因并关闭 dead，让 Receive 把错误交给通用桥。
-func (c *QQChannel) Start(ctx context.Context) error {
+func (c *Adapter) Start(ctx context.Context) error {
 	c.runCtx = ctx
 	go func() {
 		if err := c.gateway.Run(ctx, c.onEvent); err != nil {
@@ -137,7 +144,7 @@ func (c *QQChannel) Start(ctx context.Context) error {
 }
 
 // Receive 实现 Channel：从事件队列取下一条；网关致命退出时返回该错误。
-func (c *QQChannel) Receive(ctx context.Context) (Inbound, error) {
+func (c *Adapter) Receive(ctx context.Context) (integration.Inbound, error) {
 	select {
 	case message := <-c.events:
 		return message, nil
@@ -149,9 +156,9 @@ func (c *QQChannel) Receive(ctx context.Context) (Inbound, error) {
 }
 
 // onEvent 处理网关派发：只取两类文本消息事件，归一化后投递队列。
-func (c *QQChannel) onEvent(eventType string, payload json.RawMessage) {
+func (c *Adapter) onEvent(eventType string, payload json.RawMessage) {
 	switch eventType {
-	case qq.EventC2CMessage, qq.EventGroupAtMessage:
+	case EventC2CMessage, EventGroupAtMessage:
 	default:
 		return // intents 只订阅了消息事件；其余类型（如好友添加）不关心
 	}
@@ -169,7 +176,7 @@ func (c *QQChannel) onEvent(eventType string, payload json.RawMessage) {
 	if strings.TrimSpace(text) == "" {
 		return
 	}
-	inbound := &qqInbound{
+	inbound := &adapterInbound{
 		channel:     c,
 		userOpenID:  user,
 		groupOpenID: event.GroupOpenID,
@@ -198,9 +205,9 @@ type qqMessageEvent struct {
 // user 返回通道内用户标识：群聊用成员 openid，私聊用用户 openid。
 func (e *qqMessageEvent) user() string {
 	if e.GroupOpenID != "" {
-		return firstNonEmptyString(e.Author.MemberOpenID, e.Author.ID)
+		return integration.FirstNonEmpty(e.Author.MemberOpenID, e.Author.ID)
 	}
-	return firstNonEmptyString(e.Author.UserOpenID, e.Author.ID)
+	return integration.FirstNonEmpty(e.Author.UserOpenID, e.Author.ID)
 }
 
 // cleanQQContent 清理平台投递的文本：去首尾空白与残留的 @ 提及前缀。
@@ -227,24 +234,24 @@ func cleanQQContent(content string) string {
 	return text
 }
 
-// qqInbound 是 Inbound 的 QQ 实现：回复绑定该条消息的 msg_id/msg_seq。
-type qqInbound struct {
-	channel     *QQChannel
+// adapterInbound 是 integration.Inbound 的 QQ 实现：回复绑定该条消息的 msg_id/msg_seq。
+type adapterInbound struct {
+	channel     *Adapter
 	userOpenID  string
 	groupOpenID string
 	msgID       string
 	text        string
 }
 
-func (m *qqInbound) Transport() string { return m.channel.Name() }
+func (m *adapterInbound) Transport() string { return m.channel.Name() }
 
-func (m *qqInbound) User() string { return m.userOpenID }
+func (m *adapterInbound) User() string { return m.userOpenID }
 
-func (m *qqInbound) Text() string { return m.text }
+func (m *adapterInbound) Text() string { return m.text }
 
 // Reply 发一块回复：被动消息必须带收到消息的 msg_id（15 分钟窗口），msg_seq
 // 按 msg_id 递增（平台按 msg_id+msg_seq 去重）。
-func (m *qqInbound) Reply(ctx context.Context, text string) error {
+func (m *adapterInbound) Reply(ctx context.Context, text string) error {
 	m.channel.seqMu.Lock()
 	next := m.channel.msgSeq[m.msgID] + 1
 	m.channel.msgSeq[m.msgID] = next
@@ -259,4 +266,4 @@ func (m *qqInbound) Reply(ctx context.Context, text string) error {
 }
 
 // Typing 无「正在输入」协议，空实现。
-func (m *qqInbound) Typing(context.Context, bool) {}
+func (m *adapterInbound) Typing(context.Context, bool) {}

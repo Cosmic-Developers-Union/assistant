@@ -15,6 +15,7 @@ import (
 	"github.com/Cosmic-Developers-Union/assistant/internal/daemon"
 	"github.com/Cosmic-Developers-Union/assistant/internal/envref"
 	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/integration"
 	"github.com/Cosmic-Developers-Union/assistant/internal/provider"
 
 	"github.com/spf13/cobra"
@@ -632,8 +633,10 @@ func TestStartChannelReturnsImmediatelyAndLogsExit(t *testing.T) {
 
 	select {
 	case got := <-logs:
-		if !strings.Contains(got, "通道 %s 退出") {
-			t.Errorf("退出日志格式 = %q, want 指明通道与原因", got)
+		// 只要求日志指明通道且带上原因：退出路径的具体措辞由 integration 决定
+		// （接收失败会退避重试，只有致命错误才「退出」），这里钉的是「不会静默」。
+		if !strings.Contains(got, "通道 %s") || !strings.Contains(got, "%v") {
+			t.Errorf("日志格式 = %q，want 指明通道与原因", got)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("通道退出未写日志：操作者会以为通道还在跑")
@@ -684,14 +687,14 @@ func TestStartChannelEntryDispatchContract(t *testing.T) {
 	})
 }
 
-// stubChannel 是最小 daemon.Channel：只提供 Name（startChannel 的退出日志要用）。
+// stubChannel 是最小 integration.ChatIntegration：只提供 Name（startChannel 的退出日志要用）。
 type stubChannel struct{ name string }
 
 func (c stubChannel) Name() string { return c.name }
 
 func (c stubChannel) Allowed(string) (bool, string) { return true, "" }
 
-func (c stubChannel) Receive(context.Context) (daemon.Inbound, error) {
+func (c stubChannel) Receive(context.Context) (integration.Inbound, error) {
 	return nil, os.ErrDeadlineExceeded
 }
 

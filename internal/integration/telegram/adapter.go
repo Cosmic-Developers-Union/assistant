@@ -1,4 +1,4 @@
-package daemon
+package telegram
 
 import (
 	"context"
@@ -6,15 +6,15 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/Cosmic-Developers-Union/assistant/internal/telegram"
+	"github.com/Cosmic-Developers-Union/assistant/internal/integration"
 )
 
 // DefaultTelegramSplitLimit 是 Telegram 回复切块的缺省上限（平台文本上限 4096）。
 const DefaultTelegramSplitLimit = 4000
 
-// TelegramChannelConfig 是 Telegram 通道的适配配置（通道私有部分；通用部分见
-// ChannelConfig）。
-type TelegramChannelConfig struct {
+// AdapterConfig 是 Telegram 通道的适配配置（通道私有部分；通用部分见
+// integration.Options）。
+type AdapterConfig struct {
 	// Name 是通道实例键（会话映射层的 transport 键）：空 = "telegram"；多开
 	// 同平台 bot 时为 "telegram/<name>"
 	Name       string
@@ -25,22 +25,22 @@ type TelegramChannelConfig struct {
 	HTTPClient *http.Client
 }
 
-// TelegramChannel 是 Telegram 通道：getUpdates 长轮询收消息（出站连接）、
+// Adapter 是 Telegram 通道：getUpdates 长轮询收消息（出站连接）、
 // sendMessage 被动回复、sendChatAction 显示「正在输入」。
-type TelegramChannel struct {
-	client     *telegram.Client
+type Adapter struct {
+	client     *Client
 	name       string
 	adminUsers []string
 	splitLimit int
 	log        func(string, ...any)
 
 	// pending 只在 Receive（通用桥的单消费协程）里访问：一批更新待逐条交付
-	pending []telegram.Message
+	pending []Message
 }
 
-// NewTelegramChannel 创建 Telegram 通道。config 需先经 instances.Normalize
+// NewAdapter 创建 Telegram 通道。config 需先经 instances.Normalize
 // （api_base_url 已填缺省）。
-func NewTelegramChannel(config TelegramChannelConfig, log func(string, ...any)) *TelegramChannel {
+func NewAdapter(config AdapterConfig, log func(string, ...any)) *Adapter {
 	if log == nil {
 		log = func(string, ...any) {}
 	}
@@ -52,8 +52,8 @@ func NewTelegramChannel(config TelegramChannelConfig, log func(string, ...any)) 
 	if limit <= 0 {
 		limit = DefaultTelegramSplitLimit
 	}
-	return &TelegramChannel{
-		client: telegram.NewClient(telegram.Config{
+	return &Adapter{
+		client: NewClient(Config{
 			BotToken:   config.BotToken,
 			APIBaseURL: config.APIBaseURL,
 			HTTPClient: config.HTTPClient,
@@ -67,14 +67,14 @@ func NewTelegramChannel(config TelegramChannelConfig, log func(string, ...any)) 
 }
 
 // Name 实现 Channel：会话映射层的 transport 键。
-func (c *TelegramChannel) Name() string { return c.name }
+func (c *Adapter) Name() string { return c.name }
 
 // SplitLimit 实现 Channel。
-func (c *TelegramChannel) SplitLimit() int { return c.splitLimit }
+func (c *Adapter) SplitLimit() int { return c.splitLimit }
 
 // Allowed 实现 Channel："*" 通配 → 数字用户 id 白名单 → 全部拒绝。群聊按
 // 发送者 id 判定；新用户的 id 在「忽略用户」日志里可见，加进白名单重启生效。
-func (c *TelegramChannel) Allowed(user string) (bool, string) {
+func (c *Adapter) Allowed(user string) (bool, string) {
 	if strings.TrimSpace(user) == "" {
 		return false, "用户标识为空"
 	}
@@ -92,13 +92,13 @@ func (c *TelegramChannel) Allowed(user string) (bool, string) {
 
 // Receive 实现 Channel：长轮询 getUpdates（客户端内部推进确认水位），一次批量
 // 取到的消息逐条交付；非文本/无发送者的更新直接丢弃。
-func (c *TelegramChannel) Receive(ctx context.Context) (Inbound, error) {
+func (c *Adapter) Receive(ctx context.Context) (integration.Inbound, error) {
 	if len(c.pending) > 0 {
 		next := c.pending[0]
 		c.pending = c.pending[1:]
 		return c.inbound(next), nil
 	}
-	for !ctxDone(ctx) {
+	for !integration.CtxDone(ctx) {
 		updates, err := c.client.GetUpdates(ctx)
 		if err != nil {
 			return nil, err
@@ -123,8 +123,8 @@ func (c *TelegramChannel) Receive(ctx context.Context) (Inbound, error) {
 }
 
 // inbound 把 Telegram 消息包装成通用入站消息（回复绑定该消息的 chat id）。
-func (c *TelegramChannel) inbound(message telegram.Message) Inbound {
-	return &telegramInbound{
+func (c *Adapter) inbound(message Message) integration.Inbound {
+	return &adapterInbound{
 		channel: c,
 		userID:  formatTelegramID(message.From.ID),
 		chatID:  formatTelegramID(message.Chat.ID),
@@ -132,28 +132,28 @@ func (c *TelegramChannel) inbound(message telegram.Message) Inbound {
 	}
 }
 
-// telegramInbound 是 Inbound 的 Telegram 实现。
-type telegramInbound struct {
-	channel *TelegramChannel
-	message telegram.Message
+// adapterInbound 是 integration.Inbound 的 Telegram 实现。
+type adapterInbound struct {
+	channel *Adapter
+	message Message
 	userID  string
 	chatID  string
 }
 
-func (m *telegramInbound) Transport() string { return m.channel.Name() }
+func (m *adapterInbound) Transport() string { return m.channel.Name() }
 
 // User 是发送者数字 id（白名单与会话键都用它；群聊里每个成员各自一套会话）。
-func (m *telegramInbound) User() string { return m.userID }
+func (m *adapterInbound) User() string { return m.userID }
 
-func (m *telegramInbound) Text() string { return m.message.Text }
+func (m *adapterInbound) Text() string { return m.message.Text }
 
 // Reply 发送一块回复（私聊回到用户、群聊回到群）。
-func (m *telegramInbound) Reply(ctx context.Context, text string) error {
+func (m *adapterInbound) Reply(ctx context.Context, text string) error {
 	return m.channel.client.SendMessage(ctx, m.chatID, text)
 }
 
 // Typing 显示「正在输入」（Telegram 无关闭语义，off 为空操作）。
-func (m *telegramInbound) Typing(ctx context.Context, on bool) {
+func (m *adapterInbound) Typing(ctx context.Context, on bool) {
 	if !on {
 		return
 	}
@@ -161,5 +161,5 @@ func (m *telegramInbound) Typing(ctx context.Context, on bool) {
 }
 
 func formatTelegramID(id int64) string {
-	return strings.TrimSpace(telegram.FormatChatID(id))
+	return strings.TrimSpace(FormatChatID(id))
 }
