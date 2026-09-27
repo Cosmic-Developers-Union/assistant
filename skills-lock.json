@@ -1,6 +1,13 @@
 {
   "version": 1,
   "skills": {
+    "cli-guide": {
+      "source": "https://gitea.vincentge.top/Ge/coder-skills.git",
+      "sourceUrl": "https://gitea.vincentge.top/Ge/coder-skills.git",
+      "sourceType": "git",
+      "skillPath": "skills/cli-guide/SKILL.md",
+      "computedHash": "87133f80395f72644fcf5c73c092236a099dfc0de749b484054d52552e79ae3e"
+    },
     "review": {
       "source": "Cosmic-Developers-Union/assistant",
       "sourceType": "github",
@@ -12,6 +19,13 @@
       "sourceType": "github",
       "skillPath": "skills/engineering/tdd/SKILL.md",
       "computedHash": "e753a5da75292bbe59d302d89566bc2c53d0e73944da2f0e944a7578883c07d0"
+    },
+    "testing-guidelines": {
+      "source": "https://gitea.vincentge.top/Ge/coder-skills.git",
+      "sourceUrl": "https://gitea.vincentge.top/Ge/coder-skills.git",
+      "sourceType": "git",
+      "skillPath": "skills/testing-guidelines/SKILL.md",
+      "computedHash": "17ba892885c8447e84abcd4d837e16a5cd87c04a4de7be4aa54302bf97cd15ae"
     },
     "use-modern-go": {
       "source": "JetBrains/go-modern-guidelines",
