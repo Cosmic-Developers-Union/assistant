@@ -38,12 +38,17 @@ import (
 //     head 钉定、重试分支、配置细节。未传时降级为 Log（行为不变）。
 type Deps struct {
 	Config      Config
-	API         API
 	RepoDir     string
 	Log         func(string)
 	LogVerbose  func(string)
 	LogDebug    func(string)
 	BuildPrompt func(kind string, number int64, extra PromptContext) string
+	// ListWork 检索当前待办（平台侧：命中哪些条目）。调度引擎只消费结果，
+	// 不认识任何具体平台的检索通道——平台细节由集成实现注入。
+	ListWork func(ctx context.Context) ([]WorkItem, error)
+	// Verify 完成判定（平台侧：这个待办做完了没有）。PR 判定要带 head 漂移
+	// 检测：会话开工时钉定的 head 若已推进，本轮评审作废。
+	Verify func(ctx context.Context, item WorkItem, since time.Time, expectedHead string) (ItemVerdict, error)
 	// CurrentLogin 查询令牌所属账号（启动横幅展示 + reviewer 不一致警告）；
 	// 未传则横幅省略账户行
 	CurrentLogin func(context.Context) (string, error)
@@ -296,7 +301,7 @@ func RunLoop(ctx context.Context, deps Deps) error {
 
 	mentionInterval := mentionPollInterval(config.Interval)
 	detect := func() {
-		work, err := ListWork(ctx, deps.API, config.Repository, config.Reviewer)
+		work, err := deps.ListWork(ctx)
 		if err != nil {
 			deps.Log(fmt.Sprintf("检测失败：%v（%dms 后重试）", err, mentionInterval.Milliseconds()))
 			return
@@ -549,7 +554,7 @@ func DryRunPass(ctx context.Context, deps Deps) error {
 		))
 		deps.Log("")
 	}
-	work, err := ListWork(ctx, deps.API, config.Repository, config.Reviewer)
+	work, err := deps.ListWork(ctx)
 	if err != nil {
 		return err
 	}
@@ -810,9 +815,9 @@ func ProcessItem(ctx context.Context, deps Deps, item WorkItem) ProcessResult {
 		return ProcessResult{Responded: responded}
 	}
 	appendLog(fmt.Sprintf("[verify] completed=%t headMoved=%t reason=%s\n",
-		verdict.completed, verdict.headMoved, verdict.reason))
-	if verdict.completed {
-		deps.Log(fmt.Sprintf("%s 完成（%s）", tag, verdict.reason))
+		verdict.Completed, verdict.HeadMoved, verdict.Reason))
+	if verdict.Completed {
+		deps.Log(fmt.Sprintf("%s 完成（%s）", tag, verdict.Reason))
 		// 完成不等于收工：会话期间或验证之后用户可能又留了新消息。追问轮保证
 		// 「ai 回复前必须读到消息」——同一会话 --resume 续聊，直到没有未读
 		deps.followUp(ctx, item, tag, startedAt, cwd, appendLog)
@@ -820,8 +825,8 @@ func ProcessItem(ctx context.Context, deps Deps, item WorkItem) ProcessResult {
 	}
 	// 作者在会话期间推送 ⇒ 评审锚定的旧 head 已作废：直接放行，下一轮以新
 	// head 重开（会话锚定的 head 记录在待办日志）
-	if verdict.headMoved {
-		deps.logDebug(fmt.Sprintf("%s %s；本轮放行，下一轮以新 head 重开", tag, verdict.reason))
+	if verdict.HeadMoved {
+		deps.logDebug(fmt.Sprintf("%s %s；本轮放行，下一轮以新 head 重开", tag, verdict.Reason))
 		return ProcessResult{Responded: responded}
 	}
 	deps.logDebug(fmt.Sprintf("%s 本轮未完成，放行等待下一轮检测", tag))
@@ -1009,26 +1014,20 @@ func (d Deps) followUp(
 	}
 }
 
-type itemVerdict struct {
-	completed bool
-	headMoved bool
-	reason    string
+// ItemVerdict 是完成判定结论（注入面用；平台实现返回它，循环只消费）。
+type ItemVerdict struct {
+	// Completed 为真表示该待办已完成（可标 settled）
+	Completed bool
+	// HeadMoved 为真表示会话开工时钉定的 head 已推进，本轮作废（不烧重试会话）
+	HeadMoved bool
+	// Reason 是判定依据（写进日志，操作者据此理解为什么算/不算完成）
+	Reason string
 }
 
-// verifyItem 统一完成判定：PR 带 head 漂移检测（expectedHead 为会话开工时钉定的 head）。
-func verifyItem(ctx context.Context, deps Deps, item WorkItem, since time.Time, expectedHead string) (itemVerdict, error) {
-	if item.Kind == KindPull {
-		verdict, err := VerifyPullReview(
-			ctx, deps.API, deps.Config.Repository, deps.Config.Reviewer, item.Number, since, expectedHead,
-		)
-		if err != nil {
-			return itemVerdict{}, err
-		}
-		return itemVerdict{completed: verdict.Completed, headMoved: verdict.HeadMoved, reason: verdict.Reason}, nil
+// verifyItem 统一完成判定：委派给注入的平台实现（PR 侧带 head 漂移检测）。
+func verifyItem(ctx context.Context, deps Deps, item WorkItem, since time.Time, expectedHead string) (ItemVerdict, error) {
+	if deps.Verify == nil {
+		return ItemVerdict{}, fmt.Errorf("未注入完成判定实现")
 	}
-	verdict, err := VerifyIssueTriage(ctx, deps.API, deps.Config.Repository, item.Number)
-	if err != nil {
-		return itemVerdict{}, err
-	}
-	return itemVerdict{completed: verdict.Completed, reason: verdict.Reason}, nil
+	return deps.Verify(ctx, item, since, expectedHead)
 }

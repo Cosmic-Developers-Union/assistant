@@ -3,8 +3,6 @@
 package dispatcher
 
 import (
-	"os"
-
 	"golang.org/x/sys/windows"
 )
 

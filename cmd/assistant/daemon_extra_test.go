@@ -382,7 +382,12 @@ func TestNewDispatchDepsWiresQueueHooks(t *testing.T) {
 	}
 
 	deps := newDispatchDeps(target, &out, store, state, false, false)
-	if deps.API == nil || deps.Config.Repository.FullName() != "acme/video" {
+	// 平台能力经函数注入（不再是 API 字段）：两个注入点都必须接上，
+	// 否则跑起来是「检测不到待办」而不是报错，故障很隐蔽。
+	if deps.ListWork == nil || deps.Verify == nil {
+		t.Error("deps 未接上平台注入点（ListWork / Verify）")
+	}
+	if deps.Config.Repository.FullName() != "acme/video" {
 		t.Errorf("deps 未接到目标配置：%+v", deps.Config)
 	}
 	if deps.OnQueue == nil || deps.OnStart == nil || deps.OnFinish == nil {

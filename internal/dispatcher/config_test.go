@@ -21,10 +21,10 @@ func clearDispatchEnv(t *testing.T) {
 	}
 }
 
-var noRemote = func() (GitRemote, bool) { return GitRemote{}, false }
+var noRemote = func() (string, string, bool) { return "", "", false }
 
-var envRemote = func() (GitRemote, bool) {
-	return GitRemote{Host: "http://from-remote:8418", Repository: "remote/repo"}, true
+var envRemote = func() (string, string, bool) {
+	return "http://from-remote:8418", "remote/repo", true
 }
 
 func TestParseDuration(t *testing.T) {

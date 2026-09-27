@@ -174,7 +174,9 @@ func ResolveConfig(
 	flags Flags,
 	repoDir string,
 	getenv func(string) string,
-	detectRemote func() (GitRemote, bool),
+	// detectRemote 返回检出推导出的 (站点, 仓库, 是否可用)。用裸字符串而不是
+	// 某个平台的结构体：配置装配不该认识任何具体平台，平台推导由调用方完成。
+	detectRemote func() (host, repository string, ok bool),
 ) (Config, error) {
 	env := func(name string) string { return strings.TrimSpace(getenv(name)) }
 
@@ -187,18 +189,18 @@ func ResolveConfig(
 		repository = env("GITEA_REPOSITORY")
 	}
 	// 只有缺失时才去读 git remote（省一次子进程调用）
-	var remote GitRemote
+	detectedHost, detectedRepository := "", ""
 	remoteLoaded := false
 	if host == "" || repository == "" {
 		if detectRemote != nil {
-			remote, remoteLoaded = detectRemote()
+			detectedHost, detectedRepository, remoteLoaded = detectRemote()
 		}
 	}
 	if host == "" && remoteLoaded {
-		host = remote.Host
+		host = detectedHost
 	}
 	if repository == "" && remoteLoaded {
-		repository = remote.Repository
+		repository = detectedRepository
 	}
 	if host == "" {
 		return Config{}, fmt.Errorf("缺少 Gitea 站点：--host / GITEA_HOST，或让检出带 http(s) origin remote 以便自动检测")

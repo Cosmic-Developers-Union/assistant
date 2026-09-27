@@ -166,8 +166,14 @@ func TestProcessItemFollowUpRunsResumeSessionWithoutVerify(t *testing.T) {
 	fetched := false
 	var prompts []string
 	deps := Deps{
-		Config:      testConfig(func(config *Config) { config.LogDir = logDir }),
-		API:         &fakeAPI{labels: []status.Label{{ID: 1, Name: "status/triage"}}},
+		Config: testConfig(func(config *Config) { config.LogDir = logDir }),
+		// 平台能力经注入（生产侧由 gitea 集成包填同样两个字段）
+		ListWork: func(ctx context.Context) ([]WorkItem, error) {
+			return ListWork(ctx, &fakeAPI{labels: []status.Label{{ID: 1, Name: "status/triage"}}}, mustRepository("owner/repo"), "ai")
+		},
+		Verify: func(ctx context.Context, item WorkItem, since time.Time, expectedHead string) (ItemVerdict, error) {
+			return verifyForTest(ctx, &fakeAPI{labels: []status.Label{{ID: 1, Name: "status/triage"}}}, "owner/repo", "ai", item, since, expectedHead)
+		},
 		RepoDir:     "/repo",
 		Log:         func(string) {},
 		LogVerbose:  func(string) {},

@@ -46,6 +46,7 @@ declare -A thresholds=(
 	[internal/claude]=90
 	[internal/integration]=90
 	[cmd/assistant]=90
+	[internal/integration/gitea]=90
 	[internal/integration/weixin]=80
 	[internal/integration/qq]=80
 	[internal/integration/telegram]=80

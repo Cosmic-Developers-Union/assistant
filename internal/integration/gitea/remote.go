@@ -4,7 +4,7 @@
 // 可完整推出 API 根地址与 owner/repo。ssh/scp remote 只可靠推出仓库路径——
 // ssh 端口与 web 端口没有对应关系，host 仅以 http://<主机名[:端口]> 尽力猜测，
 // 此时需要 --host / GITEA_HOST 显式覆盖。
-package dispatcher
+package gitea
 
 import (
 	"os/exec"

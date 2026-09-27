@@ -11,8 +11,8 @@ import (
 	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
 	"github.com/Cosmic-Developers-Union/assistant/internal/config"
 	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
-	"github.com/Cosmic-Developers-Union/assistant/internal/dispatcher"
 	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/integration/gitea"
 	"github.com/Cosmic-Developers-Union/assistant/internal/repoinstall"
 	"github.com/Cosmic-Developers-Union/assistant/internal/status"
 
@@ -238,7 +238,7 @@ func resolveServerTargetWithProbe(
 	repositoryFlag, dir string,
 	probe func(host string) bool,
 ) (host, fullName string, fromConfig bool) {
-	remotes := dispatcher.ListRemotes(dir)
+	remotes := gitea.ListRemotes(dir)
 	if file != nil {
 		views := giteaViews(file)
 		if repositoryFlag != "" {
@@ -272,7 +272,7 @@ func resolveServerTargetWithProbe(
 		}
 	}
 
-	remote, ok := dispatcher.SelectGiteaRemote(dir, probe)
+	remote, ok := gitea.SelectGiteaRemote(dir, probe)
 	if !ok {
 		return "", repositoryFlag, false
 	}

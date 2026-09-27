@@ -18,8 +18,14 @@ import (
 func planDeps(t *testing.T, api API, config Config, logs *[]string) Deps {
 	t.Helper()
 	deps := Deps{
-		Config:      config,
-		API:         api,
+		Config: config,
+		// 平台能力经注入（生产侧由 gitea 集成包填同样两个字段）
+		ListWork: func(ctx context.Context) ([]WorkItem, error) {
+			return ListWork(ctx, api, mustRepository("owner/repo"), "ai")
+		},
+		Verify: func(ctx context.Context, item WorkItem, since time.Time, expectedHead string) (ItemVerdict, error) {
+			return verifyForTest(ctx, api, "owner/repo", "ai", item, since, expectedHead)
+		},
 		RepoDir:     "/repo",
 		Log:         func(line string) { *logs = append(*logs, line) },
 		BuildPrompt: BuildPrompt,
@@ -125,8 +131,14 @@ func TestProcessItemRoutesProgressToConsoleAndLog(t *testing.T) {
 	var logs []string
 	api := &fakeAPI{labels: []status.Label{}}
 	deps := Deps{
-		Config:      testConfig(func(config *Config) { config.LogDir = logDir }),
-		API:         api,
+		Config: testConfig(func(config *Config) { config.LogDir = logDir }),
+		// 平台能力经注入（生产侧由 gitea 集成包填同样两个字段）
+		ListWork: func(ctx context.Context) ([]WorkItem, error) {
+			return ListWork(ctx, api, mustRepository("owner/repo"), "ai")
+		},
+		Verify: func(ctx context.Context, item WorkItem, since time.Time, expectedHead string) (ItemVerdict, error) {
+			return verifyForTest(ctx, api, "owner/repo", "ai", item, since, expectedHead)
+		},
 		RepoDir:     "/repo",
 		Log:         func(line string) { logs = append(logs, line) },
 		BuildPrompt: BuildPrompt,
@@ -193,8 +205,14 @@ func TestProcessItemHeadDriftInvalidatesWithoutRetry(t *testing.T) {
 	sessions := 0
 	api := &fakeAPI{pull: status.PullRequest{HeadSHA: "sha-new"}}
 	deps := Deps{
-		Config:          testConfig(func(config *Config) { config.LogDir = logDir }),
-		API:             api,
+		Config: testConfig(func(config *Config) { config.LogDir = logDir }),
+		// 平台能力经注入（生产侧由 gitea 集成包填同样两个字段）
+		ListWork: func(ctx context.Context) ([]WorkItem, error) {
+			return ListWork(ctx, api, mustRepository("owner/repo"), "ai")
+		},
+		Verify: func(ctx context.Context, item WorkItem, since time.Time, expectedHead string) (ItemVerdict, error) {
+			return verifyForTest(ctx, api, "owner/repo", "ai", item, since, expectedHead)
+		},
 		RepoDir:         "/repo",
 		Log:             func(line string) { logs = append(logs, line) },
 		BuildPrompt:     BuildPrompt,
@@ -963,13 +981,19 @@ func TestVerifyItemRoutesByKindAndPropagatesErrors(t *testing.T) {
 	t.Run("PR 漂移", func(t *testing.T) {
 		deps := Deps{
 			Config: testConfig(),
-			API:    &fakeAPI{pull: status.PullRequest{HeadSHA: "sha-2"}, reviews: freshReviews()},
+			// 平台能力经注入（生产侧由 gitea 集成包填同样两个字段）
+			ListWork: func(ctx context.Context) ([]WorkItem, error) {
+				return ListWork(ctx, &fakeAPI{pull: status.PullRequest{HeadSHA: "sha-2"}, reviews: freshReviews()}, mustRepository("owner/repo"), "ai")
+			},
+			Verify: func(ctx context.Context, item WorkItem, since time.Time, expectedHead string) (ItemVerdict, error) {
+				return verifyForTest(ctx, &fakeAPI{pull: status.PullRequest{HeadSHA: "sha-2"}, reviews: freshReviews()}, "owner/repo", "ai", item, since, expectedHead)
+			},
 		}
 		verdict, err := verifyItem(context.Background(), deps, WorkItem{Kind: KindPull, Number: 58}, since, "sha-1")
 		if err != nil {
 			t.Fatalf("verifyItem() error = %v", err)
 		}
-		if verdict.completed || !verdict.headMoved {
+		if verdict.Completed || !verdict.HeadMoved {
 			t.Errorf("verdict = %+v, want head moved", verdict)
 		}
 	})
@@ -977,7 +1001,13 @@ func TestVerifyItemRoutesByKindAndPropagatesErrors(t *testing.T) {
 	t.Run("PR review 查询失败原样上抛", func(t *testing.T) {
 		deps := Deps{
 			Config: testConfig(),
-			API:    &fakeAPI{pullErr: errors.New("gitea 500")},
+			// 平台能力经注入（生产侧由 gitea 集成包填同样两个字段）
+			ListWork: func(ctx context.Context) ([]WorkItem, error) {
+				return ListWork(ctx, &fakeAPI{pullErr: errors.New("gitea 500")}, mustRepository("owner/repo"), "ai")
+			},
+			Verify: func(ctx context.Context, item WorkItem, since time.Time, expectedHead string) (ItemVerdict, error) {
+				return verifyForTest(ctx, &fakeAPI{pullErr: errors.New("gitea 500")}, "owner/repo", "ai", item, since, expectedHead)
+			},
 		}
 		if _, err := verifyItem(context.Background(), deps, WorkItem{Kind: KindPull, Number: 58}, since, "sha-1"); err == nil ||
 			!strings.Contains(err.Error(), "gitea 500") {
@@ -988,13 +1018,19 @@ func TestVerifyItemRoutesByKindAndPropagatesErrors(t *testing.T) {
 	t.Run("Issue 标签已收敛", func(t *testing.T) {
 		deps := Deps{
 			Config: testConfig(),
-			API:    &fakeAPI{labels: []status.Label{{Name: "type/bug"}}},
+			// 平台能力经注入（生产侧由 gitea 集成包填同样两个字段）
+			ListWork: func(ctx context.Context) ([]WorkItem, error) {
+				return ListWork(ctx, &fakeAPI{labels: []status.Label{{Name: "type/bug"}}}, mustRepository("owner/repo"), "ai")
+			},
+			Verify: func(ctx context.Context, item WorkItem, since time.Time, expectedHead string) (ItemVerdict, error) {
+				return verifyForTest(ctx, &fakeAPI{labels: []status.Label{{Name: "type/bug"}}}, "owner/repo", "ai", item, since, expectedHead)
+			},
 		}
 		verdict, err := verifyItem(context.Background(), deps, WorkItem{Kind: KindIssue, Number: 62}, since, "")
 		if err != nil {
 			t.Fatalf("verifyItem() error = %v", err)
 		}
-		if !verdict.completed {
+		if !verdict.Completed {
 			t.Errorf("verdict = %+v, want completed", verdict)
 		}
 	})
@@ -1002,7 +1038,13 @@ func TestVerifyItemRoutesByKindAndPropagatesErrors(t *testing.T) {
 	t.Run("Issue 标签查询失败原样上抛", func(t *testing.T) {
 		deps := Deps{
 			Config: testConfig(),
-			API:    &fakeAPI{labelsErr: errors.New("gitea 502")},
+			// 平台能力经注入（生产侧由 gitea 集成包填同样两个字段）
+			ListWork: func(ctx context.Context) ([]WorkItem, error) {
+				return ListWork(ctx, &fakeAPI{labelsErr: errors.New("gitea 502")}, mustRepository("owner/repo"), "ai")
+			},
+			Verify: func(ctx context.Context, item WorkItem, since time.Time, expectedHead string) (ItemVerdict, error) {
+				return verifyForTest(ctx, &fakeAPI{labelsErr: errors.New("gitea 502")}, "owner/repo", "ai", item, since, expectedHead)
+			},
 		}
 		if _, err := verifyItem(context.Background(), deps, WorkItem{Kind: KindIssue, Number: 62}, since, ""); err == nil ||
 			!strings.Contains(err.Error(), "gitea 502") {
@@ -1017,8 +1059,14 @@ func TestProcessItemFailurePaths(t *testing.T) {
 	t.Run("镜像同步失败：跳过本条，不建 worktree", func(t *testing.T) {
 		var logs []string
 		deps := Deps{
-			Config:  testConfig(func(config *Config) { config.LogDir = t.TempDir() }),
-			API:     &fakeAPI{},
+			Config: testConfig(func(config *Config) { config.LogDir = t.TempDir() }),
+			// 平台能力经注入（生产侧由 gitea 集成包填同样两个字段）
+			ListWork: func(ctx context.Context) ([]WorkItem, error) {
+				return ListWork(ctx, &fakeAPI{}, mustRepository("owner/repo"), "ai")
+			},
+			Verify: func(ctx context.Context, item WorkItem, since time.Time, expectedHead string) (ItemVerdict, error) {
+				return verifyForTest(ctx, &fakeAPI{}, "owner/repo", "ai", item, since, expectedHead)
+			},
 			RepoDir: "/repo",
 			Log:     func(line string) { logs = append(logs, line) },
 			SyncMirror: func() (string, error) {
@@ -1048,8 +1096,14 @@ func TestProcessItemFailurePaths(t *testing.T) {
 		var logs []string
 		removed := []string{}
 		deps := Deps{
-			Config:          testConfig(func(config *Config) { config.LogDir = t.TempDir() }),
-			API:             &fakeAPI{},
+			Config: testConfig(func(config *Config) { config.LogDir = t.TempDir() }),
+			// 平台能力经注入（生产侧由 gitea 集成包填同样两个字段）
+			ListWork: func(ctx context.Context) ([]WorkItem, error) {
+				return ListWork(ctx, &fakeAPI{}, mustRepository("owner/repo"), "ai")
+			},
+			Verify: func(ctx context.Context, item WorkItem, since time.Time, expectedHead string) (ItemVerdict, error) {
+				return verifyForTest(ctx, &fakeAPI{}, "owner/repo", "ai", item, since, expectedHead)
+			},
 			RepoDir:         "/repo",
 			Log:             func(line string) { logs = append(logs, line) },
 			PrepareWorktree: func(int64) (string, error) { return "", errors.New("refs/pull/67/head 不存在") },
@@ -1077,8 +1131,14 @@ func TestProcessItemFailurePaths(t *testing.T) {
 	t.Run("完成判定失败：仍回报 Responded", func(t *testing.T) {
 		var logs []string
 		deps := Deps{
-			Config:          testConfig(func(config *Config) { config.LogDir = t.TempDir() }),
-			API:             &fakeAPI{pullErr: errors.New("gitea 500")},
+			Config: testConfig(func(config *Config) { config.LogDir = t.TempDir() }),
+			// 平台能力经注入（生产侧由 gitea 集成包填同样两个字段）
+			ListWork: func(ctx context.Context) ([]WorkItem, error) {
+				return ListWork(ctx, &fakeAPI{pullErr: errors.New("gitea 500")}, mustRepository("owner/repo"), "ai")
+			},
+			Verify: func(ctx context.Context, item WorkItem, since time.Time, expectedHead string) (ItemVerdict, error) {
+				return verifyForTest(ctx, &fakeAPI{pullErr: errors.New("gitea 500")}, "owner/repo", "ai", item, since, expectedHead)
+			},
 			RepoDir:         "/repo",
 			Log:             func(line string) { logs = append(logs, line) },
 			PrepareWorktree: func(int64) (string, error) { return "sha-1", nil },
@@ -1101,8 +1161,14 @@ func TestProcessItemFailurePaths(t *testing.T) {
 		var logs, verbose []string
 		removed := []string{}
 		deps := Deps{
-			Config:          testConfig(func(config *Config) { config.LogDir = t.TempDir() }),
-			API:             &fakeAPI{},
+			Config: testConfig(func(config *Config) { config.LogDir = t.TempDir() }),
+			// 平台能力经注入（生产侧由 gitea 集成包填同样两个字段）
+			ListWork: func(ctx context.Context) ([]WorkItem, error) {
+				return ListWork(ctx, &fakeAPI{}, mustRepository("owner/repo"), "ai")
+			},
+			Verify: func(ctx context.Context, item WorkItem, since time.Time, expectedHead string) (ItemVerdict, error) {
+				return verifyForTest(ctx, &fakeAPI{}, "owner/repo", "ai", item, since, expectedHead)
+			},
 			RepoDir:         "/repo",
 			Log:             func(line string) { logs = append(logs, line) },
 			LogVerbose:      func(line string) { verbose = append(verbose, line) },

@@ -10,8 +10,8 @@ import (
 	"strings"
 
 	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
-	"github.com/Cosmic-Developers-Union/assistant/internal/dispatcher"
 	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/integration/gitea"
 	"github.com/Cosmic-Developers-Union/assistant/internal/repoinstall"
 	"github.com/Cosmic-Developers-Union/assistant/internal/setup"
 	"github.com/Cosmic-Developers-Union/assistant/internal/status"
@@ -392,7 +392,7 @@ func resolveRepoSetupTargetWithProbe(
 	fullName := strings.TrimSpace(repoArg)
 	hostHint := ""
 	if fullName == "" {
-		remote, ok := dispatcher.SelectGiteaRemote(dir, probe)
+		remote, ok := gitea.SelectGiteaRemote(dir, probe)
 		if !ok {
 			return repoSetupTarget{}, fmt.Errorf("无法从 remote 识别 Gitea 仓库：用 --repo owner/name 显式指定")
 		}

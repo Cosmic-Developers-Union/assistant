@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Cosmic-Developers-Union/assistant/internal/claude"
+	"github.com/Cosmic-Developers-Union/assistant/internal/integration/gitea"
 	"github.com/Cosmic-Developers-Union/assistant/internal/status"
 )
 
@@ -138,3 +139,50 @@ func useFakeRunner(t *testing.T, runner claude.Runner) {
 	restore := setSessionRunner(runner)
 	t.Cleanup(restore)
 }
+
+// wireAPI 把一个 API 桩接到 Deps 的两个注入点上，模拟生产侧的装配
+// （cmd/assistant 用 gitea 集成包填同样的两个字段，并做判定类型映射）。
+//
+// 这样测试走的是真实注入路径：Deps 上不再有 API 字段，平台能力一律经函数注入，
+// 测试若绕过它去直接调 ListWork 就失去了对注入本身的覆盖。
+func wireAPI(deps *Deps, api API, repository string, reviewer string) {
+	deps.ListWork = func(ctx context.Context) ([]WorkItem, error) {
+		return ListWork(ctx, api, mustRepository(repository), reviewer)
+	}
+	deps.Verify = func(ctx context.Context, item WorkItem, since time.Time, expectedHead string) (ItemVerdict, error) {
+		return verifyForTest(ctx, api, repository, reviewer, item, since, expectedHead)
+	}
+}
+
+func mustRepository(name string) status.Repository {
+	repository, err := ParseRepository(name)
+	if err != nil {
+		panic(err)
+	}
+	return repository
+}
+
+// verifyForTest 是完成判定的测试侧映射：调 gitea 集成包并把它的判定类型折成
+// 调度引擎的 ItemVerdict——与 cmd/assistant 装配处做的映射一致。
+func verifyForTest(ctx context.Context, api API, repository, reviewer string, item WorkItem, since time.Time, expectedHead string) (ItemVerdict, error) {
+	verdict, err := gitea.Verify(ctx, api, mustRepository(repository), reviewer, item.Kind, item.Number, since, expectedHead)
+	if err != nil {
+		return ItemVerdict{}, err
+	}
+	return ItemVerdict{
+		Completed: verdict.Completed,
+		HeadMoved: verdict.HeadMoved,
+		Reason:    verdict.Reason,
+	}, nil
+}
+
+// freshReviews 是一条「刚刚提交」的 reviewer review：完成判定的正例。
+func freshReviews() []status.Review {
+	return []status.Review{{
+		User:      "ai",
+		Submitted: time.Now(),
+	}}
+}
+
+// since 是判定测试的会话起点时刻（判定「since 之后有新 review」要用）。
+var since = time.Date(2026, 9, 6, 5, 0, 0, 0, time.UTC)

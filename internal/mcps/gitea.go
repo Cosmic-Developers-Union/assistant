@@ -13,8 +13,8 @@ import (
 	"strings"
 
 	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
-	"github.com/Cosmic-Developers-Union/assistant/internal/dispatcher"
 	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/integration/gitea"
 	"github.com/Cosmic-Developers-Union/assistant/internal/status"
 )
 
@@ -112,7 +112,7 @@ func ResolveGitea(ctx context.Context, options GiteaOptions) (GiteaSpec, error) 
 		if probe == nil {
 			probe = func(host string) bool { return status.ProbeGitea(ctx, host) }
 		}
-		if remote, ok := dispatcher.SelectGiteaRemote(dir, probe); ok {
+		if remote, ok := gitea.SelectGiteaRemote(dir, probe); ok {
 			spec.Host, spec.HostSource = remote.Host, "remote "+remote.Name
 		}
 	}

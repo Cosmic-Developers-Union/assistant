@@ -148,8 +148,14 @@ func newLoopHarness(t *testing.T, options ...func(*Config)) *loopHarness {
 
 	harness.deps = Deps{
 		Config: config,
-		API:    api,
-		Log:    func(string) {},
+		// 平台能力经注入（生产侧由 gitea 集成包填同样两个字段）
+		ListWork: func(ctx context.Context) ([]WorkItem, error) {
+			return ListWork(ctx, api, mustRepository("owner/repo"), "ai")
+		},
+		Verify: func(ctx context.Context, item WorkItem, since time.Time, expectedHead string) (ItemVerdict, error) {
+			return verifyForTest(ctx, api, "owner/repo", "ai", item, since, expectedHead)
+		},
+		Log: func(string) {},
 		CurrentLogin: func(context.Context) (string, error) {
 			return api.AuthenticatedUser(context.Background())
 		},
@@ -418,7 +424,9 @@ func TestRunLoopReportsDetectionFailure(t *testing.T) {
 	hanging := &errAPI{mentionErr: errors.New("gitea 不可用")}
 	observed := make(chan string, 8)
 	harness := newLoopHarness(t)
-	harness.deps.API = hanging
+	harness.deps.ListWork = func(ctx context.Context) ([]WorkItem, error) {
+		return ListWork(ctx, hanging, mustRepository("owner/repo"), "ai")
+	}
 	harness.deps.Log = func(line string) {
 		select {
 		case observed <- line:
@@ -508,7 +516,10 @@ func TestRunAllAggregatesFailureAndStopsSiblings(t *testing.T) {
 
 	// 兄弟循环：检测通道持续失败（永不产出待办），只有 ctx 被取消才会退出
 	sibling := newLoopHarness(t)
-	sibling.deps.API = &errAPI{mentionErr: errors.New("gitea 不可用")}
+	failing := &errAPI{mentionErr: errors.New("gitea 不可用")}
+	sibling.deps.ListWork = func(ctx context.Context) ([]WorkItem, error) {
+		return ListWork(ctx, failing, mustRepository("owner/repo"), "ai")
+	}
 
 	err := RunAll(t.Context(), []Deps{broken.deps, sibling.deps})
 	if err == nil {

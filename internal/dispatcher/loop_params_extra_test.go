@@ -72,7 +72,11 @@ func TestRunLoopDetectorTickerRedetects(t *testing.T) {
 	// 用包装 API 在第 2 次检测起才放出待办：轮次由 ListPullRequestsRequestingReview
 	// 的调用次数决定，不依赖 sleep 赌时序。
 	rounds := &atomic.Int32{}
-	harness.deps.API = &secondRoundAPI{inner: harness.api, pull: pull, rounds: rounds}
+	// 换掉注入的检索：第二轮起才放出待办
+	swapped := &secondRoundAPI{inner: harness.api, pull: pull, rounds: rounds}
+	harness.deps.ListWork = func(ctx context.Context) ([]WorkItem, error) {
+		return ListWork(ctx, swapped, mustRepository("owner/repo"), "ai")
+	}
 
 	// 第二轮检测到来即取消。这一刻是「ticker 分支被走到」的唯一可靠观察点：
 	// 不能等 RunLoop 返回后再读计数——会话收尾会让用例立刻取消 ctx，读到的

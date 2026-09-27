@@ -19,6 +19,7 @@ import (
 	"github.com/Cosmic-Developers-Union/assistant/internal/dispatcher"
 	"github.com/Cosmic-Developers-Union/assistant/internal/envref"
 	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/integration/gitea"
 	"github.com/Cosmic-Developers-Union/assistant/internal/provider"
 	"github.com/Cosmic-Developers-Union/assistant/internal/statestore"
 	"github.com/Cosmic-Developers-Union/assistant/internal/status"
@@ -246,26 +247,26 @@ func resolveEnvDispatcher(
 		}
 	} else {
 		repoDir = cwd
-		if root, ok := dispatcher.RepoRoot(cwd); ok {
+		if root, ok := gitea.RepoRoot(cwd); ok {
 			repoDir = root
 		}
 	}
 	config, err := dispatcher.ResolveConfig(
 		dispatcherFlags(command, repoFlag, options),
 		repoDir, os.Getenv,
-		func() (dispatcher.GitRemote, bool) {
-			remote, gitea := dispatcher.SelectGiteaRemote(repoDir, func(host string) bool {
+		func() (string, string, bool) {
+			remote, isGitea := gitea.SelectGiteaRemote(repoDir, func(host string) bool {
 				return status.ProbeGitea(context.Background(), host)
 			})
 			if remote.Host == "" {
-				return dispatcher.GitRemote{}, false
+				return "", "", false
 			}
 			// 非 Gitea remote 仅在显式指定 host 时作为仓库路径来源，避免拿
 			// GitHub 等地址去连 Gitea API
-			if !gitea && options.Host == "" && strings.TrimSpace(os.Getenv("GITEA_HOST")) == "" {
-				return dispatcher.GitRemote{}, false
+			if !isGitea && options.Host == "" && strings.TrimSpace(os.Getenv("GITEA_HOST")) == "" {
+				return "", "", false
 			}
-			return remote, true
+			return remote.Host, remote.Repository, true
 		},
 	)
 	if err != nil {
@@ -511,8 +512,8 @@ func giteaTarget(
 	if flags.Concurrency == "" {
 		flags.Concurrency = strconv.Itoa(runtime.Workers())
 	}
-	config, err := dispatcher.ResolveConfig(flags, repoDir, os.Getenv, func() (dispatcher.GitRemote, bool) {
-		return dispatcher.GitRemote{Host: channel.Host, Repository: repo.Name}, true
+	config, err := dispatcher.ResolveConfig(flags, repoDir, os.Getenv, func() (string, string, bool) {
+		return channel.Host, repo.Name, true
 	})
 	if err != nil {
 		return dispatchTarget{}, err
@@ -870,9 +871,28 @@ func newDispatchDeps(target dispatchTarget, w io.Writer, store *daemon.Store, st
 	token := targetToken(target)
 	loggers := newDispatchLoggers(w, verbose, debug)
 	deps := dispatcher.Deps{
-		Config:     config,
-		API:        target.client,
-		RepoDir:    repoDir,
+		Config:  config,
+		RepoDir: repoDir,
+		// 平台侧的两个注入点：检索待办与完成判定都走 Gitea 集成包，
+		// 调度引擎本身不认识任何 Gitea 类型。
+		ListWork: func(ctx context.Context) ([]dispatcher.WorkItem, error) {
+			return dispatcher.ListWork(ctx, target.client, config.Repository, config.Reviewer)
+		},
+		Verify: func(ctx context.Context, item dispatcher.WorkItem, since time.Time, expectedHead string) (dispatcher.ItemVerdict, error) {
+			// 平台判定类型 → 调度引擎判定类型：这层映射刻意放在装配处，
+			// 让 gitea 包与 dispatcher 互不 import。
+			verdict, err := gitea.Verify(
+				ctx, target.client, config.Repository, config.Reviewer,
+				item.Kind, item.Number, since, expectedHead)
+			if err != nil {
+				return dispatcher.ItemVerdict{}, err
+			}
+			return dispatcher.ItemVerdict{
+				Completed: verdict.Completed,
+				HeadMoved: verdict.HeadMoved,
+				Reason:    verdict.Reason,
+			}, nil
+		},
 		Log:        loggers.info,
 		LogVerbose: loggers.verbose,
 		LogDebug:   loggers.debug,

@@ -1,4 +1,4 @@
-package dispatcher
+package gitea
 
 import (
 	"context"
@@ -11,6 +11,8 @@ import (
 )
 
 var since = time.Date(2026, 9, 6, 5, 0, 0, 0, time.UTC)
+
+var testRepo = status.Repository{Owner: "owner", Name: "repo"}
 
 func freshReviews() []status.Review {
 	return []status.Review{{

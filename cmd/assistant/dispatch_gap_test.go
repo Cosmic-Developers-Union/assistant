@@ -407,8 +407,8 @@ func TestNewDispatchDepsPinsPromptAndFollowUp(t *testing.T) {
 	if deps.OnQueue != nil || deps.OnStart != nil || deps.OnFinish != nil {
 		t.Error("无 store 时 OnQueue/OnStart/OnFinish 应为 nil")
 	}
-	if deps.RepoDir != target.repoDir || deps.API != target.client {
-		t.Error("deps 必须带上 repoDir 与 status client（否则会话无处可跑）")
+	if deps.RepoDir != target.repoDir || deps.ListWork == nil || deps.Verify == nil {
+		t.Error("deps 必须带上 repoDir 与平台注入点（否则会话无处可跑 / 检测不到待办）")
 	}
 }
 

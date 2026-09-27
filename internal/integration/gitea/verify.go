@@ -3,7 +3,7 @@
 //     开工时钉定的那个。作者在会话期间推送会让本轮评审作废——评审锚定的是
 //     旧 head，不能当作对现状的完成；作废即放行，下一轮以新 head 重开。
 //   - Issue：status/triage 标签已被移除（分诊结论会换标签或关闭）即视为完成。
-package dispatcher
+package gitea
 
 import (
 	"context"

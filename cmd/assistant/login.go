@@ -8,8 +8,8 @@ import (
 	"strings"
 
 	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
-	"github.com/Cosmic-Developers-Union/assistant/internal/dispatcher"
 	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
+	"github.com/Cosmic-Developers-Union/assistant/internal/integration/gitea"
 	"github.com/Cosmic-Developers-Union/assistant/internal/status"
 
 	"github.com/spf13/cobra"
@@ -173,7 +173,7 @@ func resolveLoginHost(ctx context.Context, configPath, argHost, flagHost string)
 		file != nil && giteaHostCount(file) == 1 {
 		return strings.TrimRight(giteaChannels(file)[0].Host, "/"), nil
 	}
-	remote, ok := dispatcher.SelectGiteaRemote(".", func(candidate string) bool {
+	remote, ok := gitea.SelectGiteaRemote(".", func(candidate string) bool {
 		return status.ProbeGitea(ctx, candidate)
 	})
 	if ok {
