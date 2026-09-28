@@ -240,7 +240,8 @@ func readIdentityPassword(
 		return string(data), nil
 	}
 	// 注入的输入源（测试/管道）：按行读取
-	value, err := prompts.secret(fmt.Sprintf("请输入 %s 上 @%s 的密码：", host, user))
+	value, err := prompts.secret(fmt.Sprintf("请输入 %s 上 @%s 的密码：", host, user),
+		"请用 --password-stdin 提供密码")
 	if err != nil {
 		return "", err
 	}

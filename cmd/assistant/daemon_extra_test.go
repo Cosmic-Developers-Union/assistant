@@ -89,31 +89,46 @@ func TestOrDashAndTokenStateRenderPresence(t *testing.T) {
 	}
 }
 
-// TestWeixinChannelViewsSkipsForeignChannels 断言微信视图只取 weixin 通道并
-// 保留账号绑定字段（login_user_id/bot_id 决定消息往哪个客服号投递）。
-func TestWeixinChannelViewsSkipsForeignChannels(t *testing.T) {
+// TestChannelRowsSkipsForeignChannels 断言通道列表只取指定类型的通道，且保留
+// 身份绑定字段（login_user_id/bot_id 决定消息往哪个客服号投递）。未命名与已停用
+// 的实例同样要列出来：它们是配置的一部分，藏起来会让「为什么这条没生效」无从查起。
+func TestChannelRowsSkipsForeignChannels(t *testing.T) {
+	isolateCredentials(t)
 	disabled := false
 	file := &instances.File{Channels: []instances.Channel{
 		{Type: instances.ChannelGitea, Host: "gitea.example.com"},
-		{Type: instances.ChannelWeixin, Name: "work", BaseURL: "https://qy.example.com", LoginUserID: "u1", BotID: "b1", BotToken: "tok", AdminUsers: []string{"ge"}},
+		{
+			Type: instances.ChannelWeixin, Name: "work", BaseURL: "https://qy.example.com",
+			LoginUserID: "u1", BotID: "b1", BotToken: "tok", AdminUsers: []string{"ge"},
+		},
 		{Type: instances.ChannelQQ, AppID: "1"},
 		{Type: instances.ChannelWeixin, BaseURL: "https://qy2.example.com", Enabled: &disabled},
 	}}
-	views := weixinChannelViews(file)
-	if len(views) != 2 {
-		t.Fatalf("views = %+v, want 2 条", views)
+	rows, err := channelRows(file, instances.ChannelWeixin)
+	if err != nil {
+		t.Fatal(err)
 	}
-	first := views[0]
-	if first.Key != "weixin/work" || !first.Enabled ||
-		first.BaseURL != "https://qy.example.com" || first.LoginUserID != "u1" ||
-		first.BotID != "b1" || first.BotToken != "tok" || len(first.AdminUsers) != 1 {
-		t.Errorf("first = %+v", first)
+	if len(rows) != 2 {
+		t.Fatalf("rows = %+v, want 2 条", rows)
 	}
-	if views[1].Key != instances.ChannelWeixin || views[1].Enabled {
-		t.Errorf("未命名/停用通道 = %+v", views[1])
+	first := rows[0]
+	if first.Entry.Key() != "weixin/work" || !first.Entry.IsEnabled() ||
+		first.Entry.BaseURL != "https://qy.example.com" || first.Entry.LoginUserID != "u1" ||
+		first.Entry.BotID != "b1" || len(first.Entry.AdminUsers) != 1 {
+		t.Errorf("first = %+v", first.Entry)
 	}
-	if got := weixinChannelViews(&instances.File{}); len(got) != 0 {
-		t.Errorf("无 weixin 通道时 views = %+v", got)
+	if first.Resolved.Value != "tok" {
+		t.Errorf("resolved = %+v, want 内联 tok", first.Resolved)
+	}
+	if rows[1].Entry.Key() != instances.ChannelWeixin || rows[1].Entry.IsEnabled() {
+		t.Errorf("未命名/停用通道 = %+v", rows[1].Entry)
+	}
+	if empty, err := channelRows(&instances.File{}, instances.ChannelWeixin); err != nil || len(empty) != 0 {
+		t.Errorf("无 weixin 通道时 rows = %+v, %v", empty, err)
+	}
+	// 没有配置文件（file == nil）与「配置里没有该类型」是同一种结果：没配
+	if none, err := channelRows(nil, instances.ChannelWeixin); err != nil || len(none) != 0 {
+		t.Errorf("无配置时 rows = %+v, %v", none, err)
 	}
 }
 

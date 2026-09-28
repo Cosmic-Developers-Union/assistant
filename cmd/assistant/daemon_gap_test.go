@@ -82,22 +82,16 @@ func TestNewDaemonMCPCommandSurface(t *testing.T) {
 // 但都不能静默退出，否则用户以为桥已在跑。
 func TestWeixinStatusReportsMissingBridge(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	const want = "未配置微信桥（先 assistant weixin login）"
+	const want = "未配置 weixin 通道：运行 assistant login add --type weixin 登记凭据"
 
 	t.Run("指向已删除文件", func(t *testing.T) {
 		// ASSISTANT_CONFIG 指着一个不存在的路径时，resolveInstanceFile 会直接
-		// 把 os.ReadFile 的错误抛出来（不是「没有配置」）——status 在这条路径上
-		// 必须报错退出而不是假装没配置，否则用户会以为桥只是没配、反复重跑 login。
+		// 把 os.ReadFile 的错误抛出来（不是「没有配置」）——这条路径上必须报错
+		// 退出而不是假装没配置，否则用户会以为桥只是没配、反复重跑登录。
 		missing := filepath.Join(t.TempDir(), "does-not-exist.json")
 		t.Setenv("ASSISTANT_CONFIG", missing)
-		output := &bytes.Buffer{}
-		command := newWeixinCommand(new(string))
-		command.SetArgs([]string{"status"})
-		command.SetOut(output)
-		command.SetErr(&bytes.Buffer{})
-		command.SetContext(t.Context())
-		if err := command.Execute(); err == nil {
-			t.Fatalf("配置路径不可读时应报错，实际输出：%q", output.String())
+		if _, err := runLoginList(t, "", "--type", "weixin"); err == nil {
+			t.Fatal("配置路径不可读时应报错")
 		}
 	})
 
@@ -110,21 +104,16 @@ func TestWeixinStatusReportsMissingBridge(t *testing.T) {
 		if err := instances.Save(configPath, file); err != nil {
 			t.Fatal(err)
 		}
-		output := &bytes.Buffer{}
-		command := newWeixinCommand(new(string))
-		command.SetArgs([]string{"status"})
-		command.SetOut(output)
-		command.SetErr(&bytes.Buffer{})
-		command.SetContext(t.Context())
-		if err := command.Execute(); err != nil {
-			t.Fatalf("status 在只有 qq 通道时不应报错：%v", err)
+		out, err := runLoginList(t, "", "--type", "weixin")
+		if err != nil {
+			t.Fatalf("只有 qq 通道时不应报错：%v", err)
 		}
-		if !strings.Contains(output.String(), want) {
-			t.Errorf("输出 = %q, want 含 %q", output.String(), want)
+		if !strings.Contains(out, want) {
+			t.Errorf("输出 = %q, want 含 %q", out, want)
 		}
 		// qq 通道不属于微信桥，绝不能出现在输出里
-		if strings.Contains(output.String(), "qq") {
-			t.Errorf("输出串入了非 weixin 通道：%q", output.String())
+		if strings.Contains(out, "qq") {
+			t.Errorf("输出串入了非 weixin 通道：%q", out)
 		}
 	})
 }
@@ -154,16 +143,10 @@ func TestWeixinStatusNeverLeaksToken(t *testing.T) {
 	if err := instances.Save(configPath, file); err != nil {
 		t.Fatal(err)
 	}
-	output := &bytes.Buffer{}
-	command := newWeixinCommand(&configPath)
-	command.SetArgs([]string{"status"})
-	command.SetOut(output)
-	command.SetErr(&bytes.Buffer{})
-	command.SetContext(t.Context())
-	if err := command.Execute(); err != nil {
-		t.Fatalf("status: %v", err)
+	got, err := runLoginList(t, configPath, "--type", "weixin")
+	if err != nil {
+		t.Fatalf("list --type weixin: %v", err)
 	}
-	got := output.String()
 	if strings.Contains(got, secret) {
 		t.Fatalf("输出泄漏了令牌：%q", got)
 	}
@@ -186,31 +169,32 @@ func TestWeixinStatusNeverLeaksToken(t *testing.T) {
 	}
 }
 
-// weixin login 的旗标面是对外契约：默认端点必须写进帮助文本（用户要知道不传
+// weixin 登录的旗标面是对外契约：默认端点必须写进帮助文本（用户要知道不传
 // --base-url 时打到哪），--name 决定凭据写进匿名还是命名实例（会话键随之改变）。
+// 两个旗标都只对 weixin 有意义，传给别的 --type 会被显式拒绝。
 func TestWeixinLoginFlagSurface(t *testing.T) {
-	flag := new(string)
-	command := newWeixinCommand(flag)
-	login, _, err := command.Find([]string{"login"})
+	configPath := ""
+	command := newLoginCommand(&configPath)
+	add, _, err := command.Find([]string{"add"})
 	if err != nil {
-		t.Fatalf("Find(login): %v", err)
+		t.Fatalf("Find(add): %v", err)
 	}
-	baseURL := login.Flags().Lookup("base-url")
+	baseURL := add.Flags().Lookup("base-url")
 	if baseURL == nil {
 		t.Fatal("--base-url 未注册")
 	}
 	if baseURL.DefValue != "" {
-		t.Errorf("--base-url 默认值 = %q, want 空（缺省端点由 runWeixinLogin 补齐）", baseURL.DefValue)
+		t.Errorf("--base-url 默认值 = %q, want 空（缺省端点由登录流程补齐）", baseURL.DefValue)
 	}
 	if !strings.Contains(baseURL.Usage, instances.DefaultWeixinBaseURL) {
 		t.Errorf("--base-url 帮助未写出缺省端点 %q：%q", instances.DefaultWeixinBaseURL, baseURL.Usage)
 	}
-	name := login.Flags().Lookup("name")
+	name := add.Flags().Lookup("name")
 	if name == nil {
 		t.Fatal("--name 未注册（多微信账号靠它区分实例）")
 	}
-	if !strings.Contains(name.Usage, "channels") {
-		t.Errorf("--name 帮助未说明写入 channels 列表：%q", name.Usage)
+	if !strings.Contains(name.Usage, "匿名实例") {
+		t.Errorf("--name 帮助未说明缺省写匿名实例：%q", name.Usage)
 	}
 }
 

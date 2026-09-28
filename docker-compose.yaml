@@ -25,7 +25,7 @@
 #   make build && docker compose up -d --force-recreate    # 等价手工流程
 #   make daemon-image      # 可选：构建内置二进制的独立 daemon 镜像（BASE_IMAGE=... 可换基座）
 #   docker compose logs -f        # 已带 --debug：能看到 claude 的实时消息与工具调用
-#   docker compose exec -it assistant assistant weixin login   # 首次扫码（终端渲染二维码，-it 必需）
+#   docker compose exec -it assistant assistant login add --type weixin   # 首次扫码（终端渲染二维码，-it 必需）
 #
 # 以宿主用户身份运行：写回挂载目录的文件属主不变；UID/GID 与 HOME 由 compose
 # 插值，缺省 1000:1000，请在 .env 或 shell 环境里按需覆盖（export ASSISTANT_UID=...）。

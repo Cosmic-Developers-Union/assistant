@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
+	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
 	"github.com/Cosmic-Developers-Union/assistant/internal/setup"
 
 	"github.com/spf13/cobra"
@@ -14,7 +15,7 @@ import (
 // login token 子命令组：凭据库里用途令牌的查看与轮换。list/show 只读本地凭据；
 // refresh 用账号密码在站点上删除同名旧令牌再按原权限集重建（Gitea 不回读令牌
 // 值，无法原地续期），新令牌写回凭据库。整组只碰凭据库，不动 config.json。
-func newLoginTokenCommand() *cobra.Command {
+func newLoginTokenCommand(loginType *string) *cobra.Command {
 	command := &cobra.Command{
 		Use:   "token",
 		Short: "用途令牌的查看与轮换（list/show/refresh）",
@@ -23,14 +24,49 @@ func newLoginTokenCommand() *cobra.Command {
 			"  assistant login token list [host]              列出凭据库中的用途令牌\n" +
 			"  assistant login token show <host> [purpose]    查看一条令牌（含明文）\n" +
 			"  assistant login token refresh <host> [purpose] 轮换一条令牌（需账号密码）\n\n" +
-			"purpose 缺省 mcp；账号缺省站点当前登录身份，--user 可显式指定。",
+			"purpose 缺省 mcp；账号缺省站点当前登录身份，--user 可显式指定。\n\n" +
+			"只管 Gitea 用途令牌。通道密钥（weixin/qq/telegram）不在站点上，没有令牌可\n" +
+			"轮换，用 assistant login add --type <平台> 重新登记。",
 		Args: cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			return command.Help()
 		},
 	}
-	command.AddCommand(newLoginTokenListCommand(), newLoginTokenShowCommand(), newLoginTokenRefreshCommand())
+	// 整组的动作全是站点侧的（校验令牌身份、到 Gitea Applications 页删旧建新）。
+	// 带上非 gitea 的 --type 进来却照跑，等于对着不存在的站点发请求，错误信息
+	// 还会把人指向 Gitea 的页面——比直接拒绝难查得多。
+	guard := func(child *cobra.Command) *cobra.Command {
+		inner := child.RunE
+		child.RunE = func(command *cobra.Command, args []string) error {
+			resolved, err := resolveLoginType(derefLoginType(loginType))
+			if err != nil {
+				return err
+			}
+			if resolved != instances.ChannelGitea {
+				return fmt.Errorf("--type %s 不适用于 token：这里只管 Gitea 用途令牌；"+
+					"通道密钥用 assistant login add --type %s 登记", resolved, resolved)
+			}
+			if inner == nil {
+				return command.Help()
+			}
+			return inner(command, args)
+		}
+		return child
+	}
+	command.AddCommand(
+		guard(newLoginTokenListCommand()),
+		guard(newLoginTokenShowCommand()),
+		guard(newLoginTokenRefreshCommand()),
+	)
 	return command
+}
+
+// derefLoginType 取 --type 的当前值（测试里可能不传指针）。
+func derefLoginType(loginType *string) string {
+	if loginType == nil {
+		return instances.ChannelGitea
+	}
+	return *loginType
 }
 
 // loginTokenCredentialPath / loginTokenCredentials 是凭据库定位与读取的注入缝。

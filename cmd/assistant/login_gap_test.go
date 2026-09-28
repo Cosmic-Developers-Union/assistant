@@ -103,7 +103,7 @@ func TestLoginListWithoutConfigReportsCredentialStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	list := newLoginListCommand(&configPath)
+	list := newLoginListCommand(&configPath, nil)
 	list.SetOut(&out)
 	list.SetErr(&out)
 	if err := list.Execute(); err != nil {
@@ -131,7 +131,7 @@ func TestLoginListEmptyStoreSaysNothingRegistered(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	list := newLoginListCommand(&configPath)
+	list := newLoginListCommand(&configPath, nil)
 	list.SetOut(&out)
 	list.SetErr(&out)
 	if err := list.Execute(); err != nil {
@@ -165,7 +165,7 @@ func TestLoginListReportsCorruptCredentialStore(t *testing.T) {
 	}
 
 	var out, errOut bytes.Buffer
-	list := newLoginListCommand(&configPath)
+	list := newLoginListCommand(&configPath, nil)
 	list.SetOut(&out)
 	list.SetErr(&errOut)
 	if err := list.Execute(); err != nil {
@@ -254,7 +254,7 @@ func TestRunLoginPromptsForMissingHostAndRejectsEmpty(t *testing.T) {
 	configPath := filepath.Join(dir, "config.json")
 
 	var out bytes.Buffer
-	command := newLoginAddCommand(&configPath)
+	command := newLoginAddCommand(&configPath, nil)
 	command.SetOut(&out)
 	command.SetErr(&out)
 	// 显式注入 stdin：interactive() 为真，询问走 prompts.line 而不是拒绝等待
@@ -286,7 +286,7 @@ func TestLoginAddRequiresPasswordFlagInNonInteractive(t *testing.T) {
 	_, server := newLoginServer(t, "developer", false)
 
 	var out bytes.Buffer
-	command := newLoginAddCommand(&configPath)
+	command := newLoginAddCommand(&configPath, nil)
 	command.SetOut(&out)
 	command.SetErr(&out)
 	// 不调用 SetIn：InOrStdin() 回落到 os.Stdin，非终端 → 非交互
@@ -314,7 +314,7 @@ func TestReadIdentityPasswordSources(t *testing.T) {
 	// command.InOrStdin()，注入的源必须挂在被传入的那条命令上。
 	newSession := func(t *testing.T, input string) (*cobra.Command, *promptSession, *bytes.Buffer) {
 		t.Helper()
-		command := newLoginAddCommand(new(string))
+		command := newLoginAddCommand(new(string), nil)
 		var errOut bytes.Buffer
 		command.SetErr(&errOut)
 		command.SetIn(strings.NewReader(input))
@@ -384,7 +384,7 @@ func TestLoginAddRejectsEmptyPasswordFromStdinSource(t *testing.T) {
 
 	_, server := newLoginServer(t, "developer", false)
 
-	command := newLoginAddCommand(&configPath)
+	command := newLoginAddCommand(&configPath, nil)
 	var out bytes.Buffer
 	command.SetOut(&out)
 	command.SetErr(&out)
@@ -406,7 +406,7 @@ func TestLoginAddRejectsEmptyPasswordFromStdinSource(t *testing.T) {
 // 把密码按 line 处理会静默改掉用户密码导致认证失败；把地址按 secret 处理则会把
 // 尾随空格带进 host，让凭据库的 (host) 唯一键错位。
 func TestPromptSessionLineAndSecretTrimRules(t *testing.T) {
-	command := newLoginAddCommand(new(string))
+	command := newLoginAddCommand(new(string), nil)
 	command.SetIn(strings.NewReader("  padded value  \nraw secret  \n"))
 	var errOut bytes.Buffer
 	command.SetErr(&errOut)
@@ -419,7 +419,7 @@ func TestPromptSessionLineAndSecretTrimRules(t *testing.T) {
 	if line != "padded value" {
 		t.Errorf("line = %q, want 去掉首尾空格", line)
 	}
-	secret, err := prompts.secret("密码：")
+	secret, err := prompts.secret("密码：", "请用 --password-stdin 提供密码")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,13 +438,13 @@ func TestPromptSessionLineAndSecretTrimRules(t *testing.T) {
 //
 // 空串会让后续所有「缺参数」判定都误以为用户已经给了值。
 func TestPromptSessionLineReportsReadFailure(t *testing.T) {
-	command := newLoginAddCommand(new(string))
+	command := newLoginAddCommand(new(string), nil)
 	command.SetIn(strings.NewReader(""))
 	command.SetErr(&bytes.Buffer{})
 	if _, err := newPromptSession(command).line("账号："); err == nil {
 		t.Error("输入源耗尽应报读取输入失败")
 	}
-	if _, err := newPromptSession(command).secret("密码："); err == nil {
+	if _, err := newPromptSession(command).secret("密码：", "请用 --password-stdin 提供密码"); err == nil {
 		t.Error("输入源耗尽应报读取输入失败")
 	}
 }
@@ -460,7 +460,7 @@ func TestLoginAddWithoutUserInNonInteractive(t *testing.T) {
 
 	_, server := newLoginServer(t, "developer", false)
 
-	command := newLoginAddCommand(&configPath)
+	command := newLoginAddCommand(&configPath, nil)
 	var out bytes.Buffer
 	command.SetOut(&out)
 	command.SetErr(&out)
@@ -485,7 +485,7 @@ func TestLoginAddRejectsTokenOfAnotherAccount(t *testing.T) {
 	state, server := newLoginServer(t, "developer", false)
 	state.login = "someone-else"
 
-	command := newLoginAddCommand(&configPath)
+	command := newLoginAddCommand(&configPath, nil)
 	var out bytes.Buffer
 	command.SetOut(&out)
 	command.SetErr(&out)

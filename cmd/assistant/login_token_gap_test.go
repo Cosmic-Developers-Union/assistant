@@ -395,7 +395,7 @@ func runTokenCommand(t *testing.T, newCommand func() *cobra.Command, args ...str
 // 这是操作者最常见的探索入口：不知道该用 list 还是 show 时先敲 `login token`。
 // 若这里返回错误或什么都不打印，帮助信息就只能靠猜子命令名才看得到。
 func TestLoginTokenCommandWithoutArgsPrintsHelp(t *testing.T) {
-	runErr, out := runTokenCommand(t, newLoginTokenCommand)
+	runErr, out := runTokenCommand(t, func() *cobra.Command { return newLoginTokenCommand(nil) })
 	if runErr != nil {
 		t.Fatalf("裸调 login token 不该报错：%v", runErr)
 	}

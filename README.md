@@ -128,10 +128,12 @@ channels，**大量配置**）加 N 个 runtime（**少量运行**——每个 r
 - **gitea 通道**：评审调度通道。host + repos 就是监控面（`reviewer` 缺省 ai、
   `merger` 缺省 merge，令牌在凭据库，或通道 `token` 显式给——支持
   `${VAR}` 引用不落盘）。它不经过对话桥，由调度引擎接管。
-- 多微信账号：`assistant weixin login --name work`；多 QQ 机器人在 q.qq.com
-  各建条目；**Telegram**：@BotFather `/newbot` 拿 token（`assistant telegram
-  status` 自检），长轮询出站连接无需公网 IP，群聊收全量消息需关闭 BotFather
-  隐私模式。
+- 通道凭据用 `assistant login add --type <平台>` 登记：`weixin` 扫码（多账号用
+  `--name work` 写命名实例）、`qq` 交互读入开放平台 AppID/AppSecret、`telegram`
+  交互读入 @BotFather `/newbot` 的 token——三者都先在线实测（qq 换 access token、
+  telegram getMe）再写凭据库。凭据状态用 `assistant login list --type <平台>`
+  查看，qq / telegram 会顺带复测。Telegram 长轮询出站连接无需公网 IP，群聊收全量
+  消息需关闭 BotFather 隐私模式。
 - runtime 按键引用通道：`"channels": ["gitea", "weixin/work"]`——未被引用的
   通道不启动。
 - 旧版顶层 `qq:` / `weixin:` 单实例节点已删除：`channels` 是唯一的对话通道
@@ -191,7 +193,7 @@ runtime 从池里按名选人：`main_agent` 一个（缺省内置 `main`），`
 
 ```bash
 make compose-up                                            # 构建宿主二进制 + 重建容器（daemon + 状态 API + 对话通道）
-docker compose exec -it assistant assistant weixin login    # 首次扫码（-it 必需）
+docker compose exec -it assistant assistant login add --type weixin  # 首次扫码（-it 必需）
 docker compose logs -f                                      # compose 默认带 --debug
 ```
 

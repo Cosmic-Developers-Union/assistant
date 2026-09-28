@@ -98,7 +98,7 @@ func TestLoginListAndRemove(t *testing.T) {
 	}
 
 	var output bytes.Buffer
-	list := newLoginListCommand(&path)
+	list := newLoginListCommand(&path, nil)
 	list.SetOut(&output)
 	if err := list.Execute(); err != nil {
 		t.Fatalf("login list error = %v", err)
@@ -114,7 +114,7 @@ func TestLoginListAndRemove(t *testing.T) {
 	}
 
 	output.Reset()
-	remove := newLoginRemoveCommand(&path)
+	remove := newLoginRemoveCommand(&path, nil)
 	remove.SetOut(&output)
 	remove.SetArgs([]string{"https://gitea.example.com"})
 	if err := remove.Execute(); err != nil {
@@ -147,7 +147,7 @@ func TestLoginRemoveKeepsOtherPlatforms(t *testing.T) {
 	if err := credentials.Save(filepath.Join(dir, "credentials.json"), store); err != nil {
 		t.Fatal(err)
 	}
-	remove := newLoginRemoveCommand(&path)
+	remove := newLoginRemoveCommand(&path, nil)
 	remove.SetOut(&bytes.Buffer{})
 	remove.SetArgs([]string{"https://a.example.com"})
 	if err := remove.Execute(); err != nil {

@@ -67,11 +67,18 @@ func resolveChannelSecret(entry instances.Channel, store *credentials.File) (res
 		return resolved, nil
 	}
 
-	// qq 的 AppID 不是密钥：留在 config.json 里照样能用，放凭据库里也行
+	// qq 的 AppID 不是密钥，但它同样支持 $VAR 引用，且在解析口径上与密钥
+	// 一样「内联优先、缺省回退凭据库」（凭据库里它是 app_secret 的身份维度）。
+	// 不展开会让 "$QQ_APP_ID" 原样发往 q.qq.com，症状是一句看不懂的 appid 无效。
 	if entry.Type == instances.ChannelQQ {
-		resolved.AppID, resolved.AppIDSource = entry.AppID, secretSourceConfig
-		if strings.TrimSpace(resolved.AppID) == "" {
-			resolved.AppID, resolved.AppIDSource = "", ""
+		if inlineAppID := strings.TrimSpace(entry.AppID); inlineAppID != "" {
+			expanded, err := envref.Expand(inlineAppID, envref.Options{
+				Field: fmt.Sprintf("channels[%s].app_id", entry.Key()),
+			})
+			if err != nil {
+				return resolved, err
+			}
+			resolved.AppID, resolved.AppIDSource = expanded, secretSourceConfig
 		}
 	}
 
@@ -97,7 +104,9 @@ func resolveChannelSecret(entry instances.Channel, store *credentials.File) (res
 	}
 	resolved.Value, resolved.Source = credential.Token, secretSourceCredentials
 	resolved.Identity = credential.User
-	if entry.Type == instances.ChannelQQ {
+	// 内联 app_id 已经解析出值时不让凭据库覆盖：内联优先是整个解析口径的基调，
+	// 密钥和身份字段不能各走各的
+	if entry.Type == instances.ChannelQQ && strings.TrimSpace(resolved.AppID) == "" {
 		resolved.AppID, resolved.AppIDSource = credential.User, secretSourceCredentials
 	}
 	return resolved, nil

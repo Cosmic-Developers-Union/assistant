@@ -213,29 +213,24 @@ func TestSaveConfigReportsInvalidFile(t *testing.T) {
 	}
 }
 
-// TestTelegramStatusReportsUnparsableConfig 断言 telegram status 在配置无法解析时
-// 报错退出，而不是当作「没有 telegram 通道」打印「未配置」。
+// TestLoginListChannelReportsUnparsableConfig 断言 login list --type 在配置无法
+// 解析时报错退出，而不是当作「没有该类型通道」打印「未配置」。
 //
 // 二者对操作者的指向完全相反：前者要去修 config.json 的语法，后者会让人以为只是
 // 漏加了 telegram 条目，于是在一份根本读不出来的配置上反复加通道。
-func TestTelegramStatusReportsUnparsableConfig(t *testing.T) {
+func TestLoginListChannelReportsUnparsableConfig(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	if err := os.WriteFile(configPath, []byte("{ 不是 json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	command := newTelegramStatusCommand(&configPath)
-	var out bytes.Buffer
-	command.SetOut(&out)
-	command.SetErr(&out)
-	command.SetArgs([]string{})
-	err := command.Execute()
+	out, err := runLoginList(t, configPath, "--type", "telegram")
 	if err == nil {
-		t.Fatalf("坏配置应报错：\n%s", out.String())
+		t.Fatalf("坏配置应报错：\n%s", out)
 	}
-	if strings.Contains(out.String(), "未配置 Telegram 通道") {
-		t.Errorf("不该把坏配置报成未配置通道：\n%s", out.String())
+	if strings.Contains(out, "未配置 telegram 通道") {
+		t.Errorf("不该把坏配置报成未配置通道：\n%s", out)
 	}
 }
 
@@ -298,7 +293,7 @@ func TestLoginRemoveReportsMissingCredentialsDir(t *testing.T) {
 	t.Setenv("HOME", "")
 	t.Setenv("XDG_CONFIG_HOME", "relative/path")
 
-	command := newLoginRemoveCommand(&configPath)
+	command := newLoginRemoveCommand(&configPath, nil)
 	var out bytes.Buffer
 	command.SetOut(&out)
 	command.SetErr(&out)
@@ -321,7 +316,7 @@ func TestLoginRemoveReportsCorruptCredentialStore(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	command := newLoginRemoveCommand(&configPath)
+	command := newLoginRemoveCommand(&configPath, nil)
 	var out bytes.Buffer
 	command.SetOut(&out)
 	command.SetErr(&out)

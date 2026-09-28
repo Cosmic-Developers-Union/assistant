@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -24,16 +23,12 @@ func TestQQStatusGuidesWhenConfigHasNoQQChannel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	command := newQQStatusCommand(&configPath)
-	out := &bytes.Buffer{}
-	command.SetOut(out)
-	command.SetErr(out)
-	command.SetArgs(nil)
-	if err := command.Execute(); err != nil {
-		t.Fatalf("没有 qq 通道不该报错：%v\n%s", err, out.String())
+	out, err := runLoginList(t, configPath, "--type", "qq")
+	if err != nil {
+		t.Fatalf("没有 qq 通道不该报错：%v\n%s", err, out)
 	}
-	if !strings.Contains(out.String(), `未配置 QQ 通道（在 config.json 的 channels 列表加入 {"type":"qq", ...} 条目）`) {
-		t.Errorf("应给出加通道的引导：\n%s", out.String())
+	if !strings.Contains(out, "未配置 qq 通道：运行 assistant login add --type qq 登记凭据") {
+		t.Errorf("应给出加通道的引导：\n%s", out)
 	}
 }
 
@@ -47,16 +42,12 @@ func TestQQStatusReportsMissingConfigFile(t *testing.T) {
 	isolateCredentials(t)
 	configPath := filepath.Join(t.TempDir(), "config.json")
 
-	command := newQQStatusCommand(&configPath)
-	out := &bytes.Buffer{}
-	command.SetOut(out)
-	command.SetErr(out)
-	command.SetArgs(nil)
-	if err := command.Execute(); err == nil {
-		t.Fatalf("配置文件不存在时应报错：\n%s", out.String())
+	out, err := runLoginList(t, configPath, "--type", "qq")
+	if err == nil {
+		t.Fatalf("配置文件不存在时应报错：\n%s", out)
 	}
-	if strings.Contains(out.String(), "未配置 QQ 通道") {
-		t.Errorf("不该把读不到配置说成未配置通道：\n%s", out.String())
+	if strings.Contains(out, "未配置 qq 通道") {
+		t.Errorf("不该把读不到配置说成未配置通道：\n%s", out)
 	}
 }
 
@@ -81,15 +72,11 @@ func TestQQStatusSkipsIncompleteCredentialFromStoredReferences(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	command := newQQStatusCommand(&configPath)
-	out := &bytes.Buffer{}
-	command.SetOut(out)
-	command.SetErr(out)
-	command.SetArgs(nil)
-	if err := command.Execute(); err != nil {
-		t.Fatalf("展开失败保留原值后应走跳过自检，不该失败：%v\n%s", err, out.String())
+	out, err := runLoginList(t, configPath, "--type", "qq")
+	if err != nil {
+		t.Fatalf("展开失败保留原值后应走跳过自检，不该失败：%v\n%s", err, out)
 	}
-	text := out.String()
+	text := out
 	// 展开失败保留原值，但列表按「有效值」呈现：空引用落到 orDash 的 - 与
 	// tokenState 的 none。
 	if !strings.Contains(text, "app_id=-") {
@@ -98,10 +85,10 @@ func TestQQStatusSkipsIncompleteCredentialFromStoredReferences(t *testing.T) {
 	if !strings.Contains(text, "secret=none") {
 		t.Errorf("未展开的 app_secret 应呈现为空：\n%s", text)
 	}
-	if !strings.Contains(text, "凭据不完整：跳过自检（app_id 与 app_secret 都需要）") {
+	if !strings.Contains(text, "凭据自检：跳过") {
 		t.Errorf("应说明跳过自检的原因：\n%s", text)
 	}
-	if strings.Contains(text, "存在凭据自检失败的 QQ 通道") {
+	if strings.Contains(text, "存在凭据自检失败的 qq 通道") {
 		t.Errorf("跳过自检不是失败：\n%s", text)
 	}
 }
@@ -120,20 +107,15 @@ func TestQQStatusMasksSecretAsSetNotEmpty(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	command := newQQStatusCommand(&configPath)
-	out := &bytes.Buffer{}
-	command.SetOut(out)
-	command.SetErr(out)
-	command.SetArgs(nil)
 	// 这里只断言列表行的脱敏口径；命令随后会去真实 token 端点自检，成败与本用例
 	// 无关（网络不可用时它只是一句自检失败）。
-	_ = command.Execute()
+	out, _ := runLoginList(t, configPath, "--type", "qq")
 
-	text := out.String()
+	text := out
 	if strings.Contains(text, "s3cret-should-never-appear") {
 		t.Errorf("列表不该回显 app_secret：\n%s", text)
 	}
-	if !strings.Contains(text, "secret=set") {
-		t.Errorf("有密钥时应显示 secret=set：\n%s", text)
+	if !strings.Contains(text, "secret=set（config.json）") {
+		t.Errorf("有密钥时应显示 secret=set（config.json）：\n%s", text)
 	}
 }

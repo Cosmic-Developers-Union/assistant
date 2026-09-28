@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"cmp"
 	"fmt"
 	"maps"
@@ -25,7 +24,6 @@ import (
 	"github.com/Cosmic-Developers-Union/assistant/internal/statestore"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 )
 
 // newDaemonMCPCommand 是自举的 daemon 状态 MCP：自己发现运行中的 assistant run
@@ -46,111 +44,8 @@ func newDaemonMCPCommand() *cobra.Command {
 	}
 }
 
-func endpointPathHint() string {
-	path, err := instances.DaemonEndpointPath()
-	if err != nil {
-		return "daemon.json"
-	}
-	return path
-}
-
-type weixinLoginOptions struct {
-	BaseURL string
-	// Name 非空时写入 channels 列表的命名实例（多微信账号）；缺省写匿名实例
-	Name string
-}
-
-// newWeixinCommand 管理微信对话桥：扫码登录（换 Bot token 写入 config.json）。
-func newWeixinCommand(configFlag *string) *cobra.Command {
-	command := &cobra.Command{
-		Use:   "weixin",
-		Short: "微信对话桥（openclaw ilink 协议）：扫码登录与状态",
-		Args:  cobra.NoArgs,
-	}
-	loginOptions := &weixinLoginOptions{}
-	loginCommand := &cobra.Command{
-		Use:   "login",
-		Short: "扫码登录微信 Bot，把凭据写入 config.json 的 channels 列表",
-		Long: "按 openclaw-weixin（ilink）协议拉起扫码登录：终端展示二维码内容，\n" +
-			"手机扫码确认后把 Bot token 写入 config.json 的 channels 列表；之后\n" +
-			"assistant run 即可通过微信与 daemon 对话（channels 里有条目即启用）。\n" +
-			"需要验证码时会提示输入手机上显示的验证码。\n" +
-			"多微信账号用 --name <实例名>：凭据写入同名命名实例，会话键为\n" +
-			"weixin/<实例名>，各实例互不串会话；缺省写匿名实例（会话键 weixin）。",
-		Args: cobra.NoArgs,
-		RunE: func(command *cobra.Command, _ []string) error {
-			return runWeixinLogin(command, *configFlag, loginOptions)
-		},
-	}
-	loginCommand.Flags().StringVar(&loginOptions.BaseURL, "base-url", "",
-		"ilink API 根地址（缺省 "+instances.DefaultWeixinBaseURL+"）")
-	loginCommand.Flags().StringVar(&loginOptions.Name, "name", "",
-		"写入 channels 列表的实例名（多微信账号用；缺省写匿名实例）")
-	statusCommand := &cobra.Command{
-		Use:   "status",
-		Short: "显示微信桥配置状态（不显示令牌）",
-		Args:  cobra.NoArgs,
-		RunE: func(command *cobra.Command, _ []string) error {
-			_, file, err := resolveInstanceFile(commandOptions{ConfigPath: *configFlag})
-			if err != nil {
-				return err
-			}
-			stdout := command.OutOrStdout()
-			if file == nil {
-				fmt.Fprintln(stdout, "未配置微信桥（先 assistant weixin login）")
-				return nil
-			}
-			configs := weixinChannelViews(file)
-			if len(configs) == 0 {
-				fmt.Fprintln(stdout, "未配置微信桥（先 assistant weixin login）")
-				return nil
-			}
-			for _, view := range configs {
-				login := view.LoginUserID
-				if login == "" {
-					login = "-"
-				}
-				fmt.Fprintf(stdout, "key=%s enabled=%v base_url=%s login=%s bot_id=%s token=%s admins=%d\n",
-					view.Key, view.Enabled, view.BaseURL, login, orDash(view.BotID), tokenState(view.BotToken), len(view.AdminUsers))
-			}
-			return nil
-		},
-	}
-	command.AddCommand(loginCommand, statusCommand)
-	return command
-}
-
-// weixinChannelView 是 weixin status 的展示条目（通道键 + 生效字段）。
-type weixinChannelView struct {
-	Key         string
-	Enabled     bool
-	BaseURL     string
-	LoginUserID string
-	BotID       string
-	BotToken    string
-	AdminUsers  []string
-}
-
-// weixinChannelViews 列出 channels 里的 weixin 实例（未启用的也列出，标注状态）。
-func weixinChannelViews(file *instances.File) []weixinChannelView {
-	var views []weixinChannelView
-	for _, channel := range file.Channels {
-		if channel.Type != instances.ChannelWeixin {
-			continue
-		}
-		views = append(views, weixinChannelView{
-			Key:         channel.Key(),
-			Enabled:     channel.IsEnabled(),
-			BaseURL:     channel.BaseURL,
-			LoginUserID: channel.LoginUserID,
-			BotID:       channel.BotID,
-			BotToken:    channel.BotToken,
-			AdminUsers:  channel.AdminUsers,
-		})
-	}
-	return views
-}
-
+// orDash / tokenState 是展示用的占位助手：诊断输出里空值统一打成 - 或 none，
+// 免得操作者分不清「没配」和「配成空串」。绝不能回显密钥本身。
 func orDash(value string) string {
 	if strings.TrimSpace(value) == "" {
 		return "-"
@@ -165,101 +60,12 @@ func tokenState(token string) string {
 	return "set"
 }
 
-func runWeixinLogin(command *cobra.Command, configPath string, options *weixinLoginOptions) error {
-	stdout := command.OutOrStdout()
-	baseURL := strings.TrimSpace(options.BaseURL)
-	if baseURL == "" {
-		baseURL = instances.DefaultWeixinBaseURL
-	}
-	writePath, file, err := loadInstanceFileForSetup(configPath)
+func endpointPathHint() string {
+	path, err := instances.DaemonEndpointPath()
 	if err != nil {
-		return err
+		return "daemon.json"
 	}
-	if file == nil {
-		file = &instances.File{}
-	}
-	onQR := func(code weixin.QRCode) {
-		fmt.Fprintln(stdout, "请用手机微信扫描下方二维码完成登录（扫码后手机上会提示确认）：")
-		if err := weixin.RenderQR(stdout, code.Content); err != nil {
-			fmt.Fprintf(stdout, "（终端二维码渲染失败：%v，请使用下方链接）\n", err)
-		}
-		fmt.Fprintf(stdout, "若二维码无法显示或无法扫描，可访问：%s\n", code.Content)
-	}
-	promptVerify := func(attempt int) (string, error) {
-		if !term.IsTerminal(int(os.Stdin.Fd())) {
-			return "", fmt.Errorf("需要验证码但当前环境不可交互（请在终端运行）")
-		}
-		fmt.Fprintf(os.Stderr, "请输入手机显示的验证码（第 %d 次）：", attempt)
-		reader := bufio.NewReader(os.Stdin)
-		line, err := reader.ReadString('\n')
-		fmt.Fprintln(os.Stderr)
-		if err != nil {
-			return "", err
-		}
-		return strings.TrimSpace(line), nil
-	}
-	credentials, err := weixin.Login(command.Context(), baseURL, onQR, promptVerify, nil)
-	if err != nil {
-		return err
-	}
-	if name := strings.TrimSpace(options.Name); name != "" {
-		// channels 列表的命名实例：找同名实例更新凭据，没有就追加
-		entry := instances.Channel{Type: instances.ChannelWeixin, Name: name}
-		found := false
-		for index := range file.Channels {
-			if file.Channels[index].Type == instances.ChannelWeixin && file.Channels[index].Name == name {
-				entry = file.Channels[index]
-				found = true
-				break
-			}
-		}
-		entry.BaseURL = credentials.BaseURL
-		entry.BotToken = credentials.BotToken
-		entry.BotID = credentials.BotID
-		entry.LoginUserID = credentials.UserID
-		if !found {
-			file.Channels = append(file.Channels, entry)
-		}
-		file.Normalize()
-		if err := file.Validate(); err != nil {
-			return err
-		}
-		if err := instances.Save(writePath, file); err != nil {
-			return err
-		}
-		fmt.Fprintf(stdout, "登录成功：bot_id=%s login=%s，凭据已写入 %s 的 channels 实例 weixin/%s（0600）\n",
-			orDash(credentials.BotID), orDash(credentials.UserID), writePath, name)
-		fmt.Fprintln(stdout, "启动对话：assistant run（channels 列表里有条目即启用）")
-		return nil
-	}
-	// 缺省写匿名实例（Key()="weixin"，与旧版单实例会话键一致，老用户无感）
-	entry := instances.Channel{Type: instances.ChannelWeixin}
-	found := false
-	for index := range file.Channels {
-		if file.Channels[index].Type == instances.ChannelWeixin && strings.TrimSpace(file.Channels[index].Name) == "" {
-			entry = file.Channels[index]
-			found = true
-			break
-		}
-	}
-	entry.BaseURL = credentials.BaseURL
-	entry.BotToken = credentials.BotToken
-	entry.BotID = credentials.BotID
-	entry.LoginUserID = credentials.UserID
-	if !found {
-		file.Channels = append(file.Channels, entry)
-	}
-	file.Normalize()
-	if err := file.Validate(); err != nil {
-		return err
-	}
-	if err := instances.Save(writePath, file); err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "登录成功：bot_id=%s login=%s，凭据已写入 %s 的 channels 实例 weixin（0600）\n",
-		orDash(credentials.BotID), orDash(credentials.UserID), writePath)
-	fmt.Fprintln(stdout, "启动对话：assistant run（channels 列表里有条目即启用）")
-	return nil
+	return path
 }
 
 // startDaemonServices 启动 daemon 模式的服务面：只读状态 API 与 runtime 引用的
