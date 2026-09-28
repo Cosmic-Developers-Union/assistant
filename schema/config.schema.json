@@ -344,15 +344,15 @@
         },
         "bot_token": {
           "type": "string",
-          "description": "凭据：（weixin）扫码登录的 Bot token；（telegram）@BotFather 发放的 token。支持 $VAR/${VAR} 环境变量引用（config.json 同目录 .env 自动载入；未定义启动即报错），令牌不落配置文件。"
+          "description": "内联凭据：（weixin）扫码登录的 Bot token；（telegram）@BotFather 发放的 token。留空即由运行时按通道键（weixin、weixin/work、telegram）到凭据库 credentials.json 取——内联优先。支持 $VAR/${VAR} 环境变量引用（config.json 同目录 .env 自动载入；未定义启动即报错）。"
         },
         "login_user_id": {
           "type": "string",
-          "description": "（weixin）扫码登录的用户 ID（诊断用；空白名单时只允许此人）。"
+          "description": "（weixin）扫码登录的用户 ID（诊断用；空白名单时只允许此人）。assistant login add --type weixin 会写入。"
         },
         "ilink_bot_id": {
           "type": "string",
-          "description": "（weixin）Bot ID（诊断用）。"
+          "description": "（weixin）Bot ID（诊断用）。assistant login add --type weixin 会写入。"
         },
         "bot_agent": {
           "type": "string",
@@ -368,11 +368,11 @@
         },
         "app_id": {
           "type": "string",
-          "description": "（qq）开放平台机器人的 AppID。支持 $VAR/${VAR} 环境变量引用（config.json 同目录 .env 自动载入；未定义启动即报错）。"
+          "description": "（qq）开放平台机器人的 AppID（非密钥，诊断用；assistant login add --type qq 会写入）。支持 $VAR/${VAR} 环境变量引用。"
         },
         "app_secret": {
           "type": "string",
-          "description": "（qq）开放平台机器人的 AppSecret（config.json 为 0600）。支持 $VAR/${VAR} 环境变量引用（config.json 同目录 .env 自动载入；未定义启动即报错）。"
+          "description": "内联凭据：（qq）开放平台机器人的 AppSecret。留空即由运行时按通道键（qq、qq/support）到凭据库 credentials.json 取——内联优先。支持 $VAR/${VAR} 环境变量引用。"
         },
         "api_base_url": {
           "type": "string",

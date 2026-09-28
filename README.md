@@ -27,7 +27,7 @@ assistant 是工具不是常驻应用：配置按 `--config` → `ASSISTANT_CONF
 | 路径 | 内容 | 谁写 | 说明 |
 | --- | --- | --- | --- |
 | `<配置目录>/config.json` | 平台、仓库、provider、微信桥 | 你（`config new` 生成空骨架，`config init` 补全） | 用户配置，含 provider `api_key` |
-| `~/.config/Cosmic-Developers-Union/assistant/credentials.json`（Linux；`ASSISTANT_CREDENTIALS` 可覆盖） | 登录身份 + `review`/`merge`/`admin`/`mcp` 用途令牌 | `login` / `setup` | 0600，不要手改；平台标准配置目录，与 cwd/config 位置无关 |
+| `~/.config/Cosmic-Developers-Union/assistant/credentials.json`（Linux；`ASSISTANT_CREDENTIALS` 可覆盖） | 登录身份 + `review`/`merge`/`admin`/`mcp` 用途令牌 + 对话通道密钥（weixin/qq/telegram，按通道键） | `login` / `setup` | 0600，不要手改；平台标准配置目录，与 cwd/config 位置无关 |
 | `<配置目录>/config.schema.json` | 配置的 JSON Schema | `config new` / `config init` | 编辑器补全用 |
 | `<配置目录>/claude/` | **会话文本记录 + claude 全局配置** | claude 会话 | `CLAUDE_CONFIG_DIR` 指向这里 |
 | `<配置目录>/claude/projects/<项目>/<session-id>.jsonl` | 一次会话的完整事件流（一行一事件） | claude | 保留期 `cleanupPeriodDays=3650` |
@@ -73,8 +73,8 @@ channels，**大量配置**）加 N 个 runtime（**少量运行**——每个 r
   "agents":     { "qa": { "description": "测试问答", "system_prompt": "…", "provider": "zhipu" } },
   "channels": [
     { "type": "gitea", "host": "https://gitea.example.com", "repos": ["acme/repo"] },
-    { "type": "weixin", "name": "work", "bot_token": "…" },
-    { "type": "telegram", "bot_token": "…" }
+    { "type": "weixin", "name": "work", "admin_users": ["wx-user-id"] },
+    { "type": "telegram", "admin_users": ["123456789"] }
   ],
   "runtimes": {
     "main": {
@@ -118,9 +118,9 @@ channels，**大量配置**）加 N 个 runtime（**少量运行**——每个 r
 
 ```json
 "channels": [
-  { "type": "weixin",   "name": "work",    "bot_token": "…", "admin_users": ["wx-user-id"] },
-  { "type": "qq",       "name": "support", "app_id": "…", "app_secret": "…", "admin_users": ["openid"] },
-  { "type": "telegram", "bot_token": "…",  "admin_users": ["123456789"] },
+  { "type": "weixin",   "name": "work",    "admin_users": ["wx-user-id"] },
+  { "type": "qq",       "name": "support", "admin_users": ["openid"] },
+  { "type": "telegram",                   "admin_users": ["123456789"] },
   { "type": "gitea",    "host": "https://gitea.example.com", "repos": ["acme/repo"] }
 ]
 ```
@@ -136,6 +136,11 @@ channels，**大量配置**）加 N 个 runtime（**少量运行**——每个 r
   通道不启动。
 - 旧版顶层 `qq:` / `weixin:` 单实例节点已删除：`channels` 是唯一的对话通道
   架构，出现旧节点会报迁移错误（含对照写法）。
+- **通道密钥在凭据库，不在 config.json**：对话通道（weixin/qq/telegram）的
+  条目只写 `type`/`name`/`admin_users` 等，密钥由 `assistant login add --type
+  <平台>` 写进 `credentials.json`，运行时按通道键（`weixin`、`weixin/work`…）
+  取。config.json 里手写 `bot_token`/`app_secret` 仍然可用且**优先**（内联 >
+  凭据库），适合「密钥由外部系统注入、assistant 只消费」的场景。
 - **凭据不落盘**：凭据字段（`bot_token`/`app_id`/`app_secret`/`token`/`api_key`、
   `providers.*.env`、`agents.*.mcp.*.env`、`sessions.remote.token`）都支持
   `$VAR` / `${VAR}` / `${VAR:-default}` 环境变量引用——`assistant` 启动时

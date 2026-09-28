@@ -67,22 +67,19 @@
     {
       "type": "weixin",
       "name": "work",
-      "bot_token": "created-by-assistant-weixin-login--name-work",
+      "login_user_id": "wx-user-id",
       "admin_users": [
         "wx-user-id"
       ]
     },
     {
       "type": "qq",
-      "app_id": "$QQ_APP_ID",
-      "app_secret": "$QQ_TOKEN",
       "admin_users": [
         "*"
       ]
     },
     {
       "type": "telegram",
-      "bot_token": "$TELEGRAM_BOT_TOKEN",
       "admin_users": [
         "123456789"
       ]

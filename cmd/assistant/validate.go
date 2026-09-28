@@ -92,6 +92,11 @@ func printValidateFinding(stdout io.Writer, finding validateFinding) {
 
 // validateConfigFile 逐项校验配置本体（不联网、不写文件）。
 func validateConfigFile(path string, file *instances.File) []validateFinding {
+	// 凭据库读一次两处用：通道密钥按通道键取，gitea 用途令牌按 (host, purpose) 取。
+	// 读失败照样往下走——config.json 内联的凭据仍然可用，两处各自的检查会逐条
+	// 报出实际缺什么；但读失败本身要留一条 ERROR，否则「凭据库坏了」会退化成
+	// 一堆「缺令牌」，把人引到错误的排查方向。
+	credentialStore, credentialErr := loadCredentialStoreQuietly()
 	giteaChannels := giteaChannelsOf(file)
 	findings := []validateFinding{{
 		status:  "OK",
@@ -212,17 +217,21 @@ func validateConfigFile(path string, file *instances.File) []validateFinding {
 		detail := "type=" + entry.Type
 		var problems []string
 		switch entry.Type {
-		case instances.ChannelWeixin:
-			if strings.TrimSpace(entry.BotToken) == "" {
-				problems = append(problems, "缺少 bot_token——assistant weixin login --name "+entry.Name)
-			}
-		case instances.ChannelQQ:
-			if entry.AppID == "" || strings.TrimSpace(entry.AppSecret) == "" {
-				problems = append(problems, "缺少 app_id/app_secret——q.qq.com 开放平台")
-			}
-		case instances.ChannelTelegram:
-			if strings.TrimSpace(entry.BotToken) == "" {
-				problems = append(problems, "缺少 bot_token——@BotFather 发放")
+		case instances.ChannelWeixin, instances.ChannelQQ, instances.ChannelTelegram:
+			// 密钥缺省在凭据库（按通道键索引），config.json 不写也算合法配置。
+			// 这里按真实解析口径报：拿到密钥就说是从哪拿到的，拿不到才报错并
+			// 给出补凭据的命令——这正是 daemon 启动通道时会撞上的那一步。
+			resolved, resolveErr := resolveChannelSecret(entry, credentialStore)
+			switch {
+			case resolveErr != nil:
+				problems = append(problems, resolveErr.Error())
+			case !resolved.complete():
+				problems = append(problems, missingChannelSecret(entry).Error())
+			default:
+				detail += "；密钥来自 " + resolved.Source
+				if resolved.Identity != "" {
+					detail += "（" + resolved.Identity + "）"
+				}
 			}
 		case instances.ChannelGitea:
 			detail += fmt.Sprintf("；reviewer=%s merger=%s；%d 个仓库", entry.Reviewer, entry.Merger, len(entry.Repos))
@@ -242,7 +251,7 @@ func validateConfigFile(path string, file *instances.File) []validateFinding {
 				detail + "；enabled=false：保留定义但不启动"})
 			continue
 		}
-		findings = append(findings, validateFinding{"OK", label, detail + "；凭据已写入"})
+		findings = append(findings, validateFinding{"OK", label, detail})
 	}
 
 	// runtimes 运行时
@@ -270,7 +279,7 @@ func validateConfigFile(path string, file *instances.File) []validateFinding {
 	}
 
 	findings = append(findings, validateProviderDirectory(path)...)
-	return append(findings, validateCredentials(path, file)...)
+	return append(findings, validateCredentials(credentialStore, credentialErr, giteaChannels)...)
 }
 
 // giteaChannelsOf 返回通道池里的 gitea 通道（监控面来源）。
@@ -311,18 +320,12 @@ func validateProviderDirectory(configPath string) []validateFinding {
 
 // validateCredentials 检查每个 gitea 通道站点的登录身份与用途令牌（只看有无，
 // 不打印令牌）。
-func validateCredentials(configPath string, file *instances.File) []validateFinding {
-	giteaChannels := giteaChannelsOf(file)
+func validateCredentials(store *credentials.File, loadErr error, giteaChannels []instances.Channel) []validateFinding {
 	if len(giteaChannels) == 0 {
 		return nil
 	}
-	path, err := credentials.Path()
-	if err != nil {
-		return []validateFinding{{"ERROR", "credentials.json", err.Error()}}
-	}
-	store, err := credentials.Load(path)
-	if err != nil {
-		return []validateFinding{{"ERROR", "credentials.json", "解析失败：" + err.Error()}}
+	if loadErr != nil {
+		return []validateFinding{{"ERROR", "credentials.json", "读取失败：" + loadErr.Error()}}
 	}
 	findings := make([]validateFinding, 0, len(giteaChannels))
 	for _, channel := range giteaChannels {

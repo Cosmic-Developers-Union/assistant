@@ -336,6 +336,12 @@ func startDaemonServices(
 	for _, key := range runtime.Channels {
 		referenced[key] = true
 	}
+	credentialStore, err := loadCredentialStoreQuietly()
+	if err != nil {
+		// 读不到凭据库不该让整个 runtime 起不来：缺凭据的通道各自报缺，其余
+		// 通道照常服务。真正要命的是配置写错，不是凭据库暂时不可读。
+		logf("⚠ 读取凭据库失败（%v）：对话通道将回退到 config.json 内联凭据", err)
+	}
 	started := 0
 	for index := range file.Channels {
 		entry := file.Channels[index]
@@ -350,8 +356,11 @@ func startDaemonServices(
 			logf("通道 %s 已停用（enabled=false）", entry.Key())
 			continue
 		}
-		if err := startChannelEntry(command, entry, options, chat, logf); err != nil {
-			return err
+		// 单条通道起不来（缺凭据、端点写错）不该拖垮其余通道与调度引擎：
+		// 响亮记下来并跳过这条，让操作者能一眼看到是哪一条、为什么。
+		if err := startChannelEntry(command, entry, options, chat, credentialStore, logf); err != nil {
+			logf("⚠ 通道 %s 未启动：%v", entry.Key(), err)
+			continue
 		}
 		started++
 	}
@@ -384,6 +393,14 @@ func logRuntimeSummary(
 
 	configDir := filepath.Dir(resolvedPath)
 	gitea := runtimeGiteaChannels(file, runtime)
+	referenced := runtimeChannelFilter(runtime)
+	chatChannels := 0
+	for _, channel := range file.Channels {
+		if channel.Type != instances.ChannelGitea && channel.IsEnabled() &&
+			(len(runtime.Channels) == 0 || referenced[channel.Key()]) {
+			chatChannels++
+		}
+	}
 	logf("读写清单（写入落点可用 runtimes.<名> 的路径字段调整；off 项本运行关闭）：")
 	logf("  读 config.json = %s", resolvedPath)
 	dotEnv := filepath.Join(configDir, ".env")
@@ -392,12 +409,14 @@ func logRuntimeSummary(
 	} else {
 		logf("  读 .env = 未找到（凭据引用 $VAR 用进程环境解析）")
 	}
-	if len(gitea) > 0 {
+	// 通道密钥（weixin/qq/telegram 按通道键）与 gitea 用途令牌都落在凭据库：
+	// 只要 runtime 引用了任何一条通道，这次启动就会读它。
+	if len(gitea) > 0 || chatChannels > 0 {
 		credentialsPath, err := credentials.Path()
 		if err != nil {
 			credentialsPath = "credentials.json"
 		}
-		logf("  读 credentials.json = %s（gitea 通道令牌兜底，只读；平台标准配置目录）", credentialsPath)
+		logf("  读 credentials.json = %s（对话通道密钥 + gitea 通道令牌兜底，只读；平台标准配置目录）", credentialsPath)
 		// 旧版本（28ca459 前）把凭据放在 config.json 同目录：发现旧落点就提示
 		// 迁移，不自动搬——凭据位置的变化必须让操作者看见。
 		if legacy := filepath.Join(configDir, "credentials.json"); legacy != credentialsPath {
@@ -439,10 +458,7 @@ func logRuntimeSummary(
 // runtimeGiteaChannels 返回 runtime 引用的 gitea 通道（按 runtime.Channels 过滤；
 // 未引用任何时回退空——纯聊天 runtime 不产生调度写入）。
 func runtimeGiteaChannels(file *instances.File, runtime instances.Runtime) []instances.Channel {
-	referenced := map[string]bool{}
-	for _, key := range runtime.Channels {
-		referenced[key] = true
-	}
+	referenced := runtimeChannelFilter(runtime)
 	var channels []instances.Channel
 	for _, channel := range file.Channels {
 		if channel.Type != instances.ChannelGitea {
@@ -454,6 +470,16 @@ func runtimeGiteaChannels(file *instances.File, runtime instances.Runtime) []ins
 		channels = append(channels, channel)
 	}
 	return channels
+}
+
+// runtimeChannelFilter 返回本次 runtime 会启动的通道键集合。runtime.Channels
+// 为空表示「channels 池里全部启用的都起」，所以空引用集不能当成「一条都不起」。
+func runtimeChannelFilter(runtime instances.Runtime) map[string]bool {
+	referenced := map[string]bool{}
+	for _, key := range runtime.Channels {
+		referenced[key] = true
+	}
+	return referenced
 }
 
 // migrateRuntimeDir 把旧运行目录整体搬到 runtime 树下：同盘 rename 一次性迁移，
@@ -484,38 +510,36 @@ func migrateRuntimeDir(oldDir, newDir string, logf func(string, ...any)) string 
 }
 
 // startChannelEntry 启动 channels 列表里的一条通道实例（runtime 引用即启动）。
+// store 是本次启动共用的凭据库：通道密钥缺省在里面，按通道键取。
 func startChannelEntry(
 	command *cobra.Command,
 	entry instances.Channel,
 	options *dispatcherOptions,
 	chat *daemon.Chat,
+	store *credentials.File,
 	logf func(string, ...any),
 ) error {
 	key := entry.Key()
-	if entry.Type == instances.ChannelQQ {
-		appID, err := expandQQAppID(entry)
-		if err != nil {
-			return fmt.Errorf("通道 %s 启动失败：%w", key, err)
-		}
-		entry.AppID = appID
-	}
 	// 密钥的 $VAR/${VAR} 引用在消费点展开（File 里的原始定义不动）；未定义
-	// 变量在这里拦下，不让字面量发往平台。
-	if secretField, secretValue := entry.SecretField(); secretField != "" {
-		expanded, err := envref.Expand(secretValue, envref.Options{
-			Field: fmt.Sprintf("channels[%s].%s", key, secretField),
+	// 变量在这里拦下，不让字面量发往平台。config.json 没写就按通道键回退凭据库。
+	resolved, err := resolveChannelSecret(entry, store)
+	if err != nil {
+		return fmt.Errorf("通道 %s 启动失败：%w", key, err)
+	}
+	if entry.Type == instances.ChannelGitea {
+		// gitea 通道不走对话桥，令牌由调度引擎按用途解析；这里只展开 $VAR
+		expanded, err := envref.Expand(entry.Token, envref.Options{
+			Field: fmt.Sprintf("channels[%s].token", key),
 		})
 		if err != nil {
 			return fmt.Errorf("通道 %s 启动失败：%w", key, err)
 		}
-		switch secretField {
-		case "app_secret":
-			entry.AppSecret = expanded
-		case "bot_token":
-			entry.BotToken = expanded
-		case "token":
-			entry.Token = expanded
+		entry.Token = expanded
+	} else {
+		if !resolved.complete() {
+			return missingChannelSecret(entry)
 		}
+		entry = applyResolvedChannel(entry, resolved)
 	}
 	switch entry.Type {
 	case instances.ChannelWeixin:

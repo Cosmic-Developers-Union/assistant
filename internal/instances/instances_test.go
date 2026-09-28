@@ -493,8 +493,6 @@ func TestLoadAgentsAndLegacyMigration(t *testing.T) {
 	rejects := map[string]string{
 		"unknown default_agent":  `{"agents": {"ops": {}}, "default_agent": "nope", "instances": []}`,
 		"unknown agent provider": `{"agents": {"ops": {"provider": "nope"}}, "instances": []}`,
-		"qq channel no secret":   `{"channels": [{"type": "qq", "app_id": "1"}]}`,
-		"qq channel no appid":    `{"channels": [{"type": "qq", "app_secret": "s"}]}`,
 		"qq negative split":      `{"channels": [{"type": "qq", "app_id": "1", "app_secret": "s", "split_limit": -5}]}`,
 	}
 	for name, bad := range rejects {
@@ -552,9 +550,6 @@ func TestLoadChannels(t *testing.T) {
 
 	rejects := map[string]string{
 		"bad type":          `{"channels": [{"type": "slack", "bot_token": "x"}]}`,
-		"weixin no token":   `{"channels": [{"type": "weixin"}]}`,
-		"qq no secret":      `{"channels": [{"type": "qq", "app_id": "1"}]}`,
-		"tg no token":       `{"channels": [{"type": "telegram"}]}`,
 		"dup key":           `{"channels": [{"type": "weixin", "bot_token": "a"}, {"type": "weixin", "bot_token": "b"}]}`,
 		"name with slash":   `{"channels": [{"type": "weixin", "name": "a/b", "bot_token": "t"}]}`,
 		"unknown agent ref": `{"channels": [{"type": "weixin", "bot_token": "t", "agent": "nope"}]}`,
@@ -567,6 +562,35 @@ func TestLoadChannels(t *testing.T) {
 			}
 			if _, err := Load(badPath); err == nil {
 				t.Errorf("Load 应拒绝：%s", bad)
+			}
+		})
+	}
+}
+
+// 通道密钥缺省在凭据库（credentials.json，按通道键索引），Channel 校验拿不到凭据
+// 库——所以「没有内联密钥」必须仍是一份合法配置：`assistant login add --type weixin`
+// 自己写出来的配置就是这个样子，它不该反过来说自己非法。缺密钥的报错留给真正要
+// 启动这条通道的地方（assistant validate / daemon），那里能顺带报出补凭据的命令。
+func TestChannelsWithoutInlineSecretAreValidConfig(t *testing.T) {
+	for name, content := range map[string]string{
+		"weixin":   `{"channels": [{"type": "weixin", "name": "work", "admin_users": ["wx-1"]}]}`,
+		"qq":       `{"channels": [{"type": "qq", "name": "support", "admin_users": ["openid"]}]}`,
+		"telegram": `{"channels": [{"type": "telegram", "admin_users": ["123"]}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			file, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load 应通过（密钥在凭据库）: %v", err)
+			}
+			if err := file.Validate(); err != nil {
+				t.Fatalf("Validate 应通过（密钥在凭据库）: %v", err)
+			}
+			if len(file.Channels) != 1 {
+				t.Fatalf("channels = %+v, want 1 条", file.Channels)
 			}
 		})
 	}

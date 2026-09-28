@@ -122,7 +122,9 @@ type Channel struct {
 	// —— weixin（openclaw ilink）——
 	// BaseURL 是 ilink API 根地址（缺省官方地址）
 	BaseURL string `json:"base_url,omitempty"`
-	// BotToken 是凭据：weixin 为扫码登录的 Bot token；telegram 为 BotFather 发放的 token
+	// BotToken 是内联凭据：weixin 为扫码登录的 Bot token；telegram 为 BotFather
+	// 发放的 token。留空即由运行时按通道键到凭据库取（内联优先）。支持
+	// ${VAR}/$VAR 环境变量引用；令牌不该写进这个用户手写的文件。
 	BotToken string `json:"bot_token,omitempty"`
 	// LoginUserID / BotID 是 weixin 扫码登录返回的身份信息（诊断用）
 	LoginUserID string `json:"login_user_id,omitempty"`
@@ -135,6 +137,8 @@ type Channel struct {
 	RouteTag string `json:"route_tag,omitempty"`
 
 	// —— qq（开放平台 Bot API v2）——
+	// AppID 是机器人的 AppID（非密钥，诊断用；凭据库里 app_secret 的 user 维
+	// 度就是它）。AppSecret 是密钥：留空即由运行时按通道键到凭据库取。
 	AppID     string `json:"app_id,omitempty"`
 	AppSecret string `json:"app_secret,omitempty"`
 
@@ -247,20 +251,16 @@ func (c *Channel) Normalize() {
 }
 
 // Validate 校验通道实例（必须在 Normalize 之后调用）。
+//
+// 这里不要求对话通道的密钥：密钥缺省放在凭据库（credentials.json，按通道键索引，
+// 见 internal/credentials），Channel 拿不到凭据库，把「密钥在库里」判成配置错误
+// 会让 `login add` 自己写出的配置反过来说它非法。内联的 bot_token/app_secret 仍然
+// 合法（可能带 $VAR 引用），解析优先级内联 > 凭据库。缺密钥的报错留给真正要用它
+// 的地方——`assistant validate` 与 daemon 启动通道时——那两处有补凭据的指引。
 func (c Channel) Validate() error {
 	switch c.Type {
-	case ChannelWeixin:
-		if strings.TrimSpace(c.BotToken) == "" {
-			return fmt.Errorf("type=weixin 需要 bot_token（assistant weixin login 获取；多账号用 --name 写入 channels）")
-		}
-	case ChannelQQ:
-		if c.AppID == "" || c.AppSecret == "" {
-			return fmt.Errorf("type=qq 需要 app_id 与 app_secret（q.qq.com 开放平台）")
-		}
-	case ChannelTelegram:
-		if strings.TrimSpace(c.BotToken) == "" {
-			return fmt.Errorf("type=telegram 需要 bot_token（@BotFather 发放）")
-		}
+	case ChannelWeixin, ChannelQQ, ChannelTelegram:
+		// 无内联要求：密钥在凭据库，或运行时才展开 $VAR
 	case ChannelGitea:
 		if c.Host == "" {
 			return fmt.Errorf("type=gitea 需要 host（Gitea 站点根地址）")
@@ -586,7 +586,7 @@ func Parse(path string) (*File, error) {
 	if err := json.Unmarshal(data, &legacy); err == nil {
 		if legacy.Weixin != nil {
 			return nil, fmt.Errorf("配置 %s 使用了已删除的顶层 weixin 节：改为 channels 列表条目 "+
-				`{"type":"weixin","bot_token":"...","admin_users":[...]}（assistant weixin login 会直接写入）`, path)
+				`{"type":"weixin","bot_token":"...","admin_users":[...]}（assistant login add --type weixin 会写入）`, path)
 		}
 		if legacy.QQ != nil {
 			return nil, fmt.Errorf("配置 %s 使用了已删除的顶层 qq 节：改为 channels 列表条目 "+

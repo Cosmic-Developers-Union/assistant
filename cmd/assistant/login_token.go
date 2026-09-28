@@ -77,10 +77,19 @@ func prefixedUsers(users []string) []string {
 
 // resolveTokenPurpose 解析 show/refresh 的 purpose 位置参数：缺省 mcp，未登记的
 // purpose 立即报错（凭据库只认已登记用途）。
+//
+// 只认 Gitea 用途，不认对话通道用途：这里面的动作全是站点侧的（校验令牌身份、
+// 到 Gitea Applications 页删除旧令牌再重建），拿一个 Telegram bot token 去跑会
+// 对着不存在的站点发请求，还报「请检查 Gitea Applications 页面」。通道密钥由
+// `assistant login add --type <平台>` 负责登记与轮换。
 func resolveTokenPurpose(args []string) (string, error) {
 	purpose := credentials.PurposeMCP
 	if len(args) == 2 {
 		purpose = strings.TrimSpace(args[1])
+	}
+	if credentials.ChannelPurpose(purpose) {
+		return "", fmt.Errorf("%q 是对话通道用途，没有站点侧用途令牌：运行 assistant login add --type %s",
+			purpose, purpose)
 	}
 	if !credentials.KnownPurpose(purpose) {
 		return "", fmt.Errorf("未知用途 %q（支持 %s）", purpose, strings.Join(credentials.Purposes(), "、"))

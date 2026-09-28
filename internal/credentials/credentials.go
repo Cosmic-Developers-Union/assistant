@@ -11,6 +11,11 @@
 //
 // 与 config.json 的分工：config.json 描述「管理哪些实例与仓库」，凭据只描述「以谁
 // 的身份、用哪条令牌访问」。凭据独立成文件（0600），便于轮换、审计与按账号隔离。
+//
+// 用途令牌之外，凭据库还收对话通道的密钥（weixin bot_token、qq app_secret、
+// telegram bot_token）。它们的 host 是**通道键**（weixin、weixin/work、qq/support）
+// 而非站点地址，取值与 instances.Channel.Type 同一套，因此按 (通道键, 平台用途)
+// 唯一。config.json 里的通道条目不写密钥，运行时按通道键回退到这里取。
 package credentials
 
 import (
@@ -18,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -31,6 +37,15 @@ const (
 	PurposeAdmin  = "admin"
 	PurposeReview = "review"
 	PurposeMerge  = "merge"
+)
+
+// 对话通道用途：取值与 instances.Channel.Type 同一套（weixin | qq | telegram），
+// host 存通道键而不是站点地址。这些凭据由平台自己签发（扫码 / 开放平台 /
+// BotFather），没有 Gitea 的权限集与站点侧令牌名概念。
+const (
+	PurposeWeixin   = "weixin"
+	PurposeQQ       = "qq"
+	PurposeTelegram = "telegram"
 )
 
 // MCPScopes 返回登录派生的 MCP 个人令牌权限集：仓库/Issue 读写 + 读取自身账号
@@ -70,8 +85,12 @@ func DefaultScopes(purpose string) ([]string, error) {
 		return AdminScopes(), nil
 	case PurposeReview, PurposeMerge:
 		return BotScopes(), nil
+	case PurposeWeixin, PurposeQQ, PurposeTelegram:
+		// 对话通道的密钥由平台自己签发与吊销，没有 Gitea 权限集可言。显式返回空
+		// 而不是落到 default：落下去会把一条 Gitea 语境的报错带进 Telegram 流程。
+		return nil, nil
 	default:
-		return nil, fmt.Errorf("未知用途 %q 没有缺省权限集（支持 %s）", purpose, strings.Join(Purposes(), "、"))
+		return nil, fmt.Errorf("未知用途 %q 没有缺省权限集（支持 %s）", purpose, strings.Join(AllPurposes(), "、"))
 	}
 }
 
@@ -274,19 +293,34 @@ func (f *File) Validate() error {
 	return nil
 }
 
-// Purposes 返回已知用途（诊断/错误信息用）。
+// Purposes 返回 Gitea 用途令牌清单（诊断/错误信息用）。刻意不含对话通道用途：
+// 那几条不是站点令牌，混进来会让「站点缺 mcp 令牌」之类的诊断多出无关项。
 func Purposes() []string {
 	return []string{PurposeMCP, PurposeAdmin, PurposeReview, PurposeMerge}
 }
 
-// KnownPurpose 判断 purpose 是否已登记。
+// ChannelPurposes 返回对话通道用途清单，取值与 channels[].type 同一套。
+func ChannelPurposes() []string {
+	return []string{PurposeWeixin, PurposeQQ, PurposeTelegram}
+}
+
+// AllPurposes 返回凭据库里全部已登记用途（Gitea + 对话通道）。凭据库自身的校验
+// 与「这个 purpose 认不认识」的判断用它——用 Purposes() 会让对话通道凭据被判非法。
+func AllPurposes() []string {
+	return append(Purposes(), ChannelPurposes()...)
+}
+
+// KnownPurpose 判断 purpose 是否已登记（Gitea 用途或对话通道用途）。
 func KnownPurpose(purpose string) bool {
-	for _, known := range Purposes() {
-		if purpose == known {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(AllPurposes(), purpose)
+}
+
+// ChannelPurpose 判断 purpose 是否是对话通道用途：这类凭据的 host 是通道键，
+// user 只是诊断身份（bot/app），没有站点、账号与权限集语义。RemoveUser 之类的
+// 按账号清理的接口必须绕开它们，否则 `login remove telegram` 会把通道密钥当成
+// 某站点下的账号凭据一起删掉，而 config.json 里的通道条目还留着。
+func ChannelPurpose(purpose string) bool {
+	return slices.Contains(ChannelPurposes(), purpose)
 }
 
 // NormalizeHost 统一站点比较口径：去尾斜杠、转小写。
@@ -341,6 +375,58 @@ func (f *File) SetCredential(credential Credential) {
 		}
 	}
 	f.Credentials = append(f.Credentials, credential)
+}
+
+// SetChannelCredential 按（通道键, 平台用途）整条替换一条对话通道凭据。
+//
+// 刻意不走 SetCredential：它按 (host, user, purpose) 去重，而通道凭据的 user 是
+// bot/app 身份，重新登录时可能变（换微信号、换 QQ 机器人、换 Telegram bot）。
+// 按整三元组写入会留下一条查不到人的旧行，还会让 ChannelCredentialFor 的
+// 「同键多身份」分支炸掉——而通道解析点拿不到 user，根本无从消歧。
+func (f *File) SetChannelCredential(credential Credential) {
+	host, purpose := NormalizeHost(credential.Host), strings.TrimSpace(credential.Purpose)
+	kept := f.Credentials[:0]
+	for _, existing := range f.Credentials {
+		if NormalizeHost(existing.Host) == host && strings.TrimSpace(existing.Purpose) == purpose {
+			continue
+		}
+		kept = append(kept, existing)
+	}
+	f.Credentials = kept
+	f.SetCredential(credential)
+}
+
+// ChannelCredentialFor 返回通道键某平台用途的密钥。通道凭据的 user 只是诊断身份，
+// 调用方（daemon 启动、login list）只有 config.json 里的通道条目，给不出 user，
+// 所以这里不要求指定账号：同键多行按上面的写入约定本不该出现，真出现了就把行数
+// 与各自身份报出来叫人处理，而不是像 CredentialFor 那样让人「指定账号」——通道
+// 解析点没有账号可选。
+func (f *File) ChannelCredentialFor(channelKey, purpose string) (Credential, bool, error) {
+	if f == nil {
+		return Credential{}, false, nil
+	}
+	host := NormalizeHost(channelKey)
+	var matches []Credential
+	for _, credential := range f.Credentials {
+		if NormalizeHost(credential.Host) == host && strings.TrimSpace(credential.Purpose) == purpose {
+			matches = append(matches, credential)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return Credential{}, false, nil
+	case 1:
+		return matches[0], true, nil
+	default:
+		identities := make([]string, 0, len(matches))
+		for _, match := range matches {
+			identities = append(identities, orNone(match.User))
+		}
+		sort.Strings(identities)
+		return Credential{}, false, fmt.Errorf(
+			"通道 %s 有 %d 条 %s 凭据（%s）：用 assistant login add --type %s 重新登录以覆盖",
+			channelKey, len(matches), purpose, strings.Join(identities, "、"), purpose)
+	}
 }
 
 // CredentialForUser 返回指定账号某用途的令牌。
@@ -399,6 +485,8 @@ func (f *File) CredentialForIdentity(host, purpose string) (Credential, bool, er
 }
 
 // RemoveUser 删除某账号在该站点的全部凭据（不动远端令牌；只清本地记录）。
+// 对话通道凭据不在范围内：它们的 host 是通道键、user 是 bot 名，删掉之后
+// config.json 里的通道条目会变成一条永远起不来的悬空配置。
 func (f *File) RemoveUser(host, user string) int {
 	if f == nil {
 		return 0
@@ -407,6 +495,10 @@ func (f *File) RemoveUser(host, user string) int {
 	kept := f.Credentials[:0]
 	removed := 0
 	for _, credential := range f.Credentials {
+		if ChannelPurpose(credential.Purpose) {
+			kept = append(kept, credential)
+			continue
+		}
 		if NormalizeHost(credential.Host) == host && credential.User == user {
 			removed++
 			continue
@@ -425,8 +517,10 @@ func (f *File) RemoveUser(host, user string) int {
 	return removed
 }
 
-// Hosts 返回凭据库里出现过的站点（规范化、排序、去重）：身份与用途令牌的并集。
-// 「这台机器登录过哪些站点」是 host 兜底解析的事实来源。
+// Hosts 返回凭据库里出现过的 Gitea 站点（规范化、排序、去重）：身份与用途令牌
+// 的并集。「这台机器登录过哪些站点」是 host 兜底解析的事实来源。跳过对话通道
+// 凭据——它们的 host 是通道键（weixin/work），不是站点，混进来会让 MCP 与
+// `login list` 把通道键当站点列出来。
 func (f *File) Hosts() []string {
 	if f == nil {
 		return nil
@@ -444,6 +538,9 @@ func (f *File) Hosts() []string {
 		add(identity.Host)
 	}
 	for _, credential := range f.Credentials {
+		if ChannelPurpose(credential.Purpose) {
+			continue
+		}
 		add(credential.Host)
 	}
 	sort.Strings(hosts)
@@ -470,6 +567,9 @@ func (f *File) Users(host string) []string {
 		}
 	}
 	for _, credential := range f.Credentials {
+		if ChannelPurpose(credential.Purpose) {
+			continue
+		}
 		if NormalizeHost(credential.Host) == host {
 			add(credential.User)
 		}
@@ -478,9 +578,14 @@ func (f *File) Users(host string) []string {
 	return users
 }
 
-// TokenName 由 (host, user, purpose) 确定性派生令牌名：同名即同一用途令牌，重登
-// 复用而不是堆积。user 参与命名，保证多账号同站点互不覆盖。
+// TokenName 由 (host, user, purpose) 确定性派生**Gitea 站点侧**令牌名：同名即同一
+// 用途令牌，重登复用而不是堆积。user 参与命名，保证多账号同站点互不覆盖。
+// 对话通道用途在这里显式拒绝：它派生的名字会被 HostSlug 截断到主机名
+// （weixin/work 与 weixin/personal 会得到同一个名），而通道密钥根本不存在于站点侧。
 func TokenName(host, user, purpose string) (string, error) {
+	if ChannelPurpose(purpose) {
+		return "", fmt.Errorf("通道用途 %q 没有站点侧令牌名（令牌名只属于 Gitea 用途令牌）", purpose)
+	}
 	slug, err := instances.HostSlug(NormalizeHost(host))
 	if err != nil {
 		return "", err
@@ -499,6 +604,15 @@ func LastEight(token string) string {
 		return token
 	}
 	return token[len(token)-8:]
+}
+
+// orNone 是诊断身份为空时的占位：通道凭据的 user 是 bot/app 名，理论上总有，
+// 但平台接口不保证（例如未设 username 的 Telegram bot），报错时不能印出空串。
+func orNone(user string) string {
+	if user = strings.TrimSpace(user); user == "" {
+		return "（未记录）"
+	}
+	return user
 }
 
 func credentialKey(credential Credential) string {

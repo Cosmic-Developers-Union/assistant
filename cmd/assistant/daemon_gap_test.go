@@ -12,6 +12,7 @@ import (
 
 	builtinagents "github.com/Cosmic-Developers-Union/assistant/internal/agents"
 	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
+	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
 	"github.com/Cosmic-Developers-Union/assistant/internal/daemon"
 	"github.com/Cosmic-Developers-Union/assistant/internal/envref"
 	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
@@ -659,14 +660,14 @@ func TestStartChannelEntryDispatchContract(t *testing.T) {
 			Type: instances.ChannelTelegram, Name: "alerts",
 			BotToken: "123:abc", AdminUsers: []string{"alice"},
 		}
-		if err := startChannelEntry(command, entry, options, nil, logf); err != nil {
+		if err := startChannelEntry(command, entry, options, nil, &credentials.File{}, logf); err != nil {
 			t.Fatalf("对话桥分派不应报错：%v", err)
 		}
 	})
 
 	t.Run("gitea 通道不得走对话桥", func(t *testing.T) {
 		entry := instances.Channel{Type: instances.ChannelGitea, Host: "https://git.example.com"}
-		err := startChannelEntry(command, entry, options, nil, logf)
+		err := startChannelEntry(command, entry, options, nil, &credentials.File{}, logf)
 		if err == nil {
 			t.Fatal("gitea 通道应由调度引擎接管，startChannelEntry 必须报错")
 		}
@@ -677,7 +678,7 @@ func TestStartChannelEntryDispatchContract(t *testing.T) {
 
 	t.Run("未知平台类型点名类型", func(t *testing.T) {
 		entry := instances.Channel{Type: "slack"}
-		err := startChannelEntry(command, entry, options, nil, logf)
+		err := startChannelEntry(command, entry, options, nil, &credentials.File{}, logf)
 		if err == nil {
 			t.Fatal("未知平台类型必须报错，不能静默忽略")
 		}

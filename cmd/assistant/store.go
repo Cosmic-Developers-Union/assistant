@@ -34,6 +34,23 @@ func tokenForPurpose(configPath, host, purpose string) (credentials.Credential, 
 	return credential, nil
 }
 
+// loadCredentialStoreQuietly 读凭据库，失败时返回空库而不是错误。
+//
+// 给「要继续往下走、把问题报给用户」的调用点用：daemon 逐条启动通道时，一条通道
+// 缺凭据不该让整个 runtime 起不来。解析结果对每个通道各自报（缺凭据 / 同键多
+// 身份），空库会自然地落到「回退 config.json 内联」上。
+func loadCredentialStoreQuietly() (*credentials.File, error) {
+	path, err := credentials.Path()
+	if err != nil {
+		return &credentials.File{}, err
+	}
+	store, err := credentials.Load(path)
+	if err != nil {
+		return &credentials.File{}, err
+	}
+	return store, nil
+}
+
 // missingTokenHint 给出补凭据的具体命令。
 func missingTokenHint(host, purpose string) string {
 	switch purpose {

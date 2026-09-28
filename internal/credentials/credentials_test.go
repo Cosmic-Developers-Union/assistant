@@ -676,3 +676,126 @@ func TestPathErrorsWithoutConfigDirectory(t *testing.T) {
 		t.Fatalf("Path = %q err = %v, want 报错", path, err)
 	}
 }
+
+// 对话通道凭据：host 是通道键、purpose 是平台类型，没有 Gitea 的站点/账号/权限集
+// 语义。这组用例钉的是它与 Gitea 用途令牌共存时的隔离边界。
+func TestChannelCredentials(t *testing.T) {
+	t.Run("purpose 登记但不混入 Gitea 用途清单", func(t *testing.T) {
+		if want := []string{PurposeWeixin, PurposeQQ, PurposeTelegram}; !slices.Equal(ChannelPurposes(), want) {
+			t.Fatalf("ChannelPurposes = %v, want %v", ChannelPurposes(), want)
+		}
+		for _, purpose := range ChannelPurposes() {
+			if !KnownPurpose(purpose) {
+				t.Errorf("KnownPurpose(%q) = false，凭据库应认得对话通道用途", purpose)
+			}
+			if !ChannelPurpose(purpose) {
+				t.Errorf("ChannelPurpose(%q) = false", purpose)
+			}
+			if slices.Contains(Purposes(), purpose) {
+				t.Errorf("通道用途 %q 混进了 Gitea 用途清单", purpose)
+			}
+			// 通道密钥没有 Gitea 权限集；落到 default 会把 Gitea 语境的报错
+			// 带进 Telegram 流程
+			scopes, err := DefaultScopes(purpose)
+			if err != nil || scopes != nil {
+				t.Errorf("DefaultScopes(%q) = %v, %v, want nil, nil", purpose, scopes, err)
+			}
+			// 站点侧令牌名会把通道键截成主机名（weixin/work 与 weixin/personal
+			// 同名），通道密钥本就不在站点侧，必须显式拒绝
+			if _, err := TokenName("weixin/work", "@bot", purpose); err == nil {
+				t.Errorf("TokenName(%q) 应报错", purpose)
+			}
+		}
+		if ChannelPurpose(PurposeMCP) {
+			t.Error("ChannelPurpose(mcp) = true")
+		}
+	})
+
+	t.Run("凭据库校验认得通道凭据", func(t *testing.T) {
+		file := &File{}
+		file.SetChannelCredential(Credential{Host: "telegram", User: "@cosmic_bot", Purpose: PurposeTelegram, Token: "1234:AAF"})
+		if err := file.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+	})
+
+	t.Run("重新登录整条替换，不留旧身份", func(t *testing.T) {
+		// 通道凭据的 user 是 bot 身份，重新登录会变。按 (host,user,purpose)
+		// 去重会留下查不到人的旧行，还会把 ChannelCredentialFor 推进
+		// 「同键多身份」分支——而解析点根本没有账号可选。
+		file := &File{}
+		file.SetChannelCredential(Credential{Host: "telegram/work", User: "@old_bot", Purpose: PurposeTelegram, Token: "old"})
+		file.SetChannelCredential(Credential{Host: "telegram/work", User: "@new_bot", Purpose: PurposeTelegram, Token: "new"})
+		if len(file.Credentials) != 1 {
+			t.Fatalf("凭据 = %+v, want 1 条（旧的应被整条替换）", file.Credentials)
+		}
+		credential, ok, err := file.ChannelCredentialFor("telegram/work", PurposeTelegram)
+		if err != nil || !ok {
+			t.Fatalf("ChannelCredentialFor = %v, %v", ok, err)
+		}
+		if credential.User != "@new_bot" || credential.Token != "new" {
+			t.Errorf("凭据 = %+v, want @new_bot/new", credential)
+		}
+		// 同键不同平台是两条独立的凭据，不该被整条替换吃掉
+		file.SetChannelCredential(Credential{Host: "telegram/work", User: "102000", Purpose: PurposeQQ, Token: "s"})
+		if len(file.Credentials) != 2 {
+			t.Errorf("凭据 = %+v, want 2 条（同键不同平台互不覆盖）", file.Credentials)
+		}
+	})
+
+	t.Run("同键多身份报错并给出重新登录的出路", func(t *testing.T) {
+		// 直写 credentials（绕开整条替换）造出重复行：解析点无法指定账号，
+		// 报错必须说清怎么办，而不是像 CredentialFor 那样让人「指定账号」。
+		file := &File{Credentials: []Credential{
+			{Host: "qq/support", User: "100001", Purpose: PurposeQQ, Token: "a"},
+			{Host: "qq/support", User: "100002", Purpose: PurposeQQ, Token: "b"},
+		}}
+		_, _, err := file.ChannelCredentialFor("qq/support", PurposeQQ)
+		if err == nil || !strings.Contains(err.Error(), "assistant login add --type qq") {
+			t.Fatalf("err = %v, want 含重新登录的指引", err)
+		}
+		if !strings.Contains(err.Error(), "100001") || !strings.Contains(err.Error(), "100002") {
+			t.Errorf("err = %v, want 列出各条身份", err)
+		}
+		// 通道键比大小写宽松，与凭据库其它比较口径一致
+		if _, ok, _ := (&File{Credentials: []Credential{
+			{Host: "Weixin/Work", Purpose: PurposeWeixin, Token: "t"},
+		}}).ChannelCredentialFor("weixin/work", PurposeWeixin); !ok {
+			t.Error("通道键应按大小写不敏感匹配")
+		}
+	})
+
+	t.Run("未登记 / 空库", func(t *testing.T) {
+		if _, ok, err := (&File{}).ChannelCredentialFor("telegram", PurposeTelegram); ok || err != nil {
+			t.Errorf("空库应返回未找到：ok=%v err=%v", ok, err)
+		}
+		var nilFile *File
+		if _, ok, err := nilFile.ChannelCredentialFor("telegram", PurposeTelegram); ok || err != nil {
+			t.Errorf("nil 库应返回未找到：ok=%v err=%v", ok, err)
+		}
+	})
+
+	t.Run("站点口径的接口绕开通道凭据", func(t *testing.T) {
+		// Hosts/Users/RemoveUser 都是「这台机器登录过哪些站点」与「清掉某账号」
+		// 的口径。通道键不是站点、bot 名不是账号；混进去会让 login list 把
+		// `telegram` 当站点列出来，让 `login remove telegram` 删掉通道密钥却
+		// 留下 config.json 里的通道条目（一条永远起不来的悬空配置）。
+		file := &File{}
+		file.SetIdentity(Identity{Host: "https://gitea.example.com", User: "alice"})
+		file.SetCredential(Credential{Host: "https://gitea.example.com", User: "alice", Purpose: PurposeMCP, Token: "m"})
+		file.SetChannelCredential(Credential{Host: "telegram", User: "@cosmic_bot", Purpose: PurposeTelegram, Token: "tg"})
+
+		if hosts := file.Hosts(); !slices.Equal(hosts, []string{"https://gitea.example.com"}) {
+			t.Errorf("Hosts = %v, want 只含 Gitea 站点", hosts)
+		}
+		if users := file.Users("telegram"); users != nil {
+			t.Errorf("Users(telegram) = %v, want nil（通道键不是站点）", users)
+		}
+		if removed := file.RemoveUser("telegram", "@cosmic_bot"); removed != 0 {
+			t.Errorf("RemoveUser 删了 %d 条通道凭据，应为 0", removed)
+		}
+		if _, ok, _ := file.ChannelCredentialFor("telegram", PurposeTelegram); !ok {
+			t.Error("通道凭据不该被 RemoveUser 删除")
+		}
+	})
+}

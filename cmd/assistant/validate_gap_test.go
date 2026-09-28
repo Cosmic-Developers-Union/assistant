@@ -82,10 +82,11 @@ func TestValidateConfigFileReportsDisabledChannel(t *testing.T) {
 // TestValidateConfigFileChannelCredentialProblems 逐平台钉住「缺什么就报什么」：
 // 每种通道的必填字段不同（weixin/telegram 要 bot_token、qq 要 app_id+app_secret），
 // 报错文案里带上获取途径，操作者才知道去哪儿补。这条断言覆盖 validate.go 里
-// 四个 case 分支各自的缺字段出口。
+// 通道凭据的缺失出口：密钥缺省在凭据库（按通道键索引），所以 config.json 里
+// 没写不算配置错误。validate 真正要报的是「两处都没有」以及补凭据的命令。
 //
-// 夹具用 telegram 通道承载 provider 引用：telegram 的必填字段最少（只要
-// bot_token），子测试才能只改被测的那一个通道而不触发无关的加载错误。
+// 夹具用 telegram 通道承载 provider 引用，子测试才能只改被测的那一个通道而
+// 不触发无关的「provider 未被引用」提示。
 func TestValidateConfigFileChannelCredentialProblems(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
@@ -94,10 +95,10 @@ func TestValidateConfigFileChannelCredentialProblems(t *testing.T) {
 		channel map[string]any
 		want    string
 	}{
-		{"weixin 缺 bot_token", map[string]any{"type": "weixin", "name": "wx"}, "缺少 bot_token——assistant weixin login --name wx"},
-		{"qq 缺 app_id", map[string]any{"type": "qq", "name": "q1", "app_secret": "s"}, "缺少 app_id/app_secret——q.qq.com 开放平台"},
-		{"qq 缺 app_secret", map[string]any{"type": "qq", "name": "q2", "app_id": "102"}, "缺少 app_id/app_secret——q.qq.com 开放平台"},
-		{"telegram 缺 bot_token", map[string]any{"type": "telegram", "name": "tg"}, "缺少 bot_token——@BotFather 发放"},
+		{"weixin 缺密钥", map[string]any{"type": "weixin", "name": "wx"}, "通道 weixin/wx 缺凭据"},
+		{"qq 缺 app_id", map[string]any{"type": "qq", "name": "q1", "app_secret": "s"}, "通道 qq/q1 缺 app_id 或 app_secret"},
+		{"qq 缺 app_secret", map[string]any{"type": "qq", "name": "q2", "app_id": "102"}, "通道 qq/q2 缺 app_id 或 app_secret"},
+		{"telegram 缺密钥", map[string]any{"type": "telegram", "name": "tg"}, "通道 telegram/tg 缺凭据"},
 		{"未知 type", map[string]any{"type": "signal", "name": "sig"}, "未知 type（应为 weixin/qq/telegram/gitea）"},
 	}
 	for _, testCase := range cases {
@@ -432,7 +433,7 @@ func TestValidateCredentialsReportsMissingIdentityAndStoreErrors(t *testing.T) {
 		}
 		findings := validateConfigFile(path, mustLoadInstanceFile(t, path))
 		errors := strings.Join(findingsFor(findings, "ERROR"), "\n")
-		if !strings.Contains(errors, "credentials.json — 解析失败") {
+		if !strings.Contains(errors, "credentials.json — 读取失败") {
 			t.Errorf("坏凭据库应报 ERROR：\n%s", errors)
 		}
 	})

@@ -17,8 +17,8 @@ credentials.json（0600）。
     { "type": "gitea", "host": "https://gitea.example.com",
       "reviewer": "ai", "merger": "merge",
       "repos": ["acme/repo", {"name": "acme/b", "dir": "/local/b"}] },
-    { "type": "weixin", "name": "work", "bot_token": "…" },
-    { "type": "telegram", "bot_token": "…", "enabled": false }
+    { "type": "weixin", "name": "work", "admin_users": ["wx-user-id"] },
+    { "type": "telegram", "admin_users": ["123456789"], "enabled": false }
   ],
 
   // ── 运行时：集合 agent + provider + channel ──
