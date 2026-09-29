@@ -12,7 +12,6 @@ import (
 	"testing"
 
 	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
-	"github.com/Cosmic-Developers-Union/assistant/internal/sessionstore"
 )
 
 // 对话会话按配置走 --bare（最小模式），并把自举 MCP 之外的上下文钉死为显式参数。
@@ -283,7 +282,7 @@ func TestChatConversationMappingAndSessionsMCP(t *testing.T) {
 	chat, err := NewChat(ChatConfig{
 		StateDir:   stateDir,
 		SessionDir: sessionDir,
-		Remote:     sessionstore.RemoteConfig{URL: "http://127.0.0.1:1", Token: "tok"},
+		Archive:    archiveForTest(t, sessionDir, stateDir, &capturingBlob{}, nil),
 		Claude:     stub,
 	})
 	if err != nil {

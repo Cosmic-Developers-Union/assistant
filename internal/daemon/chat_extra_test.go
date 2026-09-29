@@ -1,23 +1,54 @@
 package daemon
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Cosmic-Developers-Union/assistant/internal/sessionindex"
 	"github.com/Cosmic-Developers-Union/assistant/internal/sessionstore"
 )
 
-// sessionstoreRemoteForTest 造一份指向测试服务端的记录库连接配置。
-func sessionstoreRemoteForTest(url string) sessionstore.RemoteConfig {
-	return sessionstore.RemoteConfig{URL: url, Token: "tok"}
+// capturingBlob 是内存版归档目标，记录收到上传的会话键；fail 为真时一律失败。
+// 它替真对象存储走归档编排的逻辑测试（MinIO 属真实进程/网络，只进 e2e）。
+type capturingBlob struct {
+	keys []string
+	fail bool
+}
+
+func (b *capturingBlob) Put(_ context.Context, key sessionindex.Key, _ []byte) error {
+	if b.fail {
+		return errors.New("记录库挂了")
+	}
+	b.keys = append(b.keys, key.String())
+	return nil
+}
+
+func (b *capturingBlob) Get(_ context.Context, _ sessionindex.Key) ([]byte, bool, error) {
+	return nil, false, nil
+}
+
+// archiveForTest 造一个归档器：内存 blob + 临时索引 + 给定的采集选项。
+func archiveForTest(t *testing.T, sessionDir, stateDir string, blob *capturingBlob, logf func(string, ...any)) *sessionstore.Archiver {
+	t.Helper()
+	index, err := sessionindex.Open(filepath.Join(t.TempDir(), "index.sqlite3"))
+	if err != nil {
+		t.Fatalf("打开索引失败：%v", err)
+	}
+	t.Cleanup(func() { _ = index.Close() })
+	archive := sessionstore.NewArchiver(sessionstore.CollectOptions{
+		Root:    sessionDir,
+		ChatDir: stateDir,
+	}, blob, index, logf)
+	if archive == nil {
+		t.Fatal("归档器不该为 nil")
+	}
+	return archive
 }
 
 // TestAgentRuntimeFallbacks 钉住 agent 运行时的两条回退链：claude 可执行文件
@@ -189,21 +220,22 @@ func TestChatSessionEnvExplicitConfig(t *testing.T) {
 }
 
 // TestNewChatPromptAnnotationWithRemote 钉住记录库可用时的系统提示词追加：只有
-// Remote.URL 非空才提示模型可以用 sessions MCP 回查历史（没配记录库时说出来只会
-// 让模型调用不存在的工具）。
-func TestNewChatPromptAnnotationWithRemote(t *testing.T) {
-	chat, err := NewChat(ChatConfig{StateDir: t.TempDir(), SessionDir: t.TempDir()})
+// 归档启用才提示模型可以用 sessions MCP 回查历史（没启用时说出来只会让模型调用
+// 不存在的工具）。
+func TestNewChatPromptAnnotationWithArchive(t *testing.T) {
+	sessionDir, stateDir := t.TempDir(), t.TempDir()
+	chat, err := NewChat(ChatConfig{StateDir: stateDir, SessionDir: sessionDir})
 	if err != nil {
 		t.Fatalf("NewChat: %v", err)
 	}
 	if prompt := chat.systemPrompt(AgentRuntime{}); strings.Contains(prompt, "session_search") {
-		t.Errorf("无记录库时不应提示 sessions MCP：%q", prompt)
+		t.Errorf("未启用归档时不应提示 sessions MCP：%q", prompt)
 	}
-	chat.config.Remote.URL = "https://serve.example.com"
+	chat.config.Archive = archiveForTest(t, sessionDir, stateDir, &capturingBlob{}, nil)
 	if prompt := chat.systemPrompt(AgentRuntime{}); !strings.Contains(prompt, "session_search") {
-		t.Errorf("有记录库时应追加回查提示：%q", prompt)
+		t.Errorf("启用归档时应追加回查提示：%q", prompt)
 	}
-	// agent 自带提示词整体替换基础提示，但记录库提示仍要追加
+	// agent 自带提示词整体替换基础提示，但归档提示仍要追加
 	prompt := chat.systemPrompt(AgentRuntime{SystemPrompt: "你是自定义助手"})
 	if !strings.HasPrefix(prompt, "你是自定义助手") || !strings.Contains(prompt, "session_search") {
 		t.Errorf("agent 提示词应替换基础并保留回查提示：%q", prompt)
@@ -242,32 +274,13 @@ func TestNewChatDropsLegacySharedConfig(t *testing.T) {
 	}
 }
 
-// TestPushSessionArchivesToRemote 钉住归档会话的成功路径与三条早退：写完
-// projects/<project>/<session>.jsonl 后 pushSession 必须把该会话推给记录库并记
-// 「已归档会话」日志；找不到记录 / 空 sessionID / 未配置记录库都必须静默早退。
+// TestArchiveSessionOnTurnEnd 钉住每轮结束的归档钩子：写完
+// projects/<project>/<session>.jsonl 后 archiveSession 必须把该会话归档并记
+// 「已归档会话」日志；找不到记录 / 空 sessionID / 未配置归档器都必须静默早退。
 //
-// 注意 Chat.pushSession 里那条「大小未变化就跳过」的早退在**本函数路径上不可达**：
-// 它比对 session.Meta.Bytes，而 sessionstore.SessionFor 不填 Bytes（只有批量采集
-// 的 CollectSession 会填），所以每次都是 0、永远判不出「无变化」。这里如实钉住
-// 这一现状（重复调用会再次推送），不去假装它已被去重——真要去重要么给 SessionFor
-// 补 Bytes，要么改比 session.Meta.UpdatedAt。
-func TestPushSessionArchivesToRemote(t *testing.T) {
-	var bodies []map[string]any
-	var auth string
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.URL.Path != "/api/v1/sessions" {
-			http.NotFound(writer, request)
-			return
-		}
-		auth = request.Header.Get("Authorization")
-		var body map[string]any
-		_ = json.NewDecoder(request.Body).Decode(&body)
-		bodies = append(bodies, body)
-		writer.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(writer).Encode(map[string]any{"stored": 1})
-	}))
-	defer server.Close()
-
+// 防重由归档器按源文件水位负责（见 sessionstore 的测试），这里只钉住 Chat 这一侧
+// 的接线：钩子确实被调用、失败只记日志。
+func TestArchiveSessionOnTurnEnd(t *testing.T) {
 	sessionDir, stateDir := t.TempDir(), t.TempDir()
 	sessionID := "sess-push-1"
 	projectDir := filepath.Join(sessionDir, "projects", "-tmp-workspace")
@@ -279,45 +292,43 @@ func TestPushSessionArchivesToRemote(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	blob := &capturingBlob{}
 	var logs []string
+	logf := func(format string, arguments ...any) { logs = append(logs, fmt.Sprintf(format, arguments...)) }
 	chat, err := NewChat(ChatConfig{
 		StateDir:   stateDir,
 		SessionDir: sessionDir,
-		Remote:     sessionstoreRemoteForTest(server.URL),
-		Log:        func(format string, arguments ...any) { logs = append(logs, fmt.Sprintf(format, arguments...)) },
+		Archive:    archiveForTest(t, sessionDir, stateDir, blob, logf),
+		Log:        logf,
 	})
 	if err != nil {
 		t.Fatalf("NewChat: %v", err)
 	}
-	chat.pushSession(sessionID)
-	if len(bodies) != 1 {
-		t.Fatalf("应推送一次，实际 %d 次", len(bodies))
+	chat.archiveSession(sessionID)
+	if len(blob.keys) != 1 {
+		t.Fatalf("应归档一次，实际 %d 次", len(blob.keys))
 	}
 	if !strings.Contains(strings.Join(logs, "\n"), "已归档会话") {
 		t.Errorf("应有归档日志：%v", logs)
 	}
 
-	// 找不到记录（projects 下没有该会话）时静默返回，不报错也不推送
-	chat.pushSession("sess-不存在")
-	if len(bodies) != 1 {
-		t.Errorf("找不到记录不应推送：%d 次", len(bodies))
+	// 找不到记录（projects 下没有该会话）时静默返回，不报错也不归档
+	chat.archiveSession("sess-不存在")
+	if len(blob.keys) != 1 {
+		t.Errorf("找不到记录不应归档：%d 次", len(blob.keys))
 	}
-	// 空 sessionID 与未配置 Remote 都是早退
-	chat.pushSession("")
-	chat.config.Remote.URL = ""
-	chat.pushSession(sessionID)
-	if len(bodies) != 1 {
-		t.Errorf("未配置记录库不应推送：%d 次", len(bodies))
-	}
-	// 令牌必须随请求带上：记录库靠它鉴权，漏掉会让归档全部 401
-	if auth != "Bearer tok" {
-		t.Errorf("归档请求应带记录库令牌，实际 %q", auth)
+	// 空 sessionID 与未配置归档器都是早退
+	chat.archiveSession("")
+	chat.config.Archive = nil
+	chat.archiveSession(sessionID)
+	if len(blob.keys) != 1 {
+		t.Errorf("未配置归档器不应归档：%d 次", len(blob.keys))
 	}
 }
 
-// TestPushSessionLogsRemoteFailure 钉住推送失败只记日志、不上抛：记录库挂了不能
-// 影响用户拿到回复。用一个必然失败的地址最能验证这条。
-func TestPushSessionLogsRemoteFailure(t *testing.T) {
+// TestArchiveSessionLogsFailure 钉住归档失败只记日志、不上抛：对象存储挂了不能
+// 影响用户拿到回复。
+func TestArchiveSessionLogsFailure(t *testing.T) {
 	sessionDir, stateDir := t.TempDir(), t.TempDir()
 	sessionID := "sess-push-fail"
 	projectDir := filepath.Join(sessionDir, "projects", "-tmp-workspace")
@@ -328,22 +339,19 @@ func TestPushSessionLogsRemoteFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	var logs []string
+	logf2 := func(format string, arguments ...any) { logs = append(logs, fmt.Sprintf(format, arguments...)) }
 	chat, err := NewChat(ChatConfig{
 		StateDir:   stateDir,
 		SessionDir: sessionDir,
-		Remote:     sessionstoreRemoteForTest("http://127.0.0.1:1"),
-		Log:        func(format string, arguments ...any) { logs = append(logs, fmt.Sprintf(format, arguments...)) },
+		Archive:    archiveForTest(t, sessionDir, stateDir, &capturingBlob{fail: true}, logf2),
+		Log:        logf2,
 	})
 	if err != nil {
 		t.Fatalf("NewChat: %v", err)
 	}
-	chat.pushSession(sessionID)
-	joined := strings.Join(logs, "\n")
-	if !strings.Contains(joined, "归档会话失败") {
-		t.Errorf("推送失败应记日志：%v", logs)
-	}
-	if chat.pushed[sessionID] != 0 {
-		t.Errorf("失败不应记录已推送大小：%d", chat.pushed[sessionID])
+	chat.archiveSession(sessionID)
+	if joined := strings.Join(logs, "\n"); !strings.Contains(joined, "归档会话失败") {
+		t.Errorf("归档失败应记日志：%v", logs)
 	}
 }
 

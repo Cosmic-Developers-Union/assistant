@@ -43,9 +43,12 @@
     }
   },
   "sessions": {
-    "remote": {
-      "url": "http://127.0.0.1:8771",
-      "token": "$SESSIONS_TOKEN"
+    "storage": {
+      "endpoint": "127.0.0.1:9000",
+      "bucket": "assistant-sessions",
+      "access_key": "$S3_ACCESS_KEY",
+      "secret_key": "$S3_SECRET_KEY",
+      "secure": false
     }
   },
   "channels": [

@@ -15,37 +15,34 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// 记录库连接解析：config.json 的 sessions 节优先于环境变量与 sidecar，
-// 来源标签随日志输出（记录去向可感知）。
-func TestResolveSessionsRemoteConfigPriority(t *testing.T) {
-	t.Setenv("ASSISTANT_SESSIONS_URL", "http://env.example.com:8771")
-	t.Setenv("ASSISTANT_SESSIONS_TOKEN", "env-token")
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.json")
+// 归档存储解析：config.json 的 sessions.storage 提供 endpoint/bucket，密钥经
+// $VAR/${VAR} 展开；来源标签随日志输出（记录去向可感知）。
+func TestResolveSessionsStorage(t *testing.T) {
+	t.Setenv("S3_ACCESS_KEY", "ak")
+	t.Setenv("S3_SECRET_KEY", "sk")
 	file := &instances.File{
-		Sessions: &instances.SessionsConfig{Remote: &instances.RemoteSessions{
-			URL:   "http://config.example.com:8771",
-			Token: "$SESSIONS_TOKEN",
+		Sessions: &instances.SessionsConfig{Storage: &instances.SessionsStorage{
+			Endpoint:  "minio.example:9000",
+			Bucket:    "assistant-sessions",
+			AccessKey: "$S3_ACCESS_KEY",
+			SecretKey: "${S3_SECRET_KEY}",
+			Prefix:    "sessions",
 		}},
-		Providers: map[string]instances.Provider{"_": {}},
 	}
-	t.Setenv("SESSIONS_TOKEN", "config-token")
-	remote, source := resolveSessionsRemote(file, configPath)
-	if remote.URL != "http://config.example.com:8771" || remote.Token != "config-token" || source != "config" {
-		t.Errorf("config 节应优先：remote=%+v source=%q", remote, source)
+	storage, source := resolveSessionsStorage(file)
+	if storage.Endpoint != "minio.example:9000" || storage.Bucket != "assistant-sessions" ||
+		storage.AccessKey != "ak" || storage.SecretKey != "sk" || storage.Prefix != "sessions" || source != "config" {
+		t.Errorf("storage 解析 = %+v source=%q", storage, source)
 	}
-	// 无 config 节：回落 env
+	// 没有 sessions 节：未配置
 	file.Sessions = nil
-	remote, source = resolveSessionsRemote(file, configPath)
-	if remote.URL != "http://env.example.com:8771" || remote.Token != "env-token" || source != "env/sidecar" {
-		t.Errorf("应回落 env：remote=%+v source=%q", remote, source)
+	if storage, source := resolveSessionsStorage(file); storage.Enabled() || source != "未配置" {
+		t.Errorf("缺 sessions 节应报未配置：%+v source=%q", storage, source)
 	}
-	// 都没有：未配置
-	t.Setenv("ASSISTANT_SESSIONS_URL", "")
-	t.Setenv("ASSISTANT_SESSIONS_TOKEN", "")
-	remote, source = resolveSessionsRemote(file, configPath)
-	if remote.URL != "" || source != "未配置" {
-		t.Errorf("应报告未配置：remote=%+v source=%q", remote, source)
+	// 给了 storage 但不完整（缺 bucket）：未配置
+	file.Sessions = &instances.SessionsConfig{Storage: &instances.SessionsStorage{Endpoint: "minio.example:9000"}}
+	if storage, source := resolveSessionsStorage(file); storage.Enabled() || source != "未配置" {
+		t.Errorf("不完整配置应报未配置：%+v source=%q", storage, source)
 	}
 }
 

@@ -73,9 +73,9 @@ type File struct {
 	// DefaultRuntime 是 `assistant run` 未指定 --runtime 时使用的运行时名；
 	// 只有一个 runtime 时可省。
 	DefaultRuntime string `json:"default_runtime,omitempty"`
-	// Sessions 是对话会话记录配置：remote 定义远端记录库（assistant serve 的
-	// 存储服务端），daemon 每轮对话结束把会话转录增量推送过去。优先级高于
-	// 环境变量与 sidecar 文件（sessions-remote.json/serve.json 保留为兜底）。
+	// Sessions 是会话记录归档配置：storage 定义对象存储（S3 兼容），daemon
+	// 把本地 claude 会话归档上去并建本地检索索引，agent 的 sessions MCP 据此回查。
+	// 整节缺省 = 归档关闭。
 	Sessions *SessionsConfig `json:"sessions,omitempty"`
 
 	// notes 是载入规范化产生的备注（迁移/废弃提示）：cmd 层取走打日志。
@@ -311,19 +311,31 @@ type Agent struct {
 // DefaultQQAPIBaseURL 是 QQ 开放平台机器人 API（v2）的默认地址。
 const DefaultQQAPIBaseURL = "https://api.sgroup.qq.com"
 
-// SessionsConfig 是对话会话记录配置（config.json 的 sessions 节）。
+// SessionsConfig 是会话记录归档配置（config.json 的 sessions 节）。
+//
+// 整节缺省 = 归档关闭：不写对象存储、不建本地索引，agent 的 sessions MCP 返回
+// "未配置"的可读错误。这与 statestore 的"未配置即停用"是同一套约定。
 type SessionsConfig struct {
-	// Remote 是远端记录库（assistant serve 的存储服务端）：URL 必填，
-	// token 支持 $VAR/${VAR} 环境变量引用（未定义启动即报错）。
-	Remote *RemoteSessions `json:"remote,omitempty"`
+	// Storage 是对象存储（S3 兼容：MinIO / OSS / S3）与归档开关：给了就归档。
+	Storage *SessionsStorage `json:"storage,omitempty"`
 }
 
-// RemoteSessions 是远端记录库的连接参数。
-type RemoteSessions struct {
-	// URL 是记录库服务端地址（assistant serve --url 输出的那个）。
-	URL string `json:"url,omitempty"`
-	// Token 是访问令牌；支持 $VAR/${VAR} 引用，令牌不落配置文件。
-	Token string `json:"token,omitempty"`
+// SessionsStorage 是会话记录的对象存储参数。
+type SessionsStorage struct {
+	// Endpoint 是对象存储地址（形如 minio.internal:9000，可带 http(s):// 前缀）。
+	Endpoint string `json:"endpoint"`
+	// Bucket 是桶名；不存在时归档启动会创建空桶。
+	Bucket string `json:"bucket"`
+	// AccessKey / SecretKey 是访问密钥；支持 $VAR/${VAR} 引用，密钥不落配置文件。
+	// 日志只显示前 6 位与后 4 位。
+	AccessKey string `json:"access_key,omitempty"`
+	SecretKey string `json:"secret_key,omitempty"`
+	// Secure 为真时走 HTTPS（Endpoint 带 https:// 前缀时自动为真）。
+	Secure bool `json:"secure,omitempty"`
+	// Region 是区域（S3 需要，MinIO 可留空）。
+	Region string `json:"region,omitempty"`
+	// Prefix 是对象键前缀（桶内目录）；留空表示桶根。
+	Prefix string `json:"prefix,omitempty"`
 }
 
 // Instance 是一台 Gitea 站点及其仓库。
@@ -659,9 +671,14 @@ func (f *File) Normalize() {
 		}
 		f.Agents = normalized
 	}
-	if f.Sessions != nil && f.Sessions.Remote != nil {
-		f.Sessions.Remote.URL = strings.TrimSpace(f.Sessions.Remote.URL)
-		f.Sessions.Remote.Token = strings.TrimSpace(f.Sessions.Remote.Token)
+	if f.Sessions != nil && f.Sessions.Storage != nil {
+		storage := f.Sessions.Storage
+		storage.Endpoint = strings.TrimSpace(storage.Endpoint)
+		storage.Bucket = strings.TrimSpace(storage.Bucket)
+		storage.AccessKey = strings.TrimSpace(storage.AccessKey)
+		storage.SecretKey = strings.TrimSpace(storage.SecretKey)
+		storage.Region = strings.TrimSpace(storage.Region)
+		storage.Prefix = strings.TrimSpace(storage.Prefix)
 	}
 	for index := range f.Instances {
 		f.Instances[index].Normalize()
@@ -896,9 +913,22 @@ func (f *File) validateSecretRefs() error {
 			return err
 		}
 	}
-	if f.Sessions != nil && f.Sessions.Remote != nil && f.Sessions.Remote.Token != "" {
-		if err := envref.Validate(f.Sessions.Remote.Token, envref.Options{Field: "sessions.remote.token"}); err != nil {
-			return err
+	if f.Sessions != nil && f.Sessions.Storage != nil {
+		for _, secret := range []struct {
+			field string
+			value string
+		}{
+			{"access_key", f.Sessions.Storage.AccessKey},
+			{"secret_key", f.Sessions.Storage.SecretKey},
+		} {
+			if secret.value == "" {
+				continue
+			}
+			if err := envref.Validate(secret.value, envref.Options{
+				Field: "sessions.storage." + secret.field,
+			}); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

@@ -70,7 +70,9 @@ tempdir 里也不会失败。**已覆盖**的部分：空/非法内容被 `Valid
 | `cmd/assistant/dispatch.go` | 61 | 装配后回调里需要真实待办/失败注入的分支（状态库故障臂、PR worktree 的 fetch） |
 | `main.go` | 25 | `main()` 全体：signal 接线 + `ExecuteContext` + `os.Exit`，无返回路径 |
 | `config.go` | 16 | `readAPIKey` 的 pty 分支、备份/写盘失败臂 |
-| `serve.go` / `login_identity.go` / `login.go` / `init.go` 等 | 各 12–15 | 注缝之外的 IO 失败臂、真 pty |
+| `login_identity.go` / `login.go` / `init.go` 等 | 各 12–15 | 注缝之外的 IO 失败臂、真 pty |
+| `internal/sessionstore` | ~18 | S3 网络层的少数分歧臂（`NoSuchKey` 的 GET 分支、对象存在但 `ReadAll` 失败、桶已存在时的 `EnsureBucket` 早退）；成功往返与 403/404 已由进程内假 S3 端点覆盖，真 MinIO 见 `test/e2e` |
+| `internal/sessionindex` | ~12 | `rows.Next` 迭代中途失败、注册完毕驱动后不可达的 `sql.Open` 错误臂（同 `internal/statestore`） |
 
 **注意措辞**：这些是「当前注入缝之外」的路径，不是「原则上不可达」。其中两类确有
 可达路径，只是各有代价：

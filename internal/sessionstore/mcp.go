@@ -9,17 +9,17 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Cosmic-Developers-Union/assistant/internal/sessionindex"
 )
 
 // MCPOptions 是会话记录 MCP 的运行参数。
 type MCPOptions struct {
-	// ConfigDir 是 assistant 配置目录：从这里解析服务端地址与令牌
-	// （serve.json / sessions-remote.json，另有环境变量覆盖）
-	ConfigDir string
+	// Index 是本地检索索引（SQLite）；为空时各工具返回"未配置"的可读错误，
+	// 不影响会话其它能力（与 daemon 未启用索引时的行为一致）。
+	Index *sessionindex.Store
 	// Version 是 assistant 版本（initialize 响应里回给客户端）
 	Version string
-	// Client 可显式注入（测试用）；为空时按 ConfigDir 解析
-	Client *Client
 }
 
 type rpcRequest struct {
@@ -42,12 +42,8 @@ type rpcError struct {
 }
 
 // RunMCP 以 stdio 提供会话记录查询工具：agent 在上下文被压缩后，用它回查完整历史。
+// 数据全部来自本地 SQLite 索引，不碰网络——归档（写）与查询（读）在这里是分开的。
 func RunMCP(ctx context.Context, in io.Reader, out io.Writer, options MCPOptions) error {
-	client := options.Client
-	if client == nil {
-		remote := ResolveRemote(options.ConfigDir)
-		client = NewClient(remote.URL, remote.Token)
-	}
 	reader := bufio.NewReaderSize(in, 1<<20)
 	encoder := json.NewEncoder(out)
 	for {
@@ -55,7 +51,7 @@ func RunMCP(ctx context.Context, in io.Reader, out io.Writer, options MCPOptions
 		if len(strings.TrimSpace(string(line))) > 0 {
 			var request rpcRequest
 			if err := json.Unmarshal(line, &request); err == nil {
-				response := handleRPC(ctx, request, client, options.Version)
+				response := handleRPC(request, options.Index, options.Version)
 				if response != nil {
 					if err := encoder.Encode(response); err != nil {
 						return err
@@ -75,7 +71,7 @@ func RunMCP(ctx context.Context, in io.Reader, out io.Writer, options MCPOptions
 	}
 }
 
-func handleRPC(ctx context.Context, request rpcRequest, client *Client, version string) *rpcResponse {
+func handleRPC(request rpcRequest, index *sessionindex.Store, version string) *rpcResponse {
 	reply := func(result any) *rpcResponse {
 		return &rpcResponse{JSONRPC: "2.0", ID: request.ID, Result: result}
 	}
@@ -103,7 +99,7 @@ func handleRPC(ctx context.Context, request rpcRequest, client *Client, version 
 		if err := json.Unmarshal(request.Params, &params); err != nil {
 			return fail("解析 tools/call 参数失败：" + err.Error())
 		}
-		text, err := callTool(ctx, client, params.Name, params.Arguments)
+		text, err := callTool(index, params.Name, params.Arguments)
 		if err != nil {
 			return reply(map[string]any{
 				"content": []any{map[string]any{"type": "text", "text": "查询失败：" + err.Error()}},
@@ -171,7 +167,12 @@ func toolDefinitions() []any {
 	}
 }
 
-func callTool(ctx context.Context, client *Client, name string, raw json.RawMessage) (string, error) {
+// callTool 执行一次工具调用；index 为空表示索引未启用（工具返回可读错误，
+// 而不是让 agent 看到一个空结果里没有数据的假象）。
+func callTool(index *sessionindex.Store, name string, raw json.RawMessage) (string, error) {
+	if index == nil {
+		return "", fmt.Errorf("会话记录索引未启用（检查 config.json 的 sessions 节）")
+	}
 	arguments := map[string]any{}
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &arguments); err != nil {
@@ -184,7 +185,7 @@ func callTool(ctx context.Context, client *Client, name string, raw json.RawMess
 		if query == "" {
 			return "", fmt.Errorf("query 不能为空")
 		}
-		matches, err := client.Search(ctx, query, Filter{
+		hits, err := index.Search(query, Filter{
 			Host:         stringValue(arguments["host"]),
 			Project:      stringValue(arguments["project"]),
 			Conversation: stringValue(arguments["conversation"]),
@@ -193,16 +194,16 @@ func callTool(ctx context.Context, client *Client, name string, raw json.RawMess
 		if err != nil {
 			return "", err
 		}
-		if len(matches) == 0 {
+		if len(hits) == 0 {
 			return "没有命中。", nil
 		}
 		var builder strings.Builder
-		for _, match := range matches {
-			fmt.Fprintf(&builder, "%s 行 %d [%s]%s %s\n", match.Key.String(), match.Message.Line, match.Message.Role, conversationLabel(match.Conversation), snippet(match.Message.Text, 300))
+		for _, hit := range hits {
+			fmt.Fprintf(&builder, "%s 行 %d [%s]%s %s\n", hit.Key.String(), hit.Message.Line, hit.Message.Role, conversationLabel(hit.Conversation), snippet(hit.Message.Text, 300))
 		}
 		return builder.String(), nil
 	case "session_list":
-		metas, err := client.List(ctx, Filter{
+		records, err := index.List(Filter{
 			Host:         stringValue(arguments["host"]),
 			Project:      stringValue(arguments["project"]),
 			Conversation: stringValue(arguments["conversation"]),
@@ -211,20 +212,20 @@ func callTool(ctx context.Context, client *Client, name string, raw json.RawMess
 		if err != nil {
 			return "", err
 		}
-		if len(metas) == 0 {
+		if len(records) == 0 {
 			return "记录库里没有会话。", nil
 		}
 		var builder strings.Builder
-		for _, meta := range metas {
-			fmt.Fprintf(&builder, "%s 来源=%s%s 行=%d 更新=%s\n", meta.Key.String(), meta.Source, conversationLabel(meta.Conversation), meta.Lines, meta.UpdatedAt)
-			if meta.Title != "" {
-				fmt.Fprintf(&builder, "  标题：%s\n", meta.Title)
+		for _, record := range records {
+			fmt.Fprintf(&builder, "%s 来源=%s%s 行=%d 更新=%s\n", record.Key.String(), record.Source, conversationLabel(record.Conversation), record.Lines, record.UpdatedAt)
+			if record.Title != "" {
+				fmt.Fprintf(&builder, "  标题：%s\n", record.Title)
 			}
-			if meta.FirstUserText != "" {
-				fmt.Fprintf(&builder, "  开头：%s\n", snippet(meta.FirstUserText, 160))
+			if record.FirstUserText != "" {
+				fmt.Fprintf(&builder, "  开头：%s\n", snippet(record.FirstUserText, 160))
 			}
-			if meta.LastAssistantText != "" {
-				fmt.Fprintf(&builder, "  结尾：%s\n", snippet(meta.LastAssistantText, 160))
+			if record.LastAssistantText != "" {
+				fmt.Fprintf(&builder, "  结尾：%s\n", snippet(record.LastAssistantText, 160))
 			}
 		}
 		return builder.String(), nil
@@ -234,7 +235,7 @@ func callTool(ctx context.Context, client *Client, name string, raw json.RawMess
 			Project: stringValue(arguments["project"]),
 			Session: stringValue(arguments["session"]),
 		}
-		messages, err := client.Read(ctx, key, intValue(arguments["offset"], 0), intValue(arguments["limit"], 50))
+		messages, err := index.Read(key, intValue(arguments["offset"], 0), intValue(arguments["limit"], 50))
 		if err != nil {
 			return "", err
 		}
@@ -253,7 +254,7 @@ func callTool(ctx context.Context, client *Client, name string, raw json.RawMess
 		}
 		return builder.String(), nil
 	case "conversation_list":
-		counts, err := client.Conversations(ctx)
+		counts, err := index.Conversations()
 		if err != nil {
 			return "", err
 		}

@@ -251,6 +251,20 @@ func (r Runtime) StatePath() string {
 	return filepath.Join(stateDir, "state.sqlite3")
 }
 
+// SessionsIndexPath 返回会话检索索引（SQLite）的路径：与状态库同目录，文件名
+// sessions-index.sqlite3。它是本机派生物——归档时由 daemon 写、查询时由
+// `assistant mcp sessions` 只读，两边必须解析到同一个文件，所以落点不能各自拍脑袋。
+//
+// 状态库关闭（state_file = off）时返回空串：索引与状态库同属"本机 sqlite 派生态"，
+// 关掉状态库的运行形态不期望再落一个 sqlite 文件。
+func (r Runtime) SessionsIndexPath() string {
+	statePath := r.StatePath()
+	if statePath == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(statePath), "sessions-index.sqlite3")
+}
+
 // ListenAddr 返回状态 API 监听地址：api_listen = "off" 返回空串（关闭）；
 // 缺省 DefaultAPIListen。
 func (r Runtime) ListenAddr() string {

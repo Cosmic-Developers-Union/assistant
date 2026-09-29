@@ -34,10 +34,8 @@ assistant 是工具不是常驻应用：配置按 `--config` → `ASSISTANT_CONF
 | `<配置目录>/chat/sessions.json` | 对话会话 → claude 会话 id 映射 | 对话通道 | 跨重启复用同一会话 |
 | `<配置目录>/chat/<chat-8位哈希>/` | 该对话会话的工作目录：`session.json`（元数据）、`settings.json`、`mcp.json`、会话产物 | 对话通道 | 同一会话恒用同一目录 |
 | `<配置目录>/chat/conversations.json` | **会话实体映射表**：通道绑定（weixin:用户…、qq:openid…）→ conversation id、该会话下的 claude 会话与 /agent 选择 | 对话通道 | 换通道/并会话只改这张表 |
-| `<配置目录>/serve.json` | 记录库服务端端点与令牌 | `serve` 启动时写、退出删 | 0600，同机客户端自举 |
-| `<配置目录>/sessions-remote.json` | 远端记录库地址与令牌（服务端在别的机器时手写） | 你 | 0600 |
-| `<配置目录>/session-push.json` | 增量推送状态（大小/修改时间） | `session push` | 可删（会重推一次） |
-| `<数据目录>/sessions/` | **记录库根**：`manifest.json`（身份：格式/版本/布局/宿主机）+ `<host>/<项目>/<会话>.jsonl` + 同名 `.meta.json` | `serve`（收 push） | 可随会话记录一起备份 |
+| `<状态目录>/sessions-index.sqlite3` | **会话检索索引**（元数据 + 消息全文）：`mcp sessions` 只读它；丢了由下一轮归档重建 | `run` 归档时写 | 可丢弃的派生物 |
+| `<对象存储>/<前缀><host>/<项目>/<会话>.jsonl` | **会话记录本体**（原样 jsonl，S3 兼容存储/MinIO） | `run` 归档时写 | 唯一权威记录 |
 | `<配置目录>/daemon.json` | 状态 API 端点与令牌 | `run` 启动时写、退出删 | 0600，`mcp daemon` 靠它自举 |
 | `<数据目录>/repos/<host>/<owner>/<name>/` | 受管克隆（评审数据源） | `run`（每轮 fetch 并强制对齐 `origin/<基线>`） | 可删除重建 |
 | `<数据目录>/state/<host>/<owner>/<name>/logs/` | 每个待办一个会话日志（进度、`[debug]`、结果、验证结论） | 调度器 | 排障第一现场 |
@@ -144,13 +142,15 @@ channels，**大量配置**）加 N 个 runtime（**少量运行**——每个 r
   取。config.json 里手写 `bot_token`/`app_secret` 仍然可用且**优先**（内联 >
   凭据库），适合「密钥由外部系统注入、assistant 只消费」的场景。
 - **凭据不落盘**：凭据字段（`bot_token`/`app_id`/`app_secret`/`token`/`api_key`、
-  `providers.*.env`、`agents.*.mcp.*.env`、`sessions.remote.token`）都支持
+  `providers.*.env`、`agents.*.mcp.*.env`、`sessions.storage.access_key` /
+  `sessions.storage.secret_key`）都支持
   `$VAR` / `${VAR}` / `${VAR:-default}` 环境变量引用——`assistant` 启动时
   自动载入 config.json 同目录的 `.env`（不覆盖已有环境变量），未定义的变量
   启动即报错；文件里的原始引用永不被写回的明文覆盖。
-- **记录库**：`"sessions": {"remote": {"url": "...", "token": "$SESSIONS_TOKEN"}}`
-  配置远端会话记录（`assistant serve` 的存储服务端）；启动日志与
-  `session push` 标明记录去向（config/env/sidecar/未配置）。
+- **会话记录归档**：`"sessions": {"storage": {"endpoint": "...", "bucket": "...",
+  "access_key": "$S3_ACCESS_KEY", "secret_key": "$S3_SECRET_KEY"}}` 把会话记录
+  归档到 S3 兼容对象存储（MinIO/OSS/S3），并在本机建 SQLite 检索索引；启动日志
+  标明归档去向。整节缺省即关闭。
 
 ### agents（命名定义：一个 main + 多个 subagents）
 
@@ -242,42 +242,61 @@ journalctl -u assistant -f                                                      
 
 评审会话还需要 `claude` CLI 在服务用户的 PATH 上（建议装到 `/usr/local/bin`）。
 
-## 会话记录服务（serve / session push / sessions MCP）
+## 会话记录归档（run 自动归档 + sessions MCP）
 
-内置三件套：
+会话记录不再需要单独的服务端进程：`assistant run` **自动**把本地 claude 会话归档到
+S3 兼容对象存储（MinIO / 阿里云 OSS / AWS S3），并在本机维护一份 SQLite 检索索引；
+agent 通过 `assistant mcp sessions` 只读回查这份索引——**上下文被压缩后回查完整历史**。
 
-| 命令 | 角色 |
+| 组件 | 角色 |
 | --- | --- |
-| `assistant serve` | 记录库服务端：收 `session push` 的记录，按 **(host, project, session)** 存成原样 jsonl + `.meta.json`；提供 list / read / search / conversations 接口 |
-| `assistant session push` | 客户端：扫 `<配置目录>/claude/projects/*/*.jsonl`，按大小+修改时间增量推送；聊天会话附带会话实体与通道 |
-| `assistant mcp sessions` | 给 agent 的 MCP：`session_search` / `session_list` / `session_read` / `conversation_list`——**上下文被压缩后回查完整历史** |
+| `assistant run` | 归档器：**每轮对话结束**归档该会话，另有 **5 分钟后台巡检**全量补漏 |
+| `assistant mcp sessions` | 给 agent 的 MCP：`session_search` / `session_list` / `session_read` / `conversation_list` |
+| S3/MinIO 桶 | 记录本体：原样 jsonl，键为 `<前缀><host>/<项目>/<会话>.jsonl`（与旧记录库布局同名，存量库可整目录 rsync 上桶） |
+| `<状态目录>/sessions-index.sqlite3` | 检索索引：元数据 + 消息全文（FTS5 trigram，中文子串可检索） |
 
-```bash
-assistant serve &                      # 本机记录库：写 <配置目录>/serve.json（0600，退出即删）
-assistant session push                 # 同机自动发现端点，增量推送
-assistant session push --dry-run       # 先看会推什么
-# 远端：服务端机器跑 serve，客户端写 <配置目录>/sessions-remote.json {"url":"…","token":"…"}
-# 也可用 ASSISTANT_SESSIONS_URL / ASSISTANT_SESSIONS_TOKEN
+```jsonc
+// config.json
+"sessions": {
+  "storage": {
+    "endpoint": "minio.internal:9000",   // 带 http(s):// 前缀时前缀决定是否 HTTPS
+    "bucket": "assistant-sessions",      // 不存在时启动会建一个空桶
+    "access_key": "$S3_ACCESS_KEY",
+    "secret_key": "$S3_SECRET_KEY",
+    "secure": false,
+    "prefix": "sessions"                 // 可选：桶内目录
+  }
+}
 ```
 
-- `host` 是宿主机标签（缺省主机名）：区分不同机器上的同名项目；记录库缺省在当前目录 `data/sessions`（`serve --root` 可改）。
-- **目录名不参与身份判断**：库根必须有 `manifest.json`（`{"format":"assistant.sessions","version":1,…}`）。`serve` 打开一个非空、却没有（或格式不符）manifest 的目录会直接拒绝——所以 `/srv/sessions` 这种名字被别的程序占用时不会互相写坏；确认是空目录或你的库才初始化，要接管已有目录用 `--force`。远端示例：`--root /srv/cosmic-developers-union/assistant/sessions`（短名 `/srv/cdu/assistant/sessions` 也行，安全由 manifest 保证）。`GET /healthz` 会回 format/version/host/root，便于确认连的是哪个库。
-- 微信对话桥在配置了记录库时**每轮结束自动归档**该会话（日志 `已归档会话 …`），所以同一轮里 agent 就能查到自己被压缩掉的历史；聊天会话已自动注入 sessions MCP（`mcp__sessions__*` 已放行）。
-- 评审会话用 `assistant session push` 定时归档即可（增量，重复执行无副作用）；接口细节看 `--help`。
+- **整节缺省 = 归档关闭**：不写对象存储、不建本地索引，`mcp sessions` 的工具返回
+  「未启用」的可读错误，不影响会话其它能力。密钥走 `$VAR`/`${VAR}` 引用（不落盘），
+  未定义的引用启动即报错。
+- `host` 是宿主机标签（缺省主机名），区分不同机器上的同名项目。
+- 增量以「本地源文件大小 + 修改时间」为水位，存在索引里（不再有 `session-push.json`
+  这类单独状态文件）；重复归档同一会话无副作用。
+- 聊天对话桥在归档启用时**每轮结束自动归档**（日志 `已归档会话 …`），所以同一轮里
+  agent 就能查到自己被压缩掉的历史；聊天会话已自动注入 sessions MCP
+  （`mcp__sessions__*` 已放行）。
+- **索引是可丢弃的派生物**：它由归档流程按本地 claude 记录重建。若本地
+  `<配置目录>/claude/` 与索引**同时**丢失，对象存储里的记录无法自动反查回本地
+  （需要人工从桶里恢复 jsonl）；日常备份只需盯住桶里的记录本体。
 
-**不想跑 serve** 时的等价做法（记录就是文件）：
+只想起一个本地对象存储试跑：
 
-| 数据 | 路径 | 含密钥 |
-| --- | --- | --- |
-| 会话文本记录 | `<配置目录>/claude/` | 否 |
-| 微信会话工作目录 | `<配置目录>/chat/` | **是**（`settings.json`/`mcp.json`） |
-| 待办会话日志 | `<数据目录>/state/*/*/*/logs/` | 否 |
+```bash
+./test/minio/up.sh                                  # 起临时 MinIO 并写 test/e2e/.env
+# 端点 127.0.0.1:9000，账号 minioadmin/minioadmin，桶 assistant-sessions 由 assistant 自建
+# 控制台 http://127.0.0.1:9001；停止：./test/minio/down.sh
 
-1. 把 `<配置目录>/claude` 做成 git 仓库并定时 commit+push（记录文件名是 session id，跨机不冲突）；
-2. `CLAUDE_CONFIG_DIR` 指向已同步目录（rclone/NFS/网盘），assistant 只透传；
-3. 定时 `tar`/`rsync` 到对象存储，或 `jq` 抽取 `projects/**/*.jsonl`（一行一事件）落检索系统。
+# 换镜像（MinIO 官方已停发预编译镜像，缺省用社区维护的 pgsty/minio）：
+MINIO_IMAGE=别的发行版:tag ./test/minio/up.sh
+```
 
-注意：`chat/*/settings.json`、`chat/*/mcp.json`、`config.json`、`credentials.json` 都含密钥，归档/同步前排除或加密。
+也可以把 `docker-compose.yaml` 末尾注释掉的 `minio` 服务取消注释，跟着 daemon 一起起。
+
+> 我们只用它的 **S3 兼容 API**（minio-go 客户端），不绑定 MinIO 本身——任何 S3 兼容
+> 后端（MinIO/AIStor/OSS/S3/SeaweedFS…）都能作为 `sessions.storage` 的目标。
 
 ## 开发
 

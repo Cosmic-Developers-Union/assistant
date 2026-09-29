@@ -108,9 +108,9 @@ type ChatConfig struct {
 	SessionDir string
 	// Debug 为真时把 claude 的原始 stream 事件、会话命令与结束统计也写进日志
 	Debug bool
-	// Remote 是记录库服务端连接（assistant serve）：非空时每轮结束把该会话的最新
-	// 记录推上去，agent 在上下文压缩后能用 sessions MCP 回查完整历史
-	Remote sessionstore.RemoteConfig
+	// Archive 是会话归档器（对象存储 + 本地索引）：非空时每轮结束归档该会话，
+	// agent 在上下文压缩后能用 sessions MCP 回查完整历史。为 nil 表示归档未启用。
+	Archive *sessionstore.Archiver
 	// AssistantConfig 是本次运行使用的 config.json 绝对路径：注入会话环境
 	// （ASSISTANT_CONFIG），会话内的 assistant MCP（daemon/gitea）解析到同一份
 	// 配置与端点文件，而不是靠 cwd 猜
@@ -134,8 +134,6 @@ type Chat struct {
 	sessions      map[string]string
 	locks         map[string]*sync.Mutex
 	conversations *conversations.File
-	// pushed 记录每个 claude 会话最近一次推送的文件大小（避免每轮重复上传）
-	pushed map[string]int64
 	// conversationWorkspace 是工作目录推导的可注入缝（nil 时按 StateDir 派生）：
 	// 通道层的「映射失败仍要能对话」这一路要求映射表与工作目录的落点可分离。
 	conversationWorkspace func(conversationID string) string
@@ -172,7 +170,6 @@ func NewChat(config ChatConfig) (*Chat, error) {
 		config:   config,
 		sessions: map[string]string{},
 		locks:    map[string]*sync.Mutex{},
-		pushed:   map[string]int64{},
 	}
 	conversationFile, err := conversations.Load(chat.conversationsPath())
 	if err != nil {
@@ -298,7 +295,7 @@ func (c *Chat) Handle(ctx context.Context, conversationID string, turn Turn) (st
 	if err := c.writeSessionMetadata(conversationID, sessionID, workspace, result.Model, turn.Transport); err != nil {
 		c.config.Log("写入会话元数据失败：%v", err)
 	}
-	c.pushSession(sessionID)
+	c.archiveSession(sessionID)
 	if result.IsError {
 		if message := strings.TrimSpace(result.Result); message != "" {
 			return message, nil
@@ -371,7 +368,7 @@ func (c *Chat) systemPrompt(agent AgentRuntime) string {
 	if prompt == "" {
 		prompt = defaultSystemPrompt()
 	}
-	if strings.TrimSpace(c.config.Remote.URL) == "" {
+	if c.config.Archive == nil {
 		return prompt
 	}
 	return prompt + chatSessionsHint
@@ -410,8 +407,8 @@ func (c *Chat) mcpDocument(overrides claudecfg.Overrides) map[string]any {
 	servers := map[string]any{
 		claudecfg.MCPServerDaemon: claudecfg.DaemonMCPServer(claudecfg.AssistantCommand()),
 	}
-	if strings.TrimSpace(c.config.Remote.URL) != "" {
-		// 记录库可用时才注入：否则这几个工具只会返回「未配置」
+	if c.config.Archive != nil {
+		// 归档启用时才注入：否则这几个工具只会返回「未配置」
 		servers[claudecfg.MCPServerSessions] = claudecfg.SessionsMCPServer(claudecfg.AssistantCommand())
 	}
 	for _, subagent := range c.config.Subagents {
@@ -679,41 +676,20 @@ func (c *Chat) run(ctx context.Context, bin string, args []string, dir string, o
 	return outcome, nil
 }
 
-// pushSession 把该会话的最新记录推给记录库（配置了才推）：让 agent 在同一轮对话里
-// 就能通过 sessions MCP 查到自己被压缩掉的历史。推送失败只记日志，不影响回复。
-func (c *Chat) pushSession(sessionID string) {
-	if strings.TrimSpace(c.config.Remote.URL) == "" || strings.TrimSpace(sessionID) == "" {
+// archiveSession 归档该会话的最新记录（启用归档器时才做）：让 agent 在同一轮对话里
+// 就能通过 sessions MCP 查到自己被压缩掉的历史。归档失败只记日志，不影响回复。
+//
+// 防重交给归档器：它以源文件大小 + 修改时间为水位（存在索引里），未变则直接跳过——
+// 这取代了旧实现里那个读到恒为零的字段、因此形同虚设的守卫。
+func (c *Chat) archiveSession(sessionID string) {
+	if c.config.Archive == nil || strings.TrimSpace(sessionID) == "" {
 		return
 	}
-	options := sessionstore.CollectOptions{
-		Root:    c.config.SessionDir,
-		ChatDir: c.config.StateDir,
-	}
-	session, ok, err := sessionstore.SessionFor(options, sessionID)
-	if err != nil || !ok {
-		if err != nil {
-			c.config.Log("归档会话失败（%s）：%v", shortSession(sessionID), err)
-		}
-		return
-	}
-	size := int64(session.Meta.Bytes)
-	c.mu.Lock()
-	previous := c.pushed[sessionID]
-	c.mu.Unlock()
-	if previous != 0 && previous == size {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	client := sessionstore.NewClient(c.config.Remote.URL, c.config.Remote.Token)
-	if _, err := client.Push(ctx, sessionstore.Batch{Sessions: []sessionstore.Session{session}}); err != nil {
+	if _, err := c.config.Archive.ArchiveSession(ctx, sessionID); err != nil {
 		c.config.Log("归档会话失败（%s）：%v", shortSession(sessionID), err)
-		return
 	}
-	c.mu.Lock()
-	c.pushed[sessionID] = int64(len(strings.Join(session.Lines, "\n")) + 1)
-	c.mu.Unlock()
-	c.config.Log("已归档会话 %s（%d 行，来源 %s）到 %s", session.Key.String(), len(session.Lines), session.Source, c.config.Remote.URL)
 }
 
 // sessionEnv 组装会话进程的额外环境变量：托管的 CLAUDE_CONFIG_DIR + 显式的

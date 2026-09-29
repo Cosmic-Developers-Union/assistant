@@ -39,6 +39,7 @@ declare -A thresholds=(
 	[internal/config]=90
 	[internal/credentials]=90
 	[internal/sessionstore]=90
+	[internal/sessionindex]=90
 	[internal/statestore]=90
 	[internal/setup]=90
 	[internal/provider]=90

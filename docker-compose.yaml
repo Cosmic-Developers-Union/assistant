@@ -117,3 +117,22 @@ services:
     # --debug：详细日志（会话命令行、claude 原始 stream 事件、对话消息与回复、
     # 凭据自检详情）——想安静时去掉该参数即可
     command: ["run", "--api-listen", "0.0.0.0:8770", "--debug"]
+
+  # 会话记录归档用的本地 MinIO（可选）：启用 config.json 的 sessions.storage 时
+  # 起它做对象存储。默认账号 minioadmin/minioadmin，桶 assistant-sessions 由
+  # assistant 启动时自建；控制台 http://127.0.0.1:9001。
+  # 注意：MinIO 官方已停发预编译镜像（Docker Hub 的 minio/minio 已不可用），
+  # 缺省用社区维护的 pgsty/minio；要换别的发行版用 MINIO_IMAGE 变量覆盖。
+  # minio:
+  #   image: ${MINIO_IMAGE:-pgsty/minio:latest}
+  #   command: server /data --console-address ":9001"
+  #   restart: unless-stopped
+  #   environment:
+  #     MINIO_ROOT_USER: minioadmin
+  #     MINIO_ROOT_PASSWORD: minioadmin
+  #   volumes:
+  #     - minio-data:/data
+  #   ports:
+  #     - "127.0.0.1:9000:9000"
+  #     - "127.0.0.1:9001:9001"
+  # 取消上面注释时，还要在文末的顶层 volumes: 下加 minio-data:（若还没有）。

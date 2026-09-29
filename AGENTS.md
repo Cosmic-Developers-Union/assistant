@@ -134,7 +134,8 @@ debug     = Why is it happening?
 - **一般模块 ≥80%，核心模块 ≥90%**，逐包达成（不是全仓平均）。
 - **核心 = 除纯适配器外的一切**：承载系统语义的包——`internal/status`（评审
   状态机）、`internal/dispatcher`（调度引擎）、`internal/daemon`、`internal/instances`、
-  `internal/config`、`internal/credentials`、`internal/sessionstore`、`internal/statestore`、
+  `internal/config`、`internal/credentials`、`internal/sessionstore`、`internal/sessionindex`、
+  `internal/statestore`、
   `internal/setup`、`internal/provider`、`internal/claudecfg`、`cmd/assistant`。
   一般 = I/O 适配器与胶水——`internal/weixin`、`internal/qq`、`internal/telegram`、
   `internal/mcps`、`internal/repoinstall`、`internal/runcfg`、`internal/conversations`、

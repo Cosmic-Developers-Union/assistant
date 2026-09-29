@@ -9,7 +9,6 @@ import (
 
 	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
 	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
-	"github.com/Cosmic-Developers-Union/assistant/internal/sessionstore"
 	"github.com/spf13/cobra"
 )
 
@@ -39,16 +38,14 @@ func giteaChannelForTest(host string, repos ...string) instances.Channel {
 	}
 }
 
-// TestSessionsMCPReportsMissingServerConfig 断言同机没有 serve.json 时 sessions MCP
-// 在 stderr 给出「未发现记录库服务端配置」的提示，并同时打印实际会被读取的
-// sessions-remote.json 路径。
+// TestSessionsMCPReportsMissingStorage 断言 config.json 没配 sessions.storage 时
+// sessions MCP 在 stderr 点明「未启用会话记录索引」并给出配置路径。
 //
-// 这是「MCP 装上了但没接记录库」这一最常见形态：agent 的工具调用只会回一个
-// 未配置错误，操作者若看不到这句话就无从知道该去配哪个文件。路径必须打印出来，
-// 因为使用者手上没有别的地方能查到它。
-func TestSessionsMCPReportsMissingServerConfig(t *testing.T) {
+// 这是「MCP 装上了但没接归档」这一最常见形态：agent 的工具调用只会回一个未配置
+// 错误，操作者若看不到这句话就无从知道该去配哪里。路径必须打印出来，因为使用者
+// 手上没有别的地方能查到它。
+func TestSessionsMCPReportsMissingStorage(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("ASSISTANT_SESSIONS_URL", "")
 	configPath := filepath.Join(dir, "config.json")
 	if err := instances.Save(configPath, minimalConfig()); err != nil {
 		t.Fatal(err)
@@ -61,32 +58,35 @@ func TestSessionsMCPReportsMissingServerConfig(t *testing.T) {
 	// 真实运行会在这里起 stdio MCP 循环；用 stdin 立即 EOF 让它干净返回。
 	command.SetIn(strings.NewReader(""))
 	command.SetArgs([]string{})
-	// MCP 循环读 stdin：EOF 后应当自己结束，不会阻塞用例
 	if err := command.Execute(); err != nil {
-		t.Fatalf("无服务端配置时不该报错退出：%v", err)
+		t.Fatalf("未配置存储时不该报错退出：%v", err)
 	}
 	text := errOut.String()
-	if !strings.Contains(text, "提示：未发现记录库服务端配置") {
-		t.Errorf("应提示未发现服务端配置：\n%s", text)
+	if !strings.Contains(text, "未启用会话记录索引") {
+		t.Errorf("应提示未启用索引：\n%s", text)
 	}
-	if !strings.Contains(text, filepath.Join(dir, sessionstore.RemoteFile)) {
-		t.Errorf("应点明 remote 配置文件路径：\n%s", text)
+	if !strings.Contains(text, configPath) {
+		t.Errorf("应点明配置路径：\n%s", text)
+	}
+	// 未配置时不该在磁盘上留下索引文件（只读命令无副作用）
+	if _, err := os.Stat(filepath.Join(dir, "state", "sessions-index.sqlite3")); !os.IsNotExist(err) {
+		t.Errorf("未配置存储时不该创建索引文件：%v", err)
 	}
 }
 
-// TestSessionsMCPStaysQuietWhenRemoteConfigExists 断言配置目录里已有 serve.json
-// 时不打印那句提示。
+// TestSessionsMCPStaysQuietWhenStorageConfigured 断言配好 sessions.storage 时不
+// 打印那句提示，且索引确实被打开。
 //
-// 提示一旦在服务端配好的机器上照样出现，就会变成每次会话都刷屏的噪音，操作者
-// 很快会学会无视它——那样真正缺配置时反而没人看。
-func TestSessionsMCPStaysQuietWhenRemoteConfigExists(t *testing.T) {
+// 提示一旦在配好的机器上照样出现，就会变成每次会话都刷屏的噪音，操作者很快会学会
+// 无视它——那样真正缺配置时反而没人看。
+func TestSessionsMCPStaysQuietWhenStorageConfigured(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("ASSISTANT_SESSIONS_URL", "")
-	if err := os.WriteFile(filepath.Join(dir, sessionstore.ServeFile), []byte("{}"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	configPath := filepath.Join(dir, "config.json")
-	if err := instances.Save(configPath, minimalConfig()); err != nil {
+	file := minimalConfig()
+	file.Sessions = &instances.SessionsConfig{Storage: &instances.SessionsStorage{
+		Endpoint: "minio.example:9000", Bucket: "assistant-sessions",
+	}}
+	if err := instances.Save(configPath, file); err != nil {
 		t.Fatal(err)
 	}
 
@@ -97,18 +97,19 @@ func TestSessionsMCPStaysQuietWhenRemoteConfigExists(t *testing.T) {
 	command.SetIn(strings.NewReader(""))
 	command.SetArgs([]string{})
 	if err := command.Execute(); err != nil {
-		t.Fatalf("有服务端配置时不该报错：%v", err)
+		t.Fatalf("配好存储时不该报错：%v", err)
 	}
-	if strings.Contains(errOut.String(), "未发现记录库服务端配置") {
-		t.Errorf("服务端配置存在时不该提示未配置：\n%s", errOut.String())
+	if strings.Contains(errOut.String(), "未启用会话记录索引") {
+		t.Errorf("存储已配置时不该提示未配置：\n%s", errOut.String())
 	}
 }
 
 // TestSessionsMCPReportsUnresolvableConfigDir 断言配置落点取不出来（当前目录已被
-// 删除）时命令直接失败，而不是拿一个空目录去继续跑 MCP。
+// 删除）时给出可读提示而不是静默继续。
 //
-// 此时程序根本不知道记录库在哪里；继续跑下去 agent 会拿到一连串「未配置」错误，
-// 而真正的原因（工作目录没了）被完全掩盖。
+// 此时程序根本不知道记录库在哪里；提示写到 stderr 让操作者看见真正的原因（工作
+// 目录没了），而工具层面照常回「未配置」错误——与「归档是增量能力、不该拖垮会话」
+// 的降级策略一致。
 func TestSessionsMCPReportsUnresolvableConfigDir(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("ASSISTANT_CONFIG", "")
@@ -118,12 +119,16 @@ func TestSessionsMCPReportsUnresolvableConfigDir(t *testing.T) {
 	}
 
 	command := newSessionsMCPCommand(new(string))
+	var errOut bytes.Buffer
 	command.SetOut(&bytes.Buffer{})
-	command.SetErr(&bytes.Buffer{})
+	command.SetErr(&errOut)
 	command.SetIn(strings.NewReader(""))
 	command.SetArgs([]string{})
-	if err := command.Execute(); err == nil {
-		t.Error("配置目录取不出来时应报错")
+	if err := command.Execute(); err != nil {
+		t.Fatalf("配置不可解析时应降级而非报错退出：%v", err)
+	}
+	if !strings.Contains(errOut.String(), "无法确定配置落点") {
+		t.Errorf("应提示配置落点不可用：\n%s", errOut.String())
 	}
 }
 
@@ -358,23 +363,6 @@ func TestLoginTokenRefreshReportsUnparsableConfig(t *testing.T) {
 	command.SetArgs([]string{"https://broken.example.com", "mcp", "--user", "ge", "--password", "pw"})
 	if err := command.Execute(); err == nil {
 		t.Errorf("坏配置应让 refresh 报错：\n%s", out.String())
-	}
-}
-
-// TestResolveConfigDirReportsUnresolvablePath 断言配置落点取不出来时 resolveConfigDir
-// 报错，而不是返回一个空目录字符串。
-//
-// 该函数是 serve / session / sessions MCP 三条命令共用的入口；空目录会让这些命令
-// 把产物写到进程某个未知位置，用户重启 daemon 后找不到任何记录。
-func TestResolveConfigDirReportsUnresolvablePath(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("ASSISTANT_CONFIG", "")
-	t.Chdir(dir)
-	if err := os.Remove(dir); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := resolveConfigDir(""); err == nil {
-		t.Error("当前目录不可用时 resolveConfigDir 应报错")
 	}
 }
 

@@ -37,7 +37,7 @@ func DaemonMCPServer(command string) map[string]any {
 }
 
 // SessionsMCPServer 是会话记录查询 MCP：上下文被压缩后回查完整聊天/评审历史
-// （记录由 assistant session push 推到 assistant serve 的记录库）。
+// （记录由 assistant run 归档到对象存储并建本地索引，本 MCP 只读索引）。
 func SessionsMCPServer(command string) map[string]any {
 	return MCPServerDef(command, "mcp", "sessions")
 }

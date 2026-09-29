@@ -2,6 +2,7 @@ package main
 
 import (
 	"cmp"
+	"context"
 	"fmt"
 	"maps"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"github.com/Cosmic-Developers-Union/assistant/internal/integration/telegram"
 	"github.com/Cosmic-Developers-Union/assistant/internal/integration/weixin"
 	"github.com/Cosmic-Developers-Union/assistant/internal/provider"
+	"github.com/Cosmic-Developers-Union/assistant/internal/sessionindex"
 	"github.com/Cosmic-Developers-Union/assistant/internal/sessionstore"
 	"github.com/Cosmic-Developers-Union/assistant/internal/statestore"
 
@@ -119,14 +121,20 @@ func startDaemonServices(
 	if err != nil {
 		return err
 	}
-	remote, remoteSource := resolveSessionsRemote(file, resolvedPath)
+	storage, storageSource := resolveSessionsStorage(file)
+	sessionDir := migrateRuntimeDir(filepath.Join(filepath.Dir(configPath), "claude"), runtime.ClaudeConfigDir(), logf)
+	stateDir := migrateRuntimeDir(filepath.Join(filepath.Dir(configPath), "chat"), runtime.ChatStateDir(), logf)
+	archive, archiveErr := buildSessionArchive(command.Context(), runtime, storage, sessionDir, stateDir, logf)
+	if archiveErr != nil {
+		logf("⚠ 会话归档未启用：%v", archiveErr)
+	}
 	chat, err := daemon.NewChat(daemon.ChatConfig{
 		MainAgent:  mainAgent,
 		Subagents:  subagents,
-		StateDir:   migrateRuntimeDir(filepath.Join(filepath.Dir(configPath), "chat"), runtime.ChatStateDir(), logf),
-		SessionDir: migrateRuntimeDir(filepath.Join(filepath.Dir(configPath), "claude"), runtime.ClaudeConfigDir(), logf),
+		StateDir:   stateDir,
+		SessionDir: sessionDir,
 		Debug:      options.Debug,
-		Remote:     remote,
+		Archive:    archive,
 		Log:        logf,
 		// 会话内 assistant mcp daemon/sessions 靠它定位同一份配置与端点文件
 		AssistantConfig: resolvedPath,
@@ -134,8 +142,10 @@ func startDaemonServices(
 	if err != nil {
 		return err
 	}
-	logChatSummary(logf, mainAgent, subagents, chat, remote, remoteSource)
+	logChatSummary(logf, mainAgent, subagents, chat, archive, storage, storageSource)
 	checkChatCredentials(command, file, mainAgent, subagents, logf)
+	// 后台巡检：立即跑一次再按拍全量归档，捞每轮钩子漏掉的评审/分诊会话。
+	startSessionArchiveLoop(command.Context(), archive, logf)
 
 	// 通道：只启动 runtime 引用的通道；gitea 通道由调度引擎接管（本函数跳过）。
 	referenced := map[string]bool{}
@@ -543,15 +553,118 @@ func truncateDescription(prompt string) string {
 	return prompt
 }
 
+// resolveSessionsStorage 解析会话归档的对象存储配置：来自 config.json 的 sessions
+// 节（access_key / secret_key 经 $VAR/${VAR} 展开）。返回配置与来源标签。
+//
+// 归档只有这一个配置来源：不再有环境变量与 sidecar 文件（旧 serve.json /
+// sessions-remote.json 已随两个子命令删除，无迁移期）。
+func resolveSessionsStorage(file *instances.File) (sessionstore.StorageConfig, string) {
+	if file.Sessions == nil || file.Sessions.Storage == nil {
+		return sessionstore.StorageConfig{}, "未配置"
+	}
+	storage := file.Sessions.Storage
+	config := sessionstore.StorageConfig{
+		Endpoint: storage.Endpoint,
+		Bucket:   storage.Bucket,
+		Secure:   storage.Secure,
+		Region:   storage.Region,
+		Prefix:   storage.Prefix,
+	}
+	// 装载期 validateSecretRefs 已拦截未定义引用；这里失败就保留原值兜底
+	if expanded, err := envref.Expand(storage.AccessKey, envref.Options{Field: "sessions.storage.access_key"}); err == nil {
+		config.AccessKey = expanded
+	} else {
+		config.AccessKey = storage.AccessKey
+	}
+	if expanded, err := envref.Expand(storage.SecretKey, envref.Options{Field: "sessions.storage.secret_key"}); err == nil {
+		config.SecretKey = expanded
+	} else {
+		config.SecretKey = storage.SecretKey
+	}
+	if !config.Enabled() {
+		return sessionstore.StorageConfig{}, "未配置"
+	}
+	return config, "config"
+}
+
+// buildSessionArchive 组装归档器：对象存储 + 本地索引。任一步失败都只返回错误，
+// 由调用方告警后以"归档未启用"继续（归档是增量能力，不该拖垮对话会话）。
+func buildSessionArchive(
+	ctx context.Context,
+	runtime instances.Runtime,
+	storage sessionstore.StorageConfig,
+	sessionDir, stateDir string,
+	logf func(string, ...any),
+) (*sessionstore.Archiver, error) {
+	if !storage.Enabled() {
+		return nil, nil
+	}
+	blob, err := sessionstore.NewS3Store(storage)
+	if err != nil {
+		return nil, err
+	}
+	// 启动期确认桶存在：桶名写错要在这里就报出来，而不是等第一条会话归档才失败
+	if err := blob.EnsureBucket(ctx); err != nil {
+		return nil, err
+	}
+	indexPath := runtime.SessionsIndexPath()
+	if indexPath == "" {
+		return nil, fmt.Errorf("状态库已关闭，无法确定会话索引落点")
+	}
+	index, err := sessionindex.Open(indexPath)
+	if err != nil {
+		return nil, err
+	}
+	logf("会话归档：索引 %s，桶 %s（前缀 %q）", indexPath, storage.Bucket, storage.Prefix)
+	return sessionstore.NewArchiver(sessionstore.CollectOptions{
+		Root:    sessionDir,
+		ChatDir: stateDir,
+	}, blob, index, logf), nil
+}
+
+// startSessionArchiveLoop 起后台巡检：立即全量归档一次，之后每 archiveInterval
+// 再跑一遍，捞每轮钩子漏掉的评审/分诊会话。错误只记日志，循环不退出（与调度
+// 引擎的 ticker 同构）。归档器为 nil（未启用）时是空操作。
+func startSessionArchiveLoop(ctx context.Context, archive *sessionstore.Archiver, logf func(string, ...any)) {
+	if archive == nil {
+		return
+	}
+	go func() {
+		defer archive.Close()
+		ticker := time.NewTicker(archiveInterval)
+		defer ticker.Stop()
+		for {
+			summary, err := archive.Archive(ctx)
+			switch {
+			case err != nil:
+				logf("会话归档巡检：扫描 %d，归档 %d，跳过 %d，失败 %d（%v）",
+					summary.Scanned, summary.Stored, summary.Skipped, summary.Failed, err)
+			case summary.Stored > 0:
+				logf("会话归档巡检：归档 %d 条（扫描 %d，跳过 %d）",
+					summary.Stored, summary.Scanned, summary.Skipped)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+}
+
+// archiveInterval 是后台归档巡检的间隔。
+const archiveInterval = 5 * time.Minute
+
 // logChatSummary 打印对话会话的前提：claude 与最小模式、主 agent 与子代理、
-// 记录库去向（来源标明 config/env/sidecar）。一次说清，别让「为什么没生效」靠猜。
+// 记录归档去向（来源标明 config/未配置）。一次说清，别让「为什么没生效」靠猜。
 func logChatSummary(
 	logf func(string, ...any),
 	mainAgent daemon.AgentRuntime,
 	subagents []daemon.SubagentDefinition,
 	chat *daemon.Chat,
-	remote sessionstore.RemoteConfig,
-	remoteSource string,
+	archive *sessionstore.Archiver,
+	storage sessionstore.StorageConfig,
+	storageSource string,
 ) {
 	bareLabel := "关（claude 不支持 --bare 或未探测到）"
 	if mainAgent.Bare {
@@ -566,34 +679,20 @@ func logChatSummary(
 	logf("  bare       = %s", bareLabel)
 	// 配置根/会话目录已在启动读写清单里列出，这里只留操作者要用的续聊提示
 	logf("  续聊       = cd <会话目录> && claude --continue（目录见读写清单的对话状态行）")
-	if remote.URL != "" {
-		logf("  记录库     = %s（来源 %s；每轮结束归档该会话，可用 sessions MCP 回查）", remote.URL, remoteSource)
+	if archive != nil {
+		logf("  记录归档   = s3://%s/%s%s（来源 %s；每轮结束归档该会话，另有 5 分钟巡检）",
+			storage.Bucket, storage.Prefix, prefixSlash(storage.Prefix), storageSource)
 	} else {
-		logf("  记录库     = 未配置（config.json 加 sessions.remote，或 assistant serve + session push 可远端留存记录）")
+		logf("  记录归档   = 未配置（config.json 的 sessions.storage 给 endpoint 与 bucket 即启用）")
 	}
 }
 
-// resolveSessionsRemote 解析远端记录库连接：config.json 的 sessions 节优先
-// （token 经 $VAR/${VAR} 展开），环境变量与 sidecar 文件（sessions-remote.json/
-// serve.json）兜底。返回连接配置与来源标签。
-func resolveSessionsRemote(file *instances.File, configPath string) (sessionstore.RemoteConfig, string) {
-	if file.Sessions != nil && file.Sessions.Remote != nil && strings.TrimSpace(file.Sessions.Remote.URL) != "" {
-		config := sessionstore.RemoteConfig{URL: strings.TrimSpace(file.Sessions.Remote.URL)}
-		if file.Sessions.Remote.Token != "" {
-			expanded, err := envref.Expand(file.Sessions.Remote.Token, envref.Options{Field: "sessions.remote.token"})
-			if err != nil {
-				// 装载期 validateSecretRefs 已拦截未定义引用；这里兜底保留原值
-				expanded = file.Sessions.Remote.Token
-			}
-			config.Token = expanded
-		}
-		return config, "config"
+// prefixSlash 在非空前缀后补一个斜杠，只为日志里把 <prefix> 与 <host>/... 分开。
+func prefixSlash(prefix string) string {
+	if strings.TrimSpace(prefix) == "" {
+		return ""
 	}
-	config := sessionstore.ResolveRemote(filepath.Dir(configPath))
-	if config.URL != "" {
-		return config, "env/sidecar"
-	}
-	return config, "未配置"
+	return "/"
 }
 
 // subagentNames 返回子代理名（保持 runtime 声明顺序）。

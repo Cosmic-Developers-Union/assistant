@@ -128,14 +128,16 @@ compose-up: build ## 构建宿主二进制并启动 docker compose 部署（容�
 	docker compose up -d --force-recreate
 
 .PHONY: test-e2e
-test-e2e: ## 起临时 Gitea（docker compose）并运行端到端测试
-	@echo "==> 启动临时 Gitea..."
+test-e2e: ## 起临时 Gitea + MinIO（docker compose）并运行端到端测试
+	@echo "==> 启动临时 Gitea 与 MinIO..."
 	@./test/gitea/up.sh
+	@./test/minio/up.sh
 	@set +e; \
 	echo "==> 运行 e2e 测试..."; \
 	go test -tags e2e -count=1 -v ./test/e2e/...; \
 	status=$$?; \
 	./test/gitea/down.sh; \
+	./test/minio/down.sh; \
 	exit $$status
 
 .PHONY: gitea-up
@@ -145,6 +147,14 @@ gitea-up: ## 只启动临时 Gitea（保留现场，供手动调试）
 .PHONY: gitea-down
 gitea-down: ## 停止并清除临时 Gitea（含数据卷）
 	@./test/gitea/down.sh
+
+.PHONY: minio-up
+minio-up: ## 只启动临时 MinIO（保留现场，供手动调试）
+	@./test/minio/up.sh
+
+.PHONY: minio-down
+minio-down: ## 停止并清除临时 MinIO（含数据卷）
+	@./test/minio/down.sh
 
 .PHONY: push
 push: build ## 手动发布: 构建并推送 latest 到 generic package registry（引导/紧急修复用；正式发布由 CI 在合入 main 时自动完成）

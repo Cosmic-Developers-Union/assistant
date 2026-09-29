@@ -3,7 +3,7 @@
 // conversation；claude 会话（/new 后是一个新的 session id）挂在 conversation 下。
 //
 // 落点：<配置目录>/chat/conversations.json（0600）。会话记录按 conversation 归类，
-// 跨通道可查（见 internal/sessionstore）。
+// 跨通道可查（见 internal/sessionindex 的检索索引与 internal/sessionstore 的归档）。
 package conversations
 
 import (

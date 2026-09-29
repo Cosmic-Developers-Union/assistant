@@ -84,7 +84,6 @@ func newRootCommand(stdout, stderr io.Writer, labelSyncer, merger managerRunner)
 	command.AddCommand(newInstallCommand(), newUninstallCommand(), newMCPCommand(&options.ConfigPath), newDoctorCommand(&options.ConfigPath))
 	command.AddCommand(newValidateCommand(&options.ConfigPath))
 	command.AddCommand(newConfigCommand(&options.ConfigPath))
-	command.AddCommand(newServeCommand(&options.ConfigPath), newSessionCommand(&options.ConfigPath))
 	return command
 }
 
