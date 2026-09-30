@@ -35,8 +35,9 @@ assistant 是一个 Go 单二进制，两块能力：
 make build-local   # 本地平台二进制 → ./assistant（开发用）
 make build         # Linux/amd64 静态二进制（generic package 发布用）
 make test          # go test ./...
-make test-e2e      # 起临时 Gitea + runner 跑端到端（-tags e2e）
-make gitea-up      # 只起临时 Gitea，保留现场手动调试（gitea-down 清理）
+make test-e2e      # 起测试环境跑端到端（-tags e2e），结束自动清理
+make test-env-up   # 只起测试环境（Gitea + act_runner + MinIO）并写 test/e2e/.env
+make test-env-down # 清理测试环境（容器/网络 + 任务卷残留 + test/e2e/.env）
 make compose-up    # 重建容器部署（daemon + 状态 API + 对话通道，挂载宿主二进制）
 make install       # 构建并安装到 /usr/local/bin（PREFIX 可改）
 make review-image  # 评审会话镜像（images/review/Dockerfile，target review）
@@ -57,7 +58,8 @@ make review-image  # 评审会话镜像（images/review/Dockerfile，target revi
 - `schema/config.schema.json`：配置 JSON Schema，随二进制分发。
 - `content/` + `skills/`：install 写进目标仓库的托管内容源。
 - `images/review/Dockerfile`：评审 / daemon 镜像，多 target。
-- `test/e2e`（`//go:build e2e`）+ `test/gitea`（临时 Gitea 环境）。
+- `test/e2e`（`//go:build e2e`）+ `docker-compose.test.yaml`（测试环境：Gitea /
+  act_runner / MinIO，起环境与凭据交给 `test/seed.sh`）。
 - `formal/Dispatcher.lean` + `spec/ReviewStateMachine.tla`：调度语义与评审状态机的
   形式化规格。
 - `docs/`、`providers.md`、`README.md`：面向使用者的文档与供应商踩坑记录。

@@ -123,7 +123,7 @@ services:
   # assistant 启动时自建；控制台 http://127.0.0.1:9001。
   # 注意：MinIO 官方已停发预编译镜像（Docker Hub 的 minio/minio 已不可用），
   # 缺省用社区维护的 pgsty/minio；要换别的发行版用 MINIO_IMAGE 变量覆盖。
-  # 与 e2e 现场（test/minio/docker-compose.yaml）保持一致，同样按摘要固定。
+  # 与测试环境（docker-compose.test.yaml）里的 minio 服务保持一致，同样按摘要固定。
   # minio:
   #   image: ${MINIO_IMAGE:-pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372}
   #   command: server /data --console-address ":9001"

@@ -127,44 +127,30 @@ compose-up: build ## 构建宿主二进制并启动 docker compose 部署（容�
 	@echo "==> 启动 docker compose（--force-recreate 让最新二进制生效）..."
 	docker compose up -d --force-recreate
 
+# 测试环境：服务与镜像都在 docker-compose.test.yaml，起环境/清理交给 test/{seed,cleanup}.sh
+.PHONY: test-env-up
+test-env-up: ## 起测试环境（Gitea + act_runner + MinIO）并写 test/e2e/.env
+	@./test/seed.sh
+
+.PHONY: test-env-down
+test-env-down: ## 清理测试环境（compose 栈 + act_runner job 容器/任务卷 + test/e2e/.env）
+	@./test/cleanup.sh
+
 .PHONY: test-e2e
-test-e2e: ## 起临时 Gitea + MinIO（docker compose）并运行端到端测试
-	@echo "==> 启动临时 Gitea 与 MinIO..."
-	@./test/gitea/up.sh
-	@./test/minio/up.sh
-	@set +e; \
+test-e2e: ## 起测试环境并跑全部端到端测试（-tags e2e），结束自动清理
+	@./test/seed.sh
+	@set +e; trap '$(MAKE) --no-print-directory test-env-down' EXIT; \
 	echo "==> 运行 e2e 测试..."; \
 	go test -tags e2e -count=1 -v ./test/e2e/...; \
-	status=$$?; \
-	./test/gitea/down.sh; \
-	./test/minio/down.sh; \
-	exit $$status
+	exit $$?
 
 .PHONY: test-e2e-s3
-test-e2e-s3: ## 只起临时 MinIO（固定社区镜像）并跑 S3 归档端到端
-	@./test/minio/up.sh
-	@set +e; \
+test-e2e-s3: ## 只起 MinIO（固定社区镜像）跑 S3 归档端到端，结束自动清理
+	@./test/seed.sh minio
+	@set +e; trap '$(MAKE) --no-print-directory test-env-down' EXIT; \
 	echo "==> 运行 S3 e2e 测试..."; \
 	go test -tags e2e -count=1 -v -run 'TestSessionArchive' ./test/e2e/...; \
-	status=$$?; \
-	./test/minio/down.sh; \
-	exit $$status
-
-.PHONY: gitea-up
-gitea-up: ## 只启动临时 Gitea（保留现场，供手动调试）
-	@./test/gitea/up.sh
-
-.PHONY: gitea-down
-gitea-down: ## 停止并清除临时 Gitea（含数据卷）
-	@./test/gitea/down.sh
-
-.PHONY: minio-up
-minio-up: ## 只启动临时 MinIO（固定社区镜像，保留现场供手动调试）
-	@./test/minio/up.sh
-
-.PHONY: minio-down
-minio-down: ## 停止并清除临时 MinIO（含数据卷）
-	@./test/minio/down.sh
+	exit $$?
 
 .PHONY: push
 push: build ## 手动发布: 构建并推送 latest 到 generic package registry（引导/紧急修复用；正式发布由 CI 在合入 main 时自动完成）

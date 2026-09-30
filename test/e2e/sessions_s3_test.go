@@ -1,7 +1,8 @@
 //go:build e2e
 
-// 会话归档的端到端：真实 MinIO（test/minio/docker-compose.yaml，由 make test-e2e
-// 起）+ 真实 SQLite 索引。没有 ASSISTANT_E2E_MINIO_* 时自动跳过。
+// 会话归档的端到端：真实 MinIO（docker-compose.test.yaml 里的 minio 服务，由
+// ./test/seed.sh minio 或 make test-e2e 起）+ 真实 SQLite 索引。没有
+// ASSISTANT_E2E_MINIO_* 时自动跳过。
 //
 // 这里覆盖的是单测碰不到的部分：真对象存储往返、桶的自动创建、以及「归档一条会话 →
 // session_list 查到 → session_search 用中文子串命中 → session_read 分页 → 对象确实
@@ -56,7 +57,7 @@ func minioEnvironment(t *testing.T) minioEnv {
 		}
 	}
 	if env.Endpoint == "" || env.Bucket == "" {
-		t.Skip("缺少 ASSISTANT_E2E_MINIO_ENDPOINT / BUCKET（先运行 test/minio/up.sh）")
+		t.Skip("缺少 ASSISTANT_E2E_MINIO_ENDPOINT / BUCKET（先运行 ./test/seed.sh minio）")
 	}
 	return env
 }

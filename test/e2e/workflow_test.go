@@ -65,7 +65,7 @@ func (p pullState) hasRequestedReviewer(login string) bool {
 func TestInstalledWorkflowRunsOnGiteaRunner(t *testing.T) {
 	env := environment(t)
 	if env.Image == "" {
-		t.Skip("缺少 ASSISTANT_E2E_IMAGE（先运行 test/gitea/up.sh）")
+		t.Skip("缺少 ASSISTANT_E2E_IMAGE（先运行 ./test/seed.sh）")
 	}
 	host, adminToken := env.Host, env.AdminToken
 	ctx := context.Background()

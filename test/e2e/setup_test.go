@@ -1,7 +1,8 @@
 //go:build e2e
 
-// Package e2e 是针对临时 Gitea（test/gitea/docker-compose.yaml）的端到端测试：
-// 先运行 test/gitea/up.sh（生成 .env 中的 HOST/ADMIN_TOKEN），再以
+// Package e2e 是针对临时 Gitea（docker-compose.test.yaml 里的 gitea 服务）的
+// 端到端测试：先运行 ./test/seed.sh（起环境并生成 .env 中的 HOST/ADMIN_TOKEN），
+// 再以
 //
 //	make test-e2e
 //
@@ -81,7 +82,7 @@ func environment(t *testing.T) e2eEnv {
 		env.AdminPassword = "admin-e2e-password"
 	}
 	if env.Host == "" || env.AdminToken == "" {
-		t.Skip("缺少 ASSISTANT_E2E_HOST / ASSISTANT_E2E_ADMIN_TOKEN（先运行 test/gitea/up.sh）")
+		t.Skip("缺少 ASSISTANT_E2E_HOST / ASSISTANT_E2E_ADMIN_TOKEN（先运行 ./test/seed.sh）")
 	}
 	return env
 }

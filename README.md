@@ -285,20 +285,22 @@ agent 通过 `assistant mcp sessions` 只读回查这份索引——**上下文�
 只想起一个本地对象存储试跑：
 
 ```bash
-./test/minio/up.sh                                  # 起临时 MinIO 并写 test/e2e/.env
+./test/seed.sh minio                                # 起临时 MinIO 并写 test/e2e/.env
 # 端点 127.0.0.1:9000，账号 minioadmin/minioadmin，桶 assistant-sessions 由 assistant 自建
-# 控制台 http://127.0.0.1:9001；停止：./test/minio/down.sh
+# 控制台 http://127.0.0.1:9001；清理：./test/cleanup.sh（或 make test-env-down）
 
 # 换镜像（MinIO 官方已停发预编译镜像，缺省用社区维护的 pgsty/minio）：
-# 替换的镜像必须自带 test/minio/docker-compose.yaml 里的 healthcheck 探针。
-MINIO_IMAGE=别的发行版:tag ./test/minio/up.sh
+# 替换的镜像必须自带 docker-compose.test.yaml 里的 healthcheck 探针。
+MINIO_IMAGE=别的发行版:tag ./test/seed.sh minio
 
 make test-e2e-s3                                    # 只跑 S3 归档端到端（不打 Gitea）
 ```
 
-现场只依赖 docker + compose：镜像在 `test/minio/docker-compose.yaml` 里按「版本标签 +
-摘要」固定，每次拿到同一份二进制；就绪判定用镜像自带的 healthcheck
-（`curl /minio/health/live`），既不编译 MinIO，也不需要宿主机装 go / curl。换端口用
+测试环境的服务与镜像都写在仓库根部的 `docker-compose.test.yaml`（Gitea / act_runner /
+MinIO）：只依赖 docker + compose，镜像按「版本标签 + 摘要」固定，数据落在容器层与
+tmpfs。清理用 `./test/cleanup.sh`（`make test-env-down` 同义）：compose 栈之外，它还会
+清掉 act_runner 用 docker API 直接拉起的 job 容器与任务卷——那些不属于 compose 项目，
+`docker compose -f docker-compose.test.yaml down` 清不掉。换端口用
 `MINIO_HOST_PORT` / `MINIO_CONSOLE_PORT`（端点会一并写进 `test/e2e/.env`）。
 
 也可以把 `docker-compose.yaml` 末尾注释掉的 `minio` 服务取消注释，跟着 daemon 一起起。
@@ -312,10 +314,13 @@ make test-e2e-s3                                    # 只跑 S3 归档端到端�
 make build-local   # 本地平台二进制
 make test          # go test ./...
 make install       # 构建并安装到 /usr/local/bin
-make test-e2e      # 起临时 Gitea + runner 跑端到端
+make test-e2e      # 起测试环境（Gitea + runner + MinIO）跑端到端，结束自动清理
 ```
 
+- 端到端测试环境集中在 `docker-compose.test.yaml`：起环境并把凭据写进 `test/e2e/.env`
+  都用 `./test/seed.sh`（只跑 S3 用例时 `./test/seed.sh minio`，每次都从零开始），
+  清理用 `./test/cleanup.sh`（`make test-env-down` 同义）。
 - 本机若 `~/.cache/go-build` 只读，用 `export GOCACHE=/tmp/assistant-gocache GOTMPDIR=/tmp`。
-- 目录：`cmd/assistant`（CLI）、`internal/{dispatcher,daemon,status,instances,credentials,provider,claudecfg,repoinstall,setup,weixin}`、`schema/`（配置 schema，随二进制分发）、`content/` + `skills/`（install 的托管内容源）、`images/review/Dockerfile`（评审/daemon 镜像，多 target）、`test/e2e` + `test/gitea`（端到端）、`formal/` + `spec/`（调度语义与评审状态机的形式化规格）。
+- 目录：`cmd/assistant`（CLI）、`internal/{dispatcher,daemon,status,instances,credentials,provider,claudecfg,repoinstall,setup,weixin}`、`schema/`（配置 schema，随二进制分发）、`content/` + `skills/`（install 的托管内容源）、`images/review/Dockerfile`（评审/daemon 镜像，多 target）、`test/e2e` + `docker-compose.test.yaml`（端到端）、`formal/` + `spec/`（调度语义与评审状态机的形式化规格）。
 - 改变调度语义或评审状态机时必须同步改 `formal/Dispatcher.lean` / `spec/ReviewStateMachine.tla`，并让证明与模型检查重新通过（`lean formal/Dispatcher.lean`）。
 - 提交前只跑本次变更相关的 fmt/lint/test；一个主题一个提交；移除死代码与过时引用。

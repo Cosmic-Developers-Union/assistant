@@ -1,0 +1,118 @@
+# 测试环境：一张 compose 文件管住 e2e 需要的全部镜像与服务。
+#
+#   gitea  —— 临时 Gitea（sqlite；宿主 HTTP 3300 / SSH 3322，容器内 gitea:3000）
+#   minio  —— S3 兼容对象存储（宿主 9000 / 9001）
+#   runner —— act_runner，执行仓库里的 workflow 容器 job（挂宿主 docker.sock）
+#
+# job 用的 assistant 镜像由 test/seed.sh 用仓库根部 Dockerfile 构建成
+# assistant:e2e，不在本文件里声明。
+#
+# 用法：
+#   ./test/seed.sh            # 起全量环境并写 test/e2e/.env
+#   ./test/seed.sh minio      # 只起 minio（S3 归档用例）
+#   ./test/seed.sh && go test -tags e2e ./test/e2e/...
+#
+# 清理：
+#   ./test/cleanup.sh        # 或 make test-env-down
+#   —— 数据全在容器层与 tmpfs，本文件不声明任何 volume；但 act_runner 的 job 容器与
+#      任务卷不是 compose 项目的一部分，得由 cleanup.sh 一并清（见该脚本注释）。
+#      只清这个 compose 栈本身用 `docker compose -f docker-compose.test.yaml down`。
+#
+# 镜像都按「版本标签 + 摘要」固定：任何机器上拿到的都是同一份二进制，测试环境可重建。
+name: assistant-e2e
+
+configs:
+  # act_runner 配置。job 容器要加入本项目的默认网络，才能用 gitea:3000 回连
+  # （网络名 = 项目名 + _default，项目名固定为 assistant-e2e）。
+  runner-config:
+    content: |
+      log:
+        level: info
+      runner:
+        file: /data/.runner
+        capacity: 2
+        timeout: 10m
+      cache:
+        enabled: false
+      container:
+        network: assistant-e2e_default
+        force_pull: false
+
+services:
+  gitea:
+    image: gitea/gitea:1.27@sha256:87a67ee09d3ae0d1df5fda5dcda3e2a1f9236a45b0a59025d6e00e46adc43bef
+    container_name: assistant-e2e-gitea
+    restart: "no"
+    environment:
+      GITEA__database__DB_TYPE: sqlite3
+      GITEA__server__DOMAIN: gitea
+      # workflow 的容器 job 需要能回连 Gitea：用 compose 网络内的服务名
+      # （宿主机测试仍用 127.0.0.1:3300 直连，不受影响）
+      GITEA__server__ROOT_URL: http://gitea:3000/
+      GITEA__server__HTTP_PORT: "3000"
+      GITEA__security__INSTALL_LOCK: "true"
+      GITEA__service__DISABLE_REGISTRATION: "true"
+      GITEA__actions__ENABLED: "true"
+      GITEA__log__LEVEL: warn
+    ports:
+      - "${ASSISTANT_E2E_GITEA_HTTP_PORT:-3300}:3000"
+      - "${ASSISTANT_E2E_GITEA_SSH_PORT:-3322}:22"
+    # 数据落内存盘：down 之后不留任何卷；每次 up 都是干净现场
+    tmpfs:
+      - /data:exec,mode=1777,size=1g
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:3000/api/v1/version >/dev/null 2>&1 || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+
+  minio:
+    # MinIO 官方已停发预编译镜像（Docker Hub 的 minio/minio 已不可用），用社区维护的
+    # pgsty/minio，同样按摘要固定；换别的发行版用 MINIO_IMAGE 覆盖（须自带下面的探针）。
+    image: ${MINIO_IMAGE:-pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372}
+    container_name: assistant-e2e-minio
+    restart: "no"
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "${MINIO_HOST_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    tmpfs:
+      - /data:exec,mode=1777,size=1g
+    # 就绪判定用镜像自带的 curl：镜像按摘要固定，可以放心依赖它的工具面
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  runner:
+    image: gitea/act_runner:0.6.1@sha256:b5c35d6bdbb9bb25e531230bfc7cc663cb751406cbec90a2a891b85fea54de86
+    container_name: assistant-e2e-runner
+    restart: "no"
+    depends_on:
+      gitea:
+        condition: service_healthy
+    environment:
+      GITEA_INSTANCE_URL: http://gitea:3000
+      GITEA_RUNNER_NAME: assistant-e2e-runner
+      # 标签指向 seed.sh 构建的 assistant 镜像：job 的 container 与 runner 默认镜像一致
+      GITEA_RUNNER_LABELS: ubuntu-latest:docker://${ASSISTANT_E2E_IMAGE:-assistant:e2e}
+      CONFIG_FILE: /etc/act_runner/config.yaml
+      # 自注册用的管理员账号（由 test/seed.sh 在建好 Gitea 后创建）
+      SEED_ADMIN_USER: ${ASSISTANT_E2E_ADMIN_USER:-e2eadmin}
+      SEED_ADMIN_PASSWORD: ${ASSISTANT_E2E_ADMIN_PASSWORD:-admin-e2e-password}
+    configs:
+      - source: runner-config
+        target: /etc/act_runner/config.yaml
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # 注册脚本：镜像不带注册令牌，等管理员出现后自己换一个（见该脚本注释）
+      - ./test/runner-register.sh:/usr/local/bin/register.sh:ro
+    # 走镜像自带的 tini；脚本换到令牌后 exec run.sh 注册并启动
+    entrypoint: ["/sbin/tini", "--", "/bin/sh", "/usr/local/bin/register.sh"]
+    tmpfs:
+      - /data:exec,mode=1777,size=256m
