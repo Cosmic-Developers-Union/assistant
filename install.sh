@@ -129,7 +129,7 @@ resolve_binary() {
       step "未找到预构建二进制，用 go 构建（$OS/$ARCH）"
       version=$(git -C "$SCRIPT_DIR" describe --tags --always 2>/dev/null || echo dev)
       (cd "$SCRIPT_DIR" && CGO_ENABLED=0 go build \
-        -ldflags "-w -s -X main.version=$version" \
+        -ldflags "-w -s -X github.com/Cosmic-Developers-Union/assistant/internal/cli.version=$version" \
         -o "$SCRIPT_DIR/assistant" ./cmd/assistant)
       echo "$SCRIPT_DIR/assistant"
       return

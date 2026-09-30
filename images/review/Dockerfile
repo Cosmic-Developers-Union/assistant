@@ -94,18 +94,22 @@ CMD ["bash"]
 # 评审会话镜像（会话容器形态）
 FROM review-env AS review
 
-# daemon 镜像：先构建 assistant 二进制，再叠加到评审环境
+# daemon 镜像：先构建 assistant / assistantd 二进制，再叠加到评审环境
 FROM golang:1.27 AS assistant-build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
-    -o /assistant ./cmd/assistant
+RUN CGO_ENABLED=0 go build -trimpath \
+      -ldflags="-s -w -X github.com/Cosmic-Developers-Union/assistant/internal/cli.version=${VERSION}" \
+      -o /assistant ./cmd/assistant \
+ && CGO_ENABLED=0 go build -trimpath \
+      -ldflags="-s -w -X github.com/Cosmic-Developers-Union/assistant/internal/cli.version=${VERSION}" \
+      -o /assistantd ./cmd/assistantd
 
 FROM review-env AS daemon
 COPY --from=assistant-build /assistant /usr/local/bin/assistant
+COPY --from=assistant-build /assistantd /usr/local/bin/assistantd
 # 配置/克隆/日志都在挂载的用户目录下；worktree 在 /tmp（compose 用 tmpfs 提供）
-ENTRYPOINT ["/usr/local/bin/assistant"]
-CMD ["run"]
+ENTRYPOINT ["/usr/local/bin/assistantd"]

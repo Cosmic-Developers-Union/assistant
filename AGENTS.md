@@ -9,15 +9,21 @@
 
 ## 项目概览
 
-assistant 是一个 Go 单二进制，两块能力：
+assistant 是一组 Go 二进制，按「谁用」切分：
 
-- **仓库机器人**：`assistant action label-sync` / `assistant action automerge` 在 Gitea Actions 里按
-  事件与定时运行（标签收敛、评审状态同步、机械合并）；
-- **评审调度引擎 + 对话服务端**：`assistant run` 常驻宿主机，检测待办 → 为每个
-  待办拉起 headless `claude` 会话 → 验证结论 → 清理；同一进程并行承载多个消息通道
-  （微信 / QQ / Telegram / Gitea），会话之间并发、同会话串行。
+- **`assistant`（dev 侧 CLI）**：交互命令（login / setup / init / install /
+  doctor / validate / config）+ 仓库机器人（`assistant action label-sync` /
+  `assistant action automerge` 在 Gitea Actions 里按事件与定时运行：标签收敛、
+  评审状态同步、机械合并）+ 会话工具面（`assistant mcp gitea`）；
+- **`assistantd`（常驻进程）**：评审调度引擎 + 对话服务端——检测待办 → 为每个
+  待办拉起 headless `claude` 会话 → 验证结论 → 清理；同一进程并行承载多个消息
+  通道（微信 / QQ / Telegram / Gitea），会话之间并发、同会话串行。旗标面与
+  `assistant run` 一致（过渡期 `assistant run` 保留）。
 
-`claude` CLI 是外部运行时依赖（会话在容器或宿主机里跑），其余能力都在本二进制内。
+依赖单向：assistantd 拉起的会话要执行 `assistant mcp gitea`，所以部署机上要有
+assistant（同目录 → `ASSISTANT_CLI` → PATH 解析）；反过来 assistant 不依赖
+assistantd。`claude` CLI 是外部运行时依赖（会话在容器或宿主机里跑），其余能力
+都在本仓库二进制内。
 
 托管与发布：
 
@@ -50,7 +56,10 @@ make review-image  # 评审会话镜像（images/review/Dockerfile，target revi
 
 ## 目录结构
 
-- `cmd/assistant/`：CLI 与子命令（cobra），一个主题一个文件。
+- `cmd/assistant/`、`cmd/assistantd/`：两个二进制的薄入口（信号与退出码统一走
+  `internal/cli.Execute`）。
+- `internal/cli/`：共享命令层——cobra 命令树、旗标解析、配置与凭据装配，
+  一个主题一个文件；只做「命令行 → internal/* 调用」的翻译，不承载业务语义。
 - `internal/`：核心实现——`dispatcher`（调度引擎）、`daemon`（对话服务端）、
   `status`（评审状态机）、`instances`/`config`（配置装载）、`credentials`
   （凭据库）、`provider`（各家模型接入）、`claudecfg`（claude 会话配置）、
@@ -138,7 +147,7 @@ debug     = Why is it happening?
   状态机）、`internal/dispatcher`（调度引擎）、`internal/daemon`、`internal/instances`、
   `internal/config`、`internal/credentials`、`internal/sessionstore`、`internal/sessionindex`、
   `internal/statestore`、
-  `internal/setup`、`internal/provider`、`internal/claudecfg`、`cmd/assistant`。
+  `internal/setup`、`internal/provider`、`internal/claudecfg`、`internal/cli`。
   一般 = I/O 适配器与胶水——`internal/weixin`、`internal/qq`、`internal/telegram`、
   `internal/mcps`、`internal/repoinstall`、`internal/runcfg`、`internal/conversations`、
   `internal/envref`、`internal/agents`、`internal/logcfg`、`skills`。

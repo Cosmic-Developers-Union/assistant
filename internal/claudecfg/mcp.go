@@ -51,12 +51,22 @@ var (
 // 路径时回退 assistant」这条分支。生产不修改。
 var AssistantExecutable = os.Executable
 
-// AssistantCommand 返回当前 assistant 可执行文件的绝对路径（取不到时回退 PATH
-// 名字 assistant）：会话里的 assistant MCP 用它启动，于是既不看会话的工作目录与
-// PATH，也不要求会话镜像里预装了 assistant。
+// AssistantCommand 返回会话里 assistant MCP 的启动命令。assistantd 拉起的会话
+// 要执行 `assistant mcp gitea`，而 mcp 子命令在 assistant 二进制里，解析顺序：
+//  1. ASSISTANT_CLI 环境变量显式指定（两个二进制不在同一前缀时用）；
+//  2. 自身就是 assistant（本体或 go run 开发流）：用自身绝对路径，与拆分前一致；
+//  3. 同目录的 assistant：两个二进制装在同一个前缀下时直接命中；
+//  4. 回退 PATH 名 assistant。
+//
+// 既不看会话的工作目录，也不要求会话镜像里预装了 assistant。
 func AssistantCommand() string {
 	assistantCommandOnce.Do(func() {
 		assistantCommand = "assistant"
+		// 显式覆盖优先于一切推断：部署形态两个二进制可能装在不同前缀下
+		if override := strings.TrimSpace(os.Getenv("ASSISTANT_CLI")); override != "" {
+			assistantCommand = override
+			return
+		}
 		path, err := AssistantExecutable()
 		if err != nil {
 			return
@@ -71,7 +81,18 @@ func AssistantCommand() string {
 		if err != nil || absolute == "" {
 			return
 		}
-		assistantCommand = absolute
+		// 自身就是 assistant：沿用自身绝对路径（assistant 本体与 go run 开发流
+		// 的临时产物都算），行为与拆分前完全一致。
+		if filepath.Base(absolute) == "assistant" {
+			assistantCommand = absolute
+			return
+		}
+		// assistantd：优先同目录的 assistant——两个二进制装在同一个前缀下
+		sibling := filepath.Join(filepath.Dir(absolute), "assistant")
+		if info, statErr := os.Stat(sibling); statErr == nil && !info.IsDir() {
+			assistantCommand = sibling
+			return
+		}
 	})
 	return assistantCommand
 }

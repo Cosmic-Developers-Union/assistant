@@ -1,12 +1,16 @@
 # Makefile for assistant
 
 BINARY_NAME = assistant
+BINARY_DAEMON = assistantd
 
 # Go 构建参数
 CGO_ENABLED = 0
 GOOS = linux
 GOARCH = amd64
 LDFLAGS = -w -s
+
+# version 注入点：两个二进制共用 internal/cli 里的 version 变量
+VERSION_PKG = github.com/Cosmic-Developers-Union/assistant/internal/cli
 
 # 手动发布的 package registry 命名空间（generic package 归属于 owner）
 GITEA_OWNER ?= owner
@@ -48,8 +52,8 @@ help: ## 显示帮助信息
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-20s %s\n", $$1, $$2}'
 	@echo ""
 	@echo "示例:"
-	@echo "  make build               # 构建 assistant 二进制 (Linux/amd64)"
-	@echo "  make build-local         # 构建本地平台二进制"
+	@echo "  make build               # 构建 assistant / assistantd 二进制 (Linux/amd64)"
+	@echo "  make build-local         # 构建本地平台二进制 (两个二进制)"
 	@echo "  make install             # 先构建再安装到本机 (PREFIX 可改，缺省 /usr/local)"
 	@echo "  make install-service     # 主机部署 (systemd: 独立服务用户 + XDG 目录 + 空配置)"
 	@echo "  make test                # 运行测试"
@@ -60,25 +64,30 @@ help: ## 显示帮助信息
 	@echo "make push 用于引导或紧急修复, 需要 GITEA_HOST / GITEA_ACCESS_TOKEN(环境变量或 .env)"
 
 .PHONY: build
-build: ## 构建 assistant 二进制 (Linux/amd64, 静态链接, 供 generic package 发布)
-	@echo "==> 构建 $(BINARY_NAME) 二进制..."
+build: ## 构建 assistant / assistantd 二进制 (Linux/amd64, 静态链接, 供 generic package 发布)
+	@echo "==> 构建 $(BINARY_NAME) / $(BINARY_DAEMON) 二进制..."
 	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=$(GOARCH) \
-		go build -ldflags="$(LDFLAGS) -X main.version=$$(git describe --tags --always 2>/dev/null || echo dev)" \
-		-o $(BINARY_NAME) ./cmd/assistant
-	@echo "==> 构建完成: $(BINARY_NAME)"
+		go build -ldflags="$(LDFLAGS) -X $(VERSION_PKG).version=$$(git describe --tags --always 2>/dev/null || echo dev)" \
+		-o $(BINARY_NAME) ./cmd/$(BINARY_NAME)
+	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=$(GOARCH) \
+		go build -ldflags="$(LDFLAGS) -X $(VERSION_PKG).version=$$(git describe --tags --always 2>/dev/null || echo dev)" \
+		-o $(BINARY_DAEMON) ./cmd/$(BINARY_DAEMON)
+	@echo "==> 构建完成: $(BINARY_NAME) $(BINARY_DAEMON)"
 
 .PHONY: build-local
-build-local: ## 构建本地平台二进制 (用于开发测试)
+build-local: ## 构建本地平台二进制 (assistant + assistantd, 用于开发测试)
 	@echo "==> 构建本地平台二进制..."
-	go build -o $(BINARY_NAME) ./cmd/assistant
-	@echo "==> 构建完成: $(BINARY_NAME)"
+	go build -o $(BINARY_NAME) ./cmd/$(BINARY_NAME)
+	go build -o $(BINARY_DAEMON) ./cmd/$(BINARY_DAEMON)
+	@echo "==> 构建完成: $(BINARY_NAME) $(BINARY_DAEMON)"
 
 .PHONY: install
 install: build-local ## 先构建再安装到本机 (缺省 /usr/local；非 root 自动 sudo，PREFIX=$HOME/.local 可免)
-	@echo "==> 安装 $(BINARY_NAME) 到 $(INSTALL_DIR)...$(if $(SUDO),（需要 sudo）)"
+	@echo "==> 安装 $(BINARY_NAME) / $(BINARY_DAEMON) 到 $(INSTALL_DIR)...$(if $(SUDO),（需要 sudo）)"
 	$(SUDO) install -d "$(INSTALL_DIR)"
 	$(SUDO) install -m 0755 $(BINARY_NAME) "$(INSTALL_DIR)/$(BINARY_NAME)"
-	@echo "==> 已安装: $(INSTALL_DIR)/$(BINARY_NAME)"
+	$(SUDO) install -m 0755 $(BINARY_DAEMON) "$(INSTALL_DIR)/$(BINARY_DAEMON)"
+	@echo "==> 已安装: $(INSTALL_DIR)/$(BINARY_NAME) $(INSTALL_DIR)/$(BINARY_DAEMON)"
 	@echo "    shell 补全: source <($(BINARY_NAME) completion bash)（或写入系统补全目录）"
 
 .PHONY: install-service
@@ -171,7 +180,7 @@ push: build ## 手动发布: 构建并推送 latest 到 generic package registry
 .PHONY: clean
 clean: ## 清理构建产物
 	@echo "==> 清理构建产物..."
-	@rm -f $(BINARY_NAME) $(BINARY_NAME).exe
+	@rm -f $(BINARY_NAME) $(BINARY_NAME).exe $(BINARY_DAEMON) $(BINARY_DAEMON).exe
 	@echo "==> 清理完成"
 
 .DEFAULT_GOAL := help

@@ -8,7 +8,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/Cosmic-Developers-Union/assistant/internal/cli.version=${VERSION}" \
     -o /assistant ./cmd/assistant
 
 # 带 shell 的最小运行镜像：仓库 workflow 的 run 步骤由 act_runner 以

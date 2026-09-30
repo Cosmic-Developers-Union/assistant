@@ -273,3 +273,47 @@ func TestAssistantCommandAbsolutizesRelativePath(t *testing.T) {
 		t.Errorf("AssistantCommand = %q, 应保留原始尾部", got)
 	}
 }
+
+// ASSISTANT_CLI 显式覆盖优先于一切推断：两个二进制装在不同前缀时用它指路。
+func TestAssistantCommandHonorsExplicitOverride(t *testing.T) {
+	original := AssistantExecutable
+	t.Cleanup(func() { AssistantExecutable = original; resetAssistantCommand() })
+
+	AssistantExecutable = func() (string, error) { return "/data/assistantd/bin/assistantd", nil }
+	t.Setenv("ASSISTANT_CLI", "/opt/assistant/bin/assistant")
+	resetAssistantCommand()
+	if got := AssistantCommand(); got != "/opt/assistant/bin/assistant" {
+		t.Errorf("AssistantCommand = %q, want ASSISTANT_CLI 覆盖值", got)
+	}
+}
+
+// 自身不是 assistant 时优先同目录的 assistant：两个二进制装在同一个前缀下。
+func TestAssistantCommandPrefersSiblingAssistant(t *testing.T) {
+	dir := t.TempDir()
+	sibling := filepath.Join(dir, "assistant")
+	if err := os.WriteFile(sibling, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	original := AssistantExecutable
+	t.Cleanup(func() { AssistantExecutable = original; resetAssistantCommand() })
+
+	AssistantExecutable = func() (string, error) { return filepath.Join(dir, "assistantd"), nil }
+	resetAssistantCommand()
+	if got := AssistantCommand(); got != sibling {
+		t.Errorf("AssistantCommand = %q, want 同目录 assistant %q", got, sibling)
+	}
+}
+
+// 自身不是 assistant、同目录也没有 assistant（如 go run / 测试二进制）时回退
+// PATH 名 assistant。
+func TestAssistantCommandFallsBackWithoutSibling(t *testing.T) {
+	dir := t.TempDir()
+	original := AssistantExecutable
+	t.Cleanup(func() { AssistantExecutable = original; resetAssistantCommand() })
+
+	AssistantExecutable = func() (string, error) { return filepath.Join(dir, "assistantd"), nil }
+	resetAssistantCommand()
+	if got := AssistantCommand(); got != "assistant" {
+		t.Errorf("AssistantCommand = %q, want 回退名 assistant", got)
+	}
+}
