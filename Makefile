@@ -141,7 +141,7 @@ test-e2e: ## 起临时 Gitea + MinIO（docker compose）并运行端到端测试
 	exit $$status
 
 .PHONY: test-e2e-s3
-test-e2e-s3: ## 只起临时 MinIO 并跑 S3 归档端到端（无外网也可用：拉不到镜像自动源码编译）
+test-e2e-s3: ## 只起临时 MinIO（固定社区镜像）并跑 S3 归档端到端
 	@./test/minio/up.sh
 	@set +e; \
 	echo "==> 运行 S3 e2e 测试..."; \
@@ -159,7 +159,7 @@ gitea-down: ## 停止并清除临时 Gitea（含数据卷）
 	@./test/gitea/down.sh
 
 .PHONY: minio-up
-minio-up: ## 只启动临时 MinIO（保留现场，供手动调试）
+minio-up: ## 只启动临时 MinIO（固定社区镜像，保留现场供手动调试）
 	@./test/minio/up.sh
 
 .PHONY: minio-down

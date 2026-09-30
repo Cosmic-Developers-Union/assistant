@@ -290,17 +290,16 @@ agent 通过 `assistant mcp sessions` 只读回查这份索引——**上下文�
 # 控制台 http://127.0.0.1:9001；停止：./test/minio/down.sh
 
 # 换镜像（MinIO 官方已停发预编译镜像，缺省用社区维护的 pgsty/minio）：
+# 替换的镜像必须自带 test/minio/docker-compose.yaml 里的 healthcheck 探针。
 MINIO_IMAGE=别的发行版:tag ./test/minio/up.sh
 
-# 无外网、拉不到镜像时：从源码编译真 MinIO 并以本地进程跑（后端由模式决定）
-ASSISTANT_MINIO_MODE=source ./test/minio/up.sh
 make test-e2e-s3                                    # 只跑 S3 归档端到端（不打 Gitea）
 ```
 
-`ASSISTANT_MINIO_MODE` 取 `auto`（缺省）/`docker`/`source`：`auto` 在镜像已本地存在或
-能拉下来时用 docker，否则回退 `source`（`go install` 编译，模块走 `GOPROXY`，缺省给
-`https://goproxy.cn,direct`）。`source` 模式的二进制、数据与日志落在
-`test/minio/.cache/`（已忽略），停止同样用 `./test/minio/down.sh`。
+现场只依赖 docker + compose：镜像在 `test/minio/docker-compose.yaml` 里按「版本标签 +
+摘要」固定，每次拿到同一份二进制；就绪判定用镜像自带的 healthcheck
+（`curl /minio/health/live`），既不编译 MinIO，也不需要宿主机装 go / curl。换端口用
+`MINIO_HOST_PORT` / `MINIO_CONSOLE_PORT`（端点会一并写进 `test/e2e/.env`）。
 
 也可以把 `docker-compose.yaml` 末尾注释掉的 `minio` 服务取消注释，跟着 daemon 一起起。
 

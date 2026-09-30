@@ -1,12 +1,15 @@
+# 临时 MinIO（e2e / 本地试跑用）。
+#
+# 镜像固定为社区维护的 pgsty/minio 的「版本标签 + 摘要」：MinIO 官方已停发预编译
+# 镜像（Docker Hub 的 minio/minio 已不可用），按摘要拉取才能保证每次 e2e 拿到同一份
+# 二进制——现场不编译 MinIO，宿主机只需要 docker + compose。
+# 换镜像：MINIO_IMAGE=别的发行版:tag ./test/minio/up.sh（替换的镜像必须自带下面的
+# healthcheck 探针，否则 up.sh 的 --wait 会判定不就绪）。
 name: assistant-e2e-minio
 
 services:
   minio:
-    # MinIO 官方已归档社区仓库、停发预编译镜像（Docker Hub 的 minio/minio 已不可用）。
-    # 缺省用社区维护的 pgsty/minio（保留真实 MinIO 行为）；要换别的发行版用变量覆盖：
-    #   MINIO_IMAGE=adobe/s3mock:latest ./test/minio/up.sh
-    # 本服务只用于本地/e2e 的对象存储后端。
-    image: ${MINIO_IMAGE:-pgsty/minio:latest}
+    image: ${MINIO_IMAGE:-pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372}
     container_name: assistant-e2e-minio
     restart: "no"
     command: server /data --console-address ":9001"
@@ -14,12 +17,18 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "${MINIO_HOST_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
       - minio-data:/data
-    # healthcheck 故意不写：不同发行版的镜像里未必有 mc/curl/wget，写死会假失败。
-    # 就绪判断交给 up.sh 从宿主探测 /minio/health/live，不假设镜像内容。
+    # 就绪判定交给镜像自带的 curl 探 /minio/health/live：镜像按摘要固定，可以放心
+    # 依赖它的工具面；这样宿主机不必装 curl，up.sh 也不必自己轮询。
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
 
 volumes:
   minio-data:
