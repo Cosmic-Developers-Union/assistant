@@ -512,7 +512,9 @@ func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 			rerun.Instance, instance.Reviewer.Name, instance.Merger.Name)
 	}
 
-	// 配置落盘可回读，且不落任何令牌（凭据只在凭据库）。
+	// 配置落盘可回读，且不落任何令牌（凭据只在凭据库）。instances 已废弃：
+	// 载入即迁移为 gitea 通道（见 instances.canonicalize），所以回读后要看
+	// channels 而不是 instances。
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	if err := instances.Save(configPath, &instances.File{Instances: []instances.Instance{instance}}); err != nil {
 		t.Fatal(err)
@@ -521,10 +523,17 @@ func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if loaded.Instances[0].Reviewer.Name != instance.Reviewer.Name ||
-		loaded.Instances[0].Merger.Name != instance.Merger.Name ||
-		len(loaded.Instances[0].Repos) != len(instance.Repos) {
-		t.Errorf("config round-trip lost instance 配置：%+v", loaded.Instances[0])
+	if len(loaded.Instances) != 0 {
+		t.Errorf("instances 应已迁移清空，实际：%+v", loaded.Instances)
+	}
+	channel, ok := giteaChannelFor(loaded, instance.Host)
+	if !ok {
+		t.Fatalf("回读后找不到 host=%s 的 gitea 通道：%+v", instance.Host, loaded.Channels)
+	}
+	if channel.Reviewer != instance.Reviewer.Name ||
+		channel.Merger != instance.Merger.Name ||
+		len(channel.Repos) != len(instance.Repos) {
+		t.Errorf("config round-trip lost instance 配置：%+v", channel)
 	}
 	data, err := os.ReadFile(configPath)
 	if err != nil {
@@ -535,6 +544,16 @@ func TestSetupInitializesInstanceEndToEnd(t *testing.T) {
 			t.Errorf("config.json 不应包含 %s 令牌明文（凭据只在 credentials.json）", credential.Purpose)
 		}
 	}
+}
+
+// giteaChannelFor 取指定 host 的 gitea 通道（instances 迁移后的当前形态）。
+func giteaChannelFor(file *instances.File, host string) (instances.Channel, bool) {
+	for _, channel := range file.Channels {
+		if channel.Type == instances.ChannelGitea && channel.Host == host {
+			return channel, true
+		}
+	}
+	return instances.Channel{}, false
 }
 
 // listActionSecrets 列出仓库级 Actions secret 名（值只写不可读；响应是数组）。
