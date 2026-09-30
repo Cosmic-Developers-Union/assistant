@@ -4,6 +4,7 @@
 # container 都指向该镜像）。凭据写入 test/e2e/.env，compose 变量写入本目录 .env。
 set -euo pipefail
 cd "$(dirname "$0")"
+source ../envfile.sh
 
 HOST="${ASSISTANT_E2E_HOST:-http://127.0.0.1:3300}"
 ADMIN_USER="${ASSISTANT_E2E_ADMIN_USER:-e2eadmin}"
@@ -72,12 +73,11 @@ echo "==> 启动 act_runner"
 docker compose up -d --wait runner
 
 mkdir -p ../e2e
-cat > ../e2e/.env <<EOF
-ASSISTANT_E2E_HOST=$HOST
-ASSISTANT_E2E_ADMIN_USER=$ADMIN_USER
-ASSISTANT_E2E_ADMIN_PASSWORD=$ADMIN_PASSWORD
-ASSISTANT_E2E_ADMIN_TOKEN=$TOKEN
-ASSISTANT_E2E_IMAGE=$IMAGE
-EOF
+envfile_set ../e2e/.env \
+  "ASSISTANT_E2E_HOST=$HOST" \
+  "ASSISTANT_E2E_ADMIN_USER=$ADMIN_USER" \
+  "ASSISTANT_E2E_ADMIN_PASSWORD=$ADMIN_PASSWORD" \
+  "ASSISTANT_E2E_ADMIN_TOKEN=$TOKEN" \
+  "ASSISTANT_E2E_IMAGE=$IMAGE"
 
 echo "==> 就绪：$HOST（act_runner + 镜像 $IMAGE）"
