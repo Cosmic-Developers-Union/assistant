@@ -278,10 +278,32 @@ PR 作者或仓库管理员这么做 (惯例上用 merge 账号的令牌)。
 3. 分支保护读不到的 (令牌权限不足),回退成严格模式:任何一个 context 失败都算
    门禁不过。
 
-## 4. assistant run (常驻)
+## 4. assistant run
 
-评审调度与消息通道 (微信 / QQ / Telegram / Gitea) 在同一进程承载:
+### 4.1 config.yaml:本次 run 跑什么、怎么跑
 
-- 检测待办 → 每个待办拉起一个 headless `claude` 会话 → 验证结论 → 清理;
-- 会话之间并发,同一会话串行;
-- 消息通道并行接入,互不阻塞。
+run 的全部行为由 config.yaml 决定。它只回答两个问题:跑什么 (哪些仓库、哪些
+通道),怎么跑 (节奏与上限)。平台怎么接入、凭据是什么,由 credentials.json
+负责,config.yaml 按名字引用实例——两个文件各管各的,合起来才是完整运行。
+
+读取规则:`--config` 显式指定路径,缺省当前目录的 `config.yaml`;未知字段
+直接报错 (与 credentials.json 同一口径的严格校验)。
+
+```yaml
+connects:
+  gitea: { type: gitea, url: https://gitea.vincentge.top, token: "{{GITEA_TOKEN}}" }
+mcp:
+  gitea: { cmd: assistant, args: [ mcp, gitea ], env: { } }
+bots:
+  reviewer:
+    kind: gitea-review
+    use: { gitea: gitea }
+    with: { identity: ai, prompt: "" }
+    workspace: { type: worktree , repo: "{{event.repo}}", ref: "{{event.pr.ref}}" }
+    agent: { system: "", mcp: [ gitea ], model: "" }
+  triage:
+    kind: triage
+    use: { gitea: gitea }
+    workspace: { type: worktree , repo: "{{event.repo}}" }
+    agent: { system: "", mcp: [ gitea ], model: "" }
+```
