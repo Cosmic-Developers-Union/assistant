@@ -282,9 +282,11 @@ PR 作者或仓库管理员这么做 (惯例上用 merge 账号的令牌)。
 
 ### 4.1 config.yaml:本次 run 跑什么、怎么跑
 
-run 的全部行为由 config.yaml 决定。它只回答两个问题:跑什么 (哪些仓库、哪些
-通道),怎么跑 (节奏与上限)。平台怎么接入、凭据是什么,由 credentials.json
-负责,config.yaml 按名字引用实例——两个文件各管各的,合起来才是完整运行。
+run 的全部行为由 config.yaml 决定,不读 credentials.json——常驻运行与开发侧
+的登录态彻底解耦。config.yaml 用三个独立的块描述本次运行:`connects` 声明
+用到的平台连接,`mcp` 声明可注入会话的 MCP server,`bots` 声明做事的工人。
+连接、工具、工人三者解耦:bot 按名字组合前两者,事件 (event) 把具体的仓库
+与 PR/Issue 带进来。令牌一律用 `{{VAR}}` 引用环境变量,不落盘、不进日志。
 
 读取规则:`--config` 显式指定路径,缺省当前目录的 `config.yaml`;未知字段
 直接报错 (与 credentials.json 同一口径的严格校验)。
@@ -307,3 +309,81 @@ bots:
     workspace: { type: worktree , repo: "{{event.repo}}" }
     agent: { system: "", mcp: [ gitea ], model: "" }
 ```
+
+三个块各管一件事,互不纠缠:
+
+- `connects`:本次 run 用到的平台连接。`type` 决定平台,`url` 是站点地址,
+  `token` 用 `{{VAR}}` 引用环境变量。
+- `mcp`:可注入会话的 MCP server,按名字定义;`cmd`、`args`、`env` 是启动
+  方式。gitea 的标准形态就是本二进制的 `assistant mcp gitea` (见第 2 节)。
+- `bots`:本次 run 的工人,键是实例名 (reviewer、triage)。每个 bot 由五个
+  互不牵连的部分拼成:
+    - `kind` 决定行为:内置 `gitea-review` 评审 PR、`triage` 分诊 Issue;
+      接新平台或新行为,就是加一种 kind。
+    - `use` 绑定连接:按名字引用 `connects` 里的条目。
+    - `with` 是 kind 的参数:`identity` 指定在平台侧用哪个账号身份落地,
+      `prompt` 是本次会话的附加提示。
+    - `workspace` 选 Workspace 实现:`type: worktree` 是内置的第一种,在某
+      仓库的某个引用上开 worktree;`repo`、`ref` 支持 `{{event.*}}` 占位,
+      由触发事件填充。
+    - `agent` 填 AgentSpec:`system` 系统提示词、`mcp` 注入哪些 server、
+      `model` 用哪个模型;空串表示用缺省。
+
+### 4.2 运行时抽象:Workspace、Session、AgentRunner
+
+run 的核心是三个小接口。Workspace 不是配置里的一个目录字段,而是对运行
+生命周期的抽象:Prepare 把事件变成一个目录,cleanup 负责收尾,worktree
+只是它的第一种实现。
+
+```go
+// Workspace 准备一次会话的工作目录:收下事件,交出目录与收尾函数。
+type Workspace interface {
+	Prepare(ctx context.Context, ev Event) (dir string, cleanup func(), err error)
+}
+
+// Session 是会话持久化的控制面。会话内容由 claude 写成 JSONL、按 id 续接;
+// assistant 不另存一份,而是通过控制「位置」与「id」掌管持久化方案。
+type Session interface {
+	// ID 为事件派生稳定的会话 id:新会话传 --session-id,续接传 --resume。
+	// 锚点由 kind 决定:PR 评审以 head 为锚 (前移即新 id、新会话),
+	// 分诊以 Issue 标题为锚 (同一 id,重试续接)。
+	ID(ev Event) string
+	// Dir 返回这批会话的落盘位置:claude 的会话目录被指到 assistant 托管
+	// 的根,不碰用户的 ~/.claude;回查与清理都以此为界。
+	Dir(ev Event) string
+}
+
+// AgentRunner 在 dir 里按规格跑一次 agent 会话;session 指明接哪段记忆。
+type AgentRunner interface {
+	Run(ctx context.Context, spec AgentSpec, ev Event, dir string, session string) (Outcome, error)
+}
+```
+
+- Workspace:`Prepare` 收下事件,交出一个目录和一个收尾函数。worktree 是
+  第一个实现 (PR 事件在仓库的 ref 上开 worktree,分诊事件在基线上开);
+  以后要容器、要远端环境,就是新增一种 Workspace 实现,run 主循环不改。
+- Session 掌管会话的持久化方案。记忆本体是 claude 的 JSONL,assistant 不
+  复制、不代管,靠两个旋钮控制它:Dir 把 claude 的会话目录指到 assistant
+  托管的根 (不碰 ~/.claude);ID 为事件派生稳定 id。runner 拿 id 表达意图:
+  新会话传 --session-id,续接传 --resume;不需要留存的一次性会话可以直接
+  --no-session-persistence 不落盘。锚点由 kind 决定:PR 评审以 head 为锚
+  (head 前移即新 id、新会话),分诊以 Issue 标题为锚 (同一 id,重试续接)。
+- AgentRunner 只管「在 dir 里跑一次会话」:spec 来自 bot 的 agent 块与
+  with 参数,ev 提供上下文,session 指明接哪段记忆,返回 Outcome (结束
+  原因、耗时、错误)。它不判成败——成败看平台侧,下一轮待办消失才算完成。
+
+三个接口的分工就是解耦边界:Workspace 管「在哪跑」,Session 管「记忆存哪、
+接哪段」,AgentRunner 管「怎么跑一次」。config.yaml 是它们的声明式投影,kind
+按事件类型把三者拼起来。会话的元数据 (id、结局、耗时、开销、错误) 由主
+循环顺手登记,供状态 API 与 `assistant mcp sessions` 回查——那是观测面,
+不参与调度,也不承载记忆。
+
+### 4.3 一次事件的处理顺序
+
+1. 发现待办 (带 status/review 的 PR、带 status/triage 的 Issue),构造事件。
+2. 按事件类型选 bot;同一待办同时至多一个会话。
+3. `Session.ID(ev)` 与 `Session.Dir(ev)`:派生会话 id,定位落盘位置。
+4. `Workspace.Prepare(ev)`:拿到工作目录与收尾函数。
+5. `AgentRunner.Run(spec, ev, dir, session)`:新会话以 --session-id 开,
+   已有同 id 会话以 --resume 续接;结束后登记元数据,执行 cleanup。
+6. 完成判定在平台侧:下一轮待办消失,这一单才算完成。
