@@ -348,9 +348,11 @@ type Session interface {
 	// 锚点由 kind 决定:PR 评审以 head 为锚 (前移即新 id、新会话),
 	// 分诊以 Issue 标题为锚 (同一 id,重试续接)。
 	ID(ev Event) string
-	// Dir 返回这批会话的落盘位置:claude 的会话目录被指到 assistant 托管
-	// 的根,不碰用户的 ~/.claude;回查与清理都以此为界。
+	// Dir 给出会话的落盘位置,并保证内容在本地可用 (远端实现在此拉回):
+	// claude 的会话目录被指到 assistant 托管的根,不碰用户的 ~/.claude。
 	Dir(ev Event) string
+	// Sync 在会话结束后固化副本:本地实现是空操作,远端实现上传对象。
+	Sync(ev Event, dir string) error
 }
 
 // AgentRunner 在 dir 里按规格跑一次 agent 会话;session 指明接哪段记忆。
@@ -363,8 +365,8 @@ type AgentRunner interface {
   第一个实现 (PR 事件在仓库的 ref 上开 worktree,分诊事件在基线上开);
   以后要容器、要远端环境,就是新增一种 Workspace 实现,run 主循环不改。
 - Session 掌管会话的持久化方案。记忆本体是 claude 的 JSONL,assistant 不
-  复制、不代管,靠两个旋钮控制它:Dir 把 claude 的会话目录指到 assistant
-  托管的根 (不碰 ~/.claude);ID 为事件派生稳定 id。runner 拿 id 表达意图:
+  复制、不代管,靠三个动作控制它:ID 为事件派生稳定 id;Dir 给出落盘位置
+  并保证内容本地可用;Sync 在会话结束后固化副本。runner 拿 id 表达意图:
   新会话传 --session-id,续接传 --resume;不需要留存的一次性会话可以直接
   --no-session-persistence 不落盘。锚点由 kind 决定:PR 评审以 head 为锚
   (head 前移即新 id、新会话),分诊以 Issue 标题为锚 (同一 id,重试续接)。
@@ -378,12 +380,69 @@ type AgentRunner interface {
 循环顺手登记,供状态 API 与 `assistant mcp sessions` 回查——那是观测面,
 不参与调度,也不承载记忆。
 
-### 4.3 一次事件的处理顺序
+### 4.3 Session 的两个实现:LocalSession 与 S3Session
+
+两个实现共用同一套 id 派生 (锚点规则由 kind 决定),差别只在「副本放哪」。
+config.yaml 的 `session` 块选择实现,缺省 local:
+
+```yaml
+session:
+  store: local                  # 缺省;换 s3 时补 endpoint/bucket/凭据引用
+# store: s3
+#   endpoint: https://minio.example.com
+#   bucket: assistant-sessions
+#   prefix: sessions
+#   access-key: "{{AWS_ACCESS_KEY_ID}}"
+#   secret-key: "{{AWS_SECRET_ACCESS_KEY}}"
+```
+
+LocalSession 是缺省实现:会话与这台机器同生共死。
+
+```go
+// LocalSession 把会话直接落在本机托管根:claude 的会话目录指向
+// <run 数据根>/sessions/,JSONL 落本地盘,回查与清理走文件系统。
+type LocalSession struct{ Root string }   // 本次 run 的会话根
+
+func (s LocalSession) ID(ev Event) string              { return anchorID(ev) }
+func (s LocalSession) Dir(ev Event) string             { return path.Join(s.Root, ev.Host, ev.Repo) }
+func (s LocalSession) Sync(ev Event, dir string) error { return nil }  // 本地即终点
+```
+
+S3Session 在本地之外固化一份副本:恢复在取用之前,上传在会话之后。
+
+```go
+// S3Session 用对象存储做持久副本:claude 仍写本地盘 (Dir 先把这份会话
+// 从桶里拉回),会话结束后 Sync 把它上传为对象;换机、重建容器后可原样续接。
+type S3Session struct {
+	Local  LocalSession             // 本地路径与 id 派生全部复用
+	Remote Bucket                   // endpoint/bucket/prefix + {{VAR}} 凭据引用
+}
+
+func (s S3Session) ID(ev Event) string { return s.Local.ID(ev) }
+
+func (s S3Session) Dir(ev Event) string {
+	dir := s.Local.Dir(ev)
+	s.Remote.Fetch(s.objectKey(ev), dir)     // 本地缺这份会话就先拉回
+	return dir
+}
+
+func (s S3Session) Sync(ev Event, dir string) error {
+	return s.Remote.Put(s.objectKey(ev), dir) // 一个会话一个对象
+}
+```
+
+取舍:LocalSession 简单、零依赖,代价是会话活不过这台机器;S3Session 用
+一次上传换续接的可迁移性,多一个存储依赖。两者的差异被 Session 接口完全
+吸收——run 主循环与 AgentRunner 对用的是哪一个毫不知情。
+
+### 4.4 一次事件的处理顺序
 
 1. 发现待办 (带 status/review 的 PR、带 status/triage 的 Issue),构造事件。
 2. 按事件类型选 bot;同一待办同时至多一个会话。
-3. `Session.ID(ev)` 与 `Session.Dir(ev)`:派生会话 id,定位落盘位置。
+3. `Session.ID(ev)` 与 `Session.Dir(ev)`:派生会话 id,定位落盘位置并确保
+   内容在本地可用。
 4. `Workspace.Prepare(ev)`:拿到工作目录与收尾函数。
 5. `AgentRunner.Run(spec, ev, dir, session)`:新会话以 --session-id 开,
-   已有同 id 会话以 --resume 续接;结束后登记元数据,执行 cleanup。
+   已有同 id 会话以 --resume 续接;结束后 `Session.Sync` 固化会话副本、
+   登记元数据,执行 cleanup。
 6. 完成判定在平台侧:下一轮待办消失,这一单才算完成。
