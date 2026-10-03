@@ -1,14 +1,11 @@
 {
   "mcpServers": {
     "gitea": {
+      "command": "assistant",
       "args": [
         "mcp",
         "gitea"
-      ],
-      "command": "assistant",
-      "env": {
-        "ASSISTANT_CONFIG": "/home/ge/Projects/assistant/config.json"
-      }
+      ]
     }
   }
 }
