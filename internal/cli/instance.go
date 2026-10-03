@@ -1,9 +1,10 @@
 package cli
 
 import (
-	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"slices"
@@ -228,13 +229,14 @@ func newInstanceCommandWithLogins(logins instanceLogins) *cobra.Command {
 
 type prompts struct {
 	command *cobra.Command
-	reader  *bufio.Reader
+	reader  *term.Terminal
 	input   *os.File
 }
 
 func newPrompts(cmd *cobra.Command) *prompts {
 	input, _ := cmd.InOrStdin().(*os.File)
-	return &prompts{command: cmd, reader: bufio.NewReader(cmd.InOrStdin()), input: input}
+	stream := &promptStream{ctx: cmd.Context(), input: cmd.InOrStdin(), output: cmd.ErrOrStderr()}
+	return &prompts{command: cmd, reader: term.NewTerminal(stream, ""), input: input}
 }
 func (p *prompts) value(value, label string) (string, error) {
 	if value != "" {
@@ -243,8 +245,7 @@ func (p *prompts) value(value, label string) (string, error) {
 	if p.input == nil || !term.IsTerminal(int(p.input.Fd())) {
 		return "", fmt.Errorf("缺少 %s，请使用对应选项（非交互环境不询问）", label)
 	}
-	fmt.Fprintf(p.command.ErrOrStderr(), "%s: ", label)
-	result, err := p.reader.ReadString('\n')
+	result, err := p.read(label, false)
 	if err != nil {
 		return "", fmt.Errorf("读取 %s: %w", label, err)
 	}
@@ -269,17 +270,71 @@ func (p *prompts) secret(path, label string) (string, error) {
 	if p.input == nil || !term.IsTerminal(int(p.input.Fd())) {
 		return "", fmt.Errorf("缺少 %s，请使用密钥文件选项", label)
 	}
-	fmt.Fprintf(p.command.ErrOrStderr(), "%s: ", label)
-	data, err := term.ReadPassword(int(p.input.Fd()))
-	fmt.Fprintln(p.command.ErrOrStderr())
+	data, err := p.read(label, true)
 	if err != nil {
 		return "", err
 	}
 	if len(data) == 0 {
 		return "", fmt.Errorf("%s 不能为空", label)
 	}
-	return string(data), nil
+	return data, nil
 }
+
+// read 在主调用中切换并恢复终端状态，避免取消后后台读取再次关闭终端回显。
+func (p *prompts) read(label string, secret bool) (string, error) {
+	if err := p.command.Context().Err(); err != nil {
+		return "", err
+	}
+	state, err := term.MakeRaw(int(p.input.Fd()))
+	if err != nil {
+		return "", fmt.Errorf("设置交互终端: %w", err)
+	}
+	defer term.Restore(int(p.input.Fd()), state)
+	var value string
+	if secret {
+		value, err = p.reader.ReadPassword(label + ": ")
+	} else {
+		p.reader.SetPrompt(label + ": ")
+		value, err = p.reader.ReadLine()
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, context.Canceled) {
+		fmt.Fprint(p.command.ErrOrStderr(), "\r\n")
+		return "", context.Canceled
+	}
+	return value, err
+}
+
+// promptStream 让终端读操作响应取消；取消后命令退出，不再复用未完成的输入。
+// 后台读取仅接触独立缓冲区，不改变终端状态或在退出后写入提示。
+type promptStream struct {
+	ctx    context.Context
+	input  io.Reader
+	output io.Writer
+}
+
+func (s *promptStream) Read(data []byte) (int, error) {
+	if err := s.ctx.Err(); err != nil {
+		return 0, err
+	}
+	type result struct {
+		data []byte
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		buffer := make([]byte, len(data))
+		n, err := s.input.Read(buffer)
+		done <- result{buffer[:n], err}
+	}()
+	select {
+	case <-s.ctx.Done():
+		return 0, s.ctx.Err()
+	case value := <-done:
+		return copy(data, value.data), value.err
+	}
+}
+
+func (s *promptStream) Write(data []byte) (int, error) { return s.output.Write(data) }
 
 func loginGitea(ctx context.Context, host, user, password, otp, name string) (string, error) {
 	client, err := sdk.NewClient(host, sdk.SetBasicAuth(user, password), sdk.SetOTP(otp), sdk.SetGiteaVersion(""), sdk.SetHTTPClient(&http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}))

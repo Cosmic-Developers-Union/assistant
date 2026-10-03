@@ -2,9 +2,11 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/Cosmic-Developers-Union/assistant/internal/status"
@@ -26,6 +28,7 @@ func Execute(command *cobra.Command) int {
 	defer signal.Stop(signals)
 	done := make(chan struct{})
 	defer close(done)
+	var interrupted atomic.Int32
 	go func() {
 		count := 0
 		for {
@@ -36,22 +39,37 @@ func Execute(command *cobra.Command) int {
 			case sig = <-signals:
 			}
 			count++
+			code := 143
+			if sig == os.Interrupt {
+				code = 130
+			}
+			interrupted.Store(int32(code))
 			if count == 1 {
-				fmt.Fprintf(os.Stderr, "收到 %s，等待当前操作完成后退出（再次发送将立即强杀）\n", sig)
+				fmt.Fprintf(os.Stderr, "收到 %s，正在退出（再次发送将立即强制退出）\n", sig)
 				cancel()
 				continue
 			}
 			fmt.Fprintf(os.Stderr, "再次收到 %s，强杀退出\n", sig)
-			os.Exit(1)
+			os.Exit(code)
 		}
 	}()
 
 	if err := command.ExecuteContext(ctx); err != nil {
+		if code := interrupted.Load(); code != 0 {
+			return int(code)
+		}
+		if errors.Is(err, context.Canceled) {
+			fmt.Fprintln(os.Stderr, "已取消")
+			return 130
+		}
 		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
 		if status.IsFatalError(err) {
 			return exitCodeAuthFailure
 		}
 		return 1
+	}
+	if code := interrupted.Load(); code != 0 {
+		return int(code)
 	}
 	return 0
 }

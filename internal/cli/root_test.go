@@ -301,7 +301,7 @@ func TestExecuteExitCodes(t *testing.T) {
 	for _, entry := range []struct {
 		err  error
 		code int
-	}{{nil, 0}, {fmt.Errorf("失败"), 1}, {&status.FatalError{Reason: "凭据失败"}, 78}} {
+	}{{nil, 0}, {fmt.Errorf("失败"), 1}, {&status.FatalError{Reason: "凭据失败"}, 78}, {fmt.Errorf("取消输入: %w", context.Canceled), 130}} {
 		cmd := &cobra.Command{Use: "test", RunE: func(*cobra.Command, []string) error { return entry.err }, SilenceErrors: true, SilenceUsage: true}
 		cmd.SetArgs([]string{})
 		if code := Execute(cmd); code != entry.code {

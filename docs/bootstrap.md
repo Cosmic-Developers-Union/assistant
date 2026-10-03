@@ -14,6 +14,9 @@ assistant instance provision gitea --admin work --dry-run
 assistant instance provision gitea --admin work
 ```
 
+交互提示中按一次 Ctrl+C 即取消退出（退出码 130），密码不会回显，退出前恢复终端状态。
+SIGTERM 也会取消输入并退出（退出码 143）；取消输入不会写入凭据。
+
 缺省创建 ai、merge，实例名为 work-ai、work-merge。新账号使用随机密码，
 发放 read:user、read:organization、write:repository、write:issue 的限定令牌；
 持久凭据是令牌，密码不落盘、不回显。平台账号不是站点管理员。
