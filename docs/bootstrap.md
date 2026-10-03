@@ -82,29 +82,25 @@ merge 需要仓库管理员权限登记他人评审请求，但不成为站点�
 ```sh
 assistant project install action --dry-run
 assistant project install action
-# 开发版或指定其他发布版本（将 v1.2.3 替换为实际已发布版本）：
-assistant project install action --version v1.2.3 --instance work --merge-instance work-merge
 assistant project uninstall action
 ```
 
-安装启用项目 Actions，通过 SDK 写 MERGE_TOKEN secret，生成
-.gitea/workflows/assistant.yml。workflow 只引用 CI 环境与 secret，不包含明文令牌。
+安装只在当前 Git 项目生成 .gitea/workflows/assistant.yml，不读取站点配置、
+凭据或 Git remote，也不启用平台 Actions 或写入 secret。没有登录、没有 merge
+账号、甚至凭据文件无效时，仍可生成。账号与平台设置属于站点接入工作。
+workflow 使用平台提供的 GITEA_HOST / GITEA_REPOSITORY / GITHUB_TOKEN，并引用
+仓库 Actions secret MERGE_TOKEN；运行前在平台配置该 secret，生成器不接触它。
+
+生成物自动绑定当前 assistant 构建版本，两个任务使用同一固定镜像标签。
+发布构建使用发布标签，未打标签的构建使用 sha-<完整 commit>；本地 Make 构建、
+Release 与镜像发布沿用相同规则。无需 --version，也不提供 --instance、--repo
+或 --merge-instance。工具升级不改变已经提交的 workflow；重新生成并提交才更新。
+对应版本镜像由发布流程提供，本地新 commit 的镜像须发布后才能由 runner 拉取。
+
 存在同名的非托管 workflow 则拒绝覆盖；重复安装可更新自己的 workflow。
-
-未指定 --instance 时，从 Git remote 匹配已登录的 Gitea 站点；只有一个账号时复用该
-账号，多个账号时优先选择唯一站点管理员，否则选择唯一仓库管理员。多个匹配站点或
-管理员时报错并提示 --instance，不把空字符串当作实例名。SSH remote 使用已登记的
-Web 地址，不把 SSH 端口当成 API 端口。缺少 merge 令牌时提示先接入合并账号。
-
-两个任务的 assistant 镜像都绑定同一个完整发布版本，默认取当前发布二进制的版本，
-可用 --version 指定其他已发布版本。latest、dev、分支名和缺失版本均拒绝；开发版
-必须显式指定发布版本。生成后工具升级不会自动改变已提交 workflow 的镜像版本；
-更新版本需重新安装并提交文件。版本与文件冲突在平台写入前检查。
-
-本地文件的安装/卸载都需要提交推送后才在平台生效；命令不替用户提交或推送。
-卸载只删除带 managed-by: assistant 标记的 workflow，不关掉整个仓库的 Actions、
-不删其他 workflow、不移除账号/协作者/分支保护，MERGE_TOKEN 也保留，防止影响其他
-工作流。彻底停用时，由管理员按实际使用情况另行撤销平台令牌和 secret。
+--dry-run 不写文件。本地文件的安装/卸载需提交推送后生效；命令不替用户提交或推送。
+卸载只删除带 managed-by: assistant 标记的 workflow，不关闭仓库 Actions、不删其他
+workflow，也不移除平台账号、权限或 secret。
 
 ## 安装和卸载 MCP
 

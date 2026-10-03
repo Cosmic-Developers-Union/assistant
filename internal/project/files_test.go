@@ -307,7 +307,7 @@ func TestWorkflowVersionIsFixedAndCanBeUpdated(t *testing.T) {
 			t.Fatal("无效版本写文件")
 		}
 	}
-	for _, v := range []string{"v1.2.3", "v2.3.4-rc.1", "v2.3.4-rc-1"} {
+	for _, v := range []string{"v1.2.3", "v2.3.4-rc.1", "v2.3.4-rc-1", "sha-" + strings.Repeat("a", 40)} {
 		if err := InstallWorkflow(dir, WorkflowOptions{Version: v}); err != nil {
 			t.Fatal(err)
 		}

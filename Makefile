@@ -10,12 +10,14 @@ LDFLAGS = -w -s
 
 # version 注入点：单一二进制共用 internal/cli 里的 version 变量
 VERSION_PKG = github.com/Cosmic-Developers-Union/assistant/internal/cli
+# 二进制与其生成物共享版本；未打标签的构建固定到完整源码提交。
+VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null || git rev-parse HEAD 2>/dev/null | sed 's/^/sha-/')
 
 # 手动发布的 package registry 命名空间（generic package 归属于 owner）
 GITEA_OWNER ?= owner
 
 # 容器镜像名（供 CI / 仓库级 Actions 使用）
-IMAGE ?= assistant:dev
+IMAGE ?= assistant:$(VERSION)
 
 # 评审会话镜像（assistant run --docker-image 使用）
 REVIEW_IMAGE ?= ghcr.io/cosmic-developers-union/assistant-review:dev
@@ -66,14 +68,14 @@ help: ## 显示帮助信息
 build: ## 构建 assistant 二进制 (Linux/amd64, 静态链接, 供 generic package 发布)
 	@echo "==> 构建 $(BINARY_NAME) 二进制..."
 	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=$(GOARCH) \
-		go build -ldflags="$(LDFLAGS) -X $(VERSION_PKG).version=$$(git describe --tags --always 2>/dev/null || echo dev)" \
+		go build -ldflags="$(LDFLAGS) -X $(VERSION_PKG).version=$(VERSION)" \
 		-o $(BINARY_NAME) ./cmd/$(BINARY_NAME)
 	@echo "==> 构建完成: $(BINARY_NAME)"
 
 .PHONY: build-local
 build-local: ## 构建本地平台二进制 (assistant, 用于开发测试)
 	@echo "==> 构建本地平台二进制..."
-	go build -o $(BINARY_NAME) ./cmd/$(BINARY_NAME)
+	go build -ldflags="-X $(VERSION_PKG).version=$(VERSION)" -o $(BINARY_NAME) ./cmd/$(BINARY_NAME)
 	@echo "==> 构建完成: $(BINARY_NAME)"
 
 .PHONY: install
@@ -104,7 +106,7 @@ cover-report: ## 只打印各包覆盖率与阈值差距，不因不达标而失
 .PHONY: image
 image: ## 构建容器镜像（仓库级 Actions 用；推送到 registry 由 CI 完成）
 	@echo "==> 构建容器镜像 $(IMAGE)..."
-	docker build --build-arg VERSION="$$(git describe --tags --always 2>/dev/null || echo dev)" -t $(IMAGE) .
+	docker build --build-arg VERSION="$(VERSION)" -t $(IMAGE) .
 	@echo "==> 构建完成: $(IMAGE)"
 
 .PHONY: review-image
@@ -117,7 +119,7 @@ review-image: ## 构建评审会话镜像（target review；Dockerfile 在 image
 daemon-image: ## 构建自带二进制的独立 daemon 镜像（评审环境 + assistant；compose 默认改用 review 镜像 + 宿主二进制挂载）
 	@echo "==> 构建 daemon 镜像 $(DAEMON_IMAGE)..."
 	docker build -f images/review/Dockerfile --target daemon \
-		--build-arg VERSION="$$(git describe --tags --always 2>/dev/null || echo dev)" \
+		--build-arg VERSION="$(VERSION)" \
 		-t $(DAEMON_IMAGE) .
 	@echo "==> 构建完成: $(DAEMON_IMAGE)"
 

@@ -124,20 +124,6 @@ func TestProjectGiteaBootstrapAndCrossRepositoryMention(t *testing.T) {
 	if protection.RequiredApprovals != 2 || !protection.BlockAdminMergeOverride || !protection.DismissStaleApprovals || len(protection.MergeWhitelistUsernames) != 1 || protection.MergeWhitelistUsernames[0] != merger {
 		t.Fatal("保护不符合双批准契约", protection)
 	}
-	if err := client.InstallActionsSettings(ctx, user, managed, accounts[1].Token, false); err != nil {
-		t.Fatal(err)
-	}
-	secrets, _, err := client.SDK.Actions.ListRepoSecrets(ctx, user, managed, gitea.ListRepoActionsSecretOption{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	found := false
-	for _, secret := range secrets {
-		found = found || secret.Name == "MERGE_TOKEN"
-	}
-	if !found {
-		t.Fatal("Actions secret 未写入")
-	}
 	dir := t.TempDir()
 	if err := project.InstallWorkflow(dir, project.WorkflowOptions{Version: "v1.2.3", Remove: false, DryRun: false}); err != nil {
 		t.Fatal(err)
@@ -171,7 +157,7 @@ func TestProjectGiteaBootstrapAndCrossRepositoryMention(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	found = false
+	found := false
 	for _, event := range events {
 		if event.Repo == user+"/"+public && event.Kind == "gitea-review" {
 			found = true

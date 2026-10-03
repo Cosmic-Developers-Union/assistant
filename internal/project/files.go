@@ -15,18 +15,18 @@ import (
 //go:embed assets/assistant.yml
 var workflow []byte
 
-// WorkflowOptions 要求安装时固定镜像版本；卸载不依赖当前二进制版本。
+// WorkflowOptions 的版本由调用方的构建信息装配，不从用户项目或站点推导。
 type WorkflowOptions struct {
 	Version        string
 	Remove, DryRun bool
 }
 
-var releaseVersion = regexp.MustCompile(`^v?[0-9]+\.[0-9]+\.[0-9]+(?:-[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*)?$`)
+var artifactVersion = regexp.MustCompile(`^(?:v?[0-9]+\.[0-9]+\.[0-9]+(?:-[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*)?|sha-[a-f0-9]{40,64})$`)
 
 // InstallWorkflow 只更新本工具标记的 workflow，不覆盖用户自有文件。
 func InstallWorkflow(dir string, options WorkflowOptions) error {
-	if !options.Remove && (len(options.Version) > 128 || !releaseVersion.MatchString(options.Version)) {
-		return fmt.Errorf("Actions 必须绑定固定发布版本；请用 --version 指定版本（例如 v1.2.3），不能使用 latest、dev 或分支名")
+	if !options.Remove && (len(options.Version) > 128 || !artifactVersion.MatchString(options.Version)) {
+		return fmt.Errorf("构建产物缺少有效固定版本信息；请用 make build-local 重新构建，不接受 latest、dev 或分支名")
 	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {

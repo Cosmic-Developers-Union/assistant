@@ -96,8 +96,6 @@ func (f *fixture) client(t *testing.T) *Client {
 			} else {
 				fmt.Fprint(w, `{"rule_name":"main"}`)
 			}
-		case strings.Contains(r.URL.Path, "/actions/secrets/"):
-			w.WriteHeader(204)
 		case r.URL.Path == "/api/v1/repos/team/repo":
 			fmt.Fprintf(w, `{"name":"repo","default_branch":%q}`, f.defaultBranch)
 		default:

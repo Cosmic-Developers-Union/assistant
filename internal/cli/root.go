@@ -19,7 +19,7 @@ var version = "dev"
 func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	var configPath string
 	var verbose, debug bool
-	root := &cobra.Command{Use: "assistant", Short: "平台实例、AI 工具、仓库动作与 bot 运行", Version: version, Args: cobra.NoArgs, SilenceErrors: true, SilenceUsage: true, RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }, Example: "  assistant instance add gitea --name work --url https://gitea.example --username developer\n  assistant action label-sync --dry-run\n  assistant run --config config.yaml"}
+	root := &cobra.Command{Use: "assistant", Short: "平台实例、AI 工具、仓库动作与 bot 运行", Version: binaryVersion(), Args: cobra.NoArgs, SilenceErrors: true, SilenceUsage: true, RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }, Example: "  assistant instance add gitea --name work --url https://gitea.example --username developer\n  assistant action label-sync --dry-run\n  assistant run --config config.yaml"}
 	root.SetOut(stdout)
 	root.SetErr(stderr)
 	root.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "展示正在进行的步骤与目标")

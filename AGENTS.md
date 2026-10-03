@@ -16,7 +16,9 @@
 - `internal/mcps` 检测开发者 Gitea 身份并启动官方 stdio MCP。
 - `instance token` 只读输出已保存令牌，禁止联网或修改凭据；发令牌使用 create-token。
   MCP 包装层沿用 goal.md 的 host/token 解析接口，不增加实例选择参数。
-- 项目 Actions workflow 必须固定完整发布版本；不能写 latest/dev/分支标签。
+- install action 只生成本地文件，不读取站点、账号或令牌，不修改平台。
+  生成物自动绑定生成器的构建版本（发布标签或完整 commit），不让用户传 --version。
+  Make、Release 与镜像发布必须使用相同版本规则；不能写 latest/dev/分支标签。
   MCP 强制安装先备份冲突或损坏的原文件，保留可解析的其他配置；空白文件直接初始化。
 - `skills/review/SKILL.md` 是内嵌评审协议的唯一提示词来源。
 - `content/agents.md` 保存仓库评审约定的内容源。

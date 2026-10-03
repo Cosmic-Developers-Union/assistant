@@ -1,7 +1,7 @@
 name: publish-image
 
 # 构建并发布容器镜像到 GitHub Container Registry（ghcr.io）。
-# 仓库级 Actions workflow 用 `container: ghcr.io/<owner>/assistant:latest`
+# 仓库级 Actions workflow 固定使用与生成器构建版本一致的镜像标签，
 # 运行 assistant action label-sync / automerge，无需在步骤里下载二进制。
 on:
   push:
@@ -23,6 +23,15 @@ jobs:
         id: image
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
+      - name: 计算生成物版本
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
@@ -38,7 +47,8 @@ jobs:
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}
-            type=sha,prefix=sha-
+            type=raw,value=${{ steps.version.outputs.value }}
+            type=sha,format=long,prefix=sha-
             # latest：最新构建，每次 merge 到 main 都覆盖
             type=raw,value=latest,enable={{is_default_branch}}
             # stable：最后一个发布版本，仅在 push v* tag 时移动
@@ -50,7 +60,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: VERSION=${{ github.ref_name }}
+          build-args: VERSION=${{ steps.version.outputs.value }}
           # GHA 缓存加速高频构建
           cache-from: type=gha
           cache-to: type=gha,mode=max

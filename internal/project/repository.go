@@ -17,50 +17,6 @@ type RepositoryOptions struct {
 	Log                           func(string, ...any)
 }
 
-// SelectAdministrator 优先选择唯一站点管理员，否则选择唯一仓库管理员。
-// 不按实例名猜测身份；认证失败或存在歧义时要求操作者显式指定。
-func SelectAdministrator(ctx context.Context, candidates []credentials.Gitea, owner, repo string) (credentials.Gitea, error) {
-	if len(candidates) == 1 {
-		return candidates[0], nil
-	}
-	var admins, repositoryAdmins []credentials.Gitea
-	var clients []*Client
-	for _, entry := range candidates {
-		client, err := NewClient(entry)
-		if err != nil {
-			return credentials.Gitea{}, err
-		}
-		clients = append(clients, client)
-		me, _, err := client.SDK.Users.GetMyUserInfo(ctx)
-		if err != nil {
-			return credentials.Gitea{}, fmt.Errorf("检查实例 %s 权限失败，请用 --instance 明确选择: %w", entry.Name, credentials.RedactError(err, entry.Token))
-		}
-		if me.IsAdmin {
-			admins = append(admins, entry)
-		}
-	}
-	if len(admins) == 1 {
-		return admins[0], nil
-	}
-	if len(admins) > 1 {
-		return credentials.Gitea{}, fmt.Errorf("存在多个站点管理员实例，请用 --instance 明确选择")
-	}
-	for _, client := range clients {
-		entry := client.Entry
-		project, _, err := client.SDK.Repositories.GetRepo(ctx, owner, repo)
-		if err != nil {
-			return credentials.Gitea{}, fmt.Errorf("检查实例 %s 仓库权限失败，请用 --instance 明确选择: %w", entry.Name, credentials.RedactError(err, entry.Token))
-		}
-		if project.Permissions != nil && project.Permissions.Admin {
-			repositoryAdmins = append(repositoryAdmins, entry)
-		}
-	}
-	if len(repositoryAdmins) == 1 {
-		return repositoryAdmins[0], nil
-	}
-	return credentials.Gitea{}, fmt.Errorf("无法确定唯一管理员实例，请用 --instance 明确选择")
-}
-
 // Configure 规范标签、协作者与默认分支保护；保留未指定的已有检查上下文。
 func (c *Client) Configure(ctx context.Context, opt RepositoryOptions) error {
 	if opt.Owner == "" || opt.Name == "" || !accountName.MatchString(opt.Reviewer) || !accountName.MatchString(opt.Merger) || opt.Reviewer == opt.Merger {
@@ -118,23 +74,6 @@ func (c *Client) Configure(ctx context.Context, opt RepositoryOptions) error {
 	}
 	if err != nil {
 		return fmt.Errorf("配置分支保护: %w", err)
-	}
-	return nil
-}
-
-// InstallActionsSettings 开启项目 Actions 并写入会签账号 secret，令牌不进入 workflow。
-func (c *Client) InstallActionsSettings(ctx context.Context, owner, repo, token string, dry bool) error {
-	if token == "" {
-		return fmt.Errorf("安装 Actions 缺少合并账号令牌")
-	}
-	if dry {
-		return nil
-	}
-	if _, _, err := c.SDK.Repositories.EditRepo(ctx, owner, repo, gitea.EditRepoOption{HasActions: new(true)}); err != nil {
-		return fmt.Errorf("启用项目 Actions: %w", err)
-	}
-	if _, err := c.SDK.Actions.CreateRepoSecret(ctx, owner, repo, "MERGE_TOKEN", gitea.CreateOrUpdateSecretOption{Data: token}); err != nil {
-		return fmt.Errorf("设置 MERGE_TOKEN: %w", err)
 	}
 	return nil
 }

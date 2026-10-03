@@ -465,7 +465,7 @@ assistant instance provision gitea --admin admin-instance
 assistant instance create-token ai-instance
 assistant project configure --instance admin-instance
 assistant project labels --instance admin-instance
-assistant project install action --version v1.2.3 --instance admin-instance --merge-instance merge-instance
+assistant project install action
 assistant project uninstall action
 assistant project install mcp
 assistant project install mcp --force
@@ -476,11 +476,12 @@ assistant project uninstall mcp
 令牌。ai 为 write 协作者，merge 为 admin 协作者以登记他人评审请求，但必须受
 默认分支双批准、批准随提交过期、落后/驳回/未回应门禁和 merge 合并白名单约束。
 
-只读演练不写平台或文件。Actions secret 通过 SDK 注入，托管 workflow 本地生成，
-提交推送后生效；两个任务的镜像必须固定为完整发布版本，缺省当前发布二进制版本，
-开发版须用 --version 指定已发布版本，禁止 latest/dev/分支名。安装未指定 --instance
-时按 Git remote 匹配已登记站点及唯一管理员，歧义时报错，不查找空实例名。
-卸载只移除自己的 workflow，不关闭整个仓库 Actions、不删其他
+只读演练不写平台或文件。Actions 安装只在本地生成托管 workflow，不读取凭据、
+站点或 remote，不修改平台设置或 secret。每个生成物自动绑定生成器的构建版本：
+发布标签或 sha-<完整 commit>，两个任务使用同一固定镜像；版本由构建与发布链保证，
+不提供 --version / --instance / --merge-instance 参数，不接受 latest/dev/分支名。
+平台连接与 secret 由 workflow 运行时引用 CI 环境和仓库设置。
+提交推送后生效；卸载只移除自己的 workflow，不关闭整个仓库 Actions、不删其他
 workflow 或共享 secret。MCP 安装无需凭据或运行配置，只写 assistant mcp gitea
 通用启动命令，不增加实例参数、不写密钥，保留其他 server 和用户字段。
 MCP server 名称固定为 gitea，assistant 只提供启动与凭据解析包装。

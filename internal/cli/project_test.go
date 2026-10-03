@@ -151,8 +151,6 @@ func projectTestFixture(t *testing.T) *projectFixture {
 				return
 			}
 			fmt.Fprint(w, `{"rule_name":"main"}`)
-		case strings.Contains(r.URL.Path, "/actions/secrets/"):
-			w.WriteHeader(204)
 		case r.URL.Path == "/api/v1/repos/team/repo":
 			fmt.Fprint(w, `{"name":"repo","default_branch":"main"}`)
 		default:
@@ -414,10 +412,13 @@ func TestCreateTokenCommandAdminTargetAndLocalIsolation(t *testing.T) {
 }
 
 func TestProjectCommandLifecycle(t *testing.T) {
+	old := version
+	version = "v1.2.3"
+	t.Cleanup(func() { version = old })
 	f := projectTestFixture(t)
-	for _, args := range [][]string{{"configure", "--required-checks", "build"}, {"labels"}, {"install", "action", "--version", "v1.2.3"}, {"install", "mcp"}} {
+	for _, args := range [][]string{{"configure", "--required-checks", "build"}, {"labels"}, {"install", "action"}, {"install", "mcp"}} {
 		prefix := []string{"project", "--dir", f.dir}
-		if args[len(args)-1] != "mcp" {
+		if args[0] == "configure" || args[0] == "labels" {
 			prefix = append(prefix, "--instance", "admin")
 		}
 		args = append(prefix, args...)
@@ -441,10 +442,13 @@ func TestProjectCommandLifecycle(t *testing.T) {
 	}
 }
 func TestProjectCommandDryRunAndValidation(t *testing.T) {
+	old := version
+	version = "v1.2.3"
+	t.Cleanup(func() { version = old })
 	f := projectTestFixture(t)
-	for _, args := range [][]string{{"configure"}, {"labels"}, {"install", "action", "--version", "v1.2.3", "--merge-instance", "merge"}, {"install", "mcp"}, {"uninstall", "action"}, {"uninstall", "mcp"}} {
+	for _, args := range [][]string{{"configure"}, {"labels"}, {"install", "action"}, {"install", "mcp"}, {"uninstall", "action"}, {"uninstall", "mcp"}} {
 		prefix := []string{"project", "--dir", f.dir, "--dry-run"}
-		if args[len(args)-1] != "mcp" {
+		if args[0] == "configure" || args[0] == "labels" {
 			prefix = append(prefix, "--instance", "admin")
 		}
 		args = append(prefix, args...)
@@ -461,7 +465,7 @@ func TestProjectCommandDryRunAndValidation(t *testing.T) {
 	if _, _, err := command(t, "project", "--dir", "/missing/project", "uninstall", "mcp"); err == nil {
 		t.Fatal("非法项目目录被接受")
 	}
-	for _, args := range [][]string{{"--instance", "missing", "configure"}, {"--instance", "admin", "--repo", "../repo", "labels"}, {"--instance", "admin", "install", "action", "--version", "v1.2.3", "--merge-instance", "missing"}} {
+	for _, args := range [][]string{{"--instance", "missing", "configure"}, {"--instance", "admin", "--repo", "../repo", "labels"}} {
 		args = append([]string{"project", "--dir", f.dir}, args...)
 		if _, _, err := command(t, args...); err == nil {
 			t.Fatal("无效参数被接受", args)
@@ -488,114 +492,6 @@ func TestProjectSelectionAndCredentialFailures(t *testing.T) {
 	_ = os.WriteFile(f.path, []byte("bad"), 0600)
 	if _, _, _, err := giteaInstance("admin"); err == nil {
 		t.Fatal("损坏凭据被忽略")
-	}
-}
-
-func TestProjectActionAutomaticallySelectsMatchingAdminAndPinsVersion(t *testing.T) {
-	f := projectTestFixture(t)
-	// GitHub origin 与不相关站点的凭据不应盖过当前项目的 Gitea remote。
-	if out, err := exec.Command("git", "-C", f.dir, "remote", "add", "origin", "https://github.com/team/repo.git").CombinedOutput(); err != nil {
-		t.Fatal(string(out), err)
-	}
-	file, _ := credentials.Load(f.path)
-	file.Instances.Gitea = append(file.Instances.Gitea, credentials.Gitea{Name: "unrelated", URL: "https://unrelated.invalid", Username: "admin", Token: "other-token"})
-	f.save(t, file.Instances.Gitea)
-	out, _, err := command(t, "project", "--dir", f.dir, "install", "action", "--version", "v1.2.3")
-	if err != nil || !strings.Contains(out, "实例 admin") || f.writes != 2 {
-		t.Fatal(out, err, f.writes)
-	}
-	data, err := os.ReadFile(filepath.Join(f.dir, ".gitea", "workflows", "assistant.yml"))
-	if err != nil || strings.Count(string(data), "assistant:v1.2.3") != 2 {
-		t.Fatal(string(data), err)
-	}
-}
-
-func TestProjectActionDefaultsToReleaseBinaryVersion(t *testing.T) {
-	old := version
-	version = "v2.3.4"
-	t.Cleanup(func() { version = old })
-	f := projectTestFixture(t)
-	if _, _, err := command(t, "project", "--dir", f.dir, "install", "action"); err != nil {
-		t.Fatal(err)
-	}
-	data, _ := os.ReadFile(filepath.Join(f.dir, ".gitea", "workflows", "assistant.yml"))
-	if strings.Count(string(data), "assistant:v2.3.4") != 2 {
-		t.Fatal(string(data))
-	}
-}
-
-func TestProjectActionAutoSelectionAndPreflightFailures(t *testing.T) {
-	for _, scenario := range []string{"dev-version", "moving-version", "missing-login", "bad-credentials", "no-remote", "ambiguous-admin", "multiple-sites", "multiple-repos", "missing-merge", "foreign-merge", "duplicate-merge", "auth-failure", "repo-failure", "user-workflow"} {
-		t.Run(scenario, func(t *testing.T) {
-			f := projectTestFixture(t)
-			file, _ := credentials.Load(f.path)
-			args := []string{"project", "--dir", f.dir, "install", "action", "--version", "v1.2.3"}
-			switch scenario {
-			case "dev-version":
-				args = args[:5]
-			case "moving-version":
-				args[len(args)-1] = "latest"
-			case "missing-login":
-				file.Instances.Gitea = nil
-			case "bad-credentials":
-				if err := os.WriteFile(f.path, []byte("broken"), 0600); err != nil {
-					t.Fatal(err)
-				}
-			case "no-remote":
-				if out, err := exec.Command("git", "-C", f.dir, "remote", "remove", "gitea").CombinedOutput(); err != nil {
-					t.Fatal(string(out), err)
-				}
-			case "ambiguous-admin":
-				entry := file.Instances.Gitea[0]
-				entry.Name = "second-admin"
-				file.Instances.Gitea = append(file.Instances.Gitea, entry)
-			case "multiple-sites":
-				file.Instances.Gitea = append(file.Instances.Gitea, credentials.Gitea{Name: "other", URL: "https://other.invalid", Username: "admin", Token: "other-token"})
-				if out, err := exec.Command("git", "-C", f.dir, "remote", "add", "other", "https://other.invalid/team/repo.git").CombinedOutput(); err != nil {
-					t.Fatal(string(out), err)
-				}
-			case "multiple-repos":
-				if out, err := exec.Command("git", "-C", f.dir, "remote", "add", "other", f.host+"/other/repo.git").CombinedOutput(); err != nil {
-					t.Fatal(string(out), err)
-				}
-			case "missing-merge":
-				file.Instances.Gitea = file.Instances.Gitea[:1]
-			case "foreign-merge":
-				file.Instances.Gitea[1].URL = "https://other.invalid"
-				args = append(args, "--merge-instance", "merge")
-			case "duplicate-merge":
-				entry := file.Instances.Gitea[1]
-				entry.Name = "second-merge"
-				file.Instances.Gitea = append(file.Instances.Gitea, entry)
-			case "auth-failure":
-				f.failMethod = "GET"
-				f.failPath = "/api/v1/user"
-			case "repo-failure":
-				f.admin = false
-				f.failMethod = "GET"
-				f.failPath = "/api/v1/repos/team/repo"
-			case "user-workflow":
-				path := filepath.Join(f.dir, ".gitea", "workflows")
-				if err := os.MkdirAll(path, 0755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(path, "assistant.yml"), []byte("name: user"), 0644); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if scenario != "bad-credentials" {
-				f.save(t, file.Instances.Gitea)
-			}
-			_, _, err := command(t, args...)
-			if err == nil || f.writes != 0 || strings.Contains(err.Error(), "token-admin") || strings.Contains(err.Error(), "token-merge") {
-				t.Fatal("预检未阻止修改或泄露凭据", err, f.writes)
-			}
-			if scenario != "user-workflow" {
-				if _, err := os.Stat(filepath.Join(f.dir, ".gitea", "workflows", "assistant.yml")); !os.IsNotExist(err) {
-					t.Fatal("失败写入 workflow", err)
-				}
-			}
-		})
 	}
 }
 
@@ -645,27 +541,98 @@ func TestProjectSSHRemoteUsesRegisteredWebAddress(t *testing.T) {
 	}
 }
 
-func TestProjectActionResolvesSSHRemoteAndUsesExplicitInstanceOnAmbiguity(t *testing.T) {
+func TestProjectActionGenerationIsLocalAndUsesBinaryVersion(t *testing.T) {
+	for _, state := range []string{"missing", "invalid", "directory", "unrelated-account"} {
+		t.Run(state, func(t *testing.T) {
+			old := version
+			version = "sha-" + strings.Repeat("a", 40)
+			t.Cleanup(func() { version = old })
+			f := projectTestFixture(t)
+			switch state {
+			case "missing":
+				if err := os.Remove(f.path); err != nil {
+					t.Fatal(err)
+				}
+			case "invalid":
+				if err := os.WriteFile(f.path, []byte("invalid"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "directory":
+				if err := os.Remove(f.path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(f.path, 0700); err != nil {
+					t.Fatal(err)
+				}
+			case "unrelated-account":
+				f.save(t, []credentials.Gitea{{Name: "me", URL: "https://unrelated.invalid", Username: "me", Token: "other"}})
+			}
+			if out, err := exec.Command("git", "-C", f.dir, "remote", "remove", "gitea").CombinedOutput(); err != nil {
+				t.Fatal(string(out), err)
+			}
+			t.Setenv("ASSISTANT_CONFIG", filepath.Join(f.dir, "missing.yaml"))
+			path := filepath.Join(f.dir, ".gitea", "workflows", "assistant.yml")
+			args := []string{"project", "--dir", f.dir, "install", "action"}
+			if _, _, err := command(t, append(args, "--dry-run")...); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatal("演练写文件", err)
+			}
+			for range 2 {
+				if _, _, err := command(t, args...); err != nil {
+					t.Fatal(err)
+				}
+			}
+			data, err := os.ReadFile(path)
+			if err != nil || strings.Count(string(data), "assistant:"+version) != 2 || strings.Contains(string(data), "other") {
+				t.Fatal(string(data), err)
+			}
+			// 更换执行项目不改变生成物版本；版本来自二进制，不能取目标项目的 Git 信息。
+			other := t.TempDir()
+			if out, err := exec.Command("git", "init", "--quiet", other).CombinedOutput(); err != nil {
+				t.Fatal(string(out), err)
+			}
+			if _, _, err := command(t, "project", "--dir", other, "install", "action"); err != nil {
+				t.Fatal(err)
+			}
+			otherData, err := os.ReadFile(filepath.Join(other, ".gitea", "workflows", "assistant.yml"))
+			if err != nil || string(otherData) != string(data) {
+				t.Fatal("版本随目标项目改变", err)
+			}
+			if _, _, err := command(t, "project", "--dir", f.dir, "uninstall", "action"); err != nil {
+				t.Fatal(err)
+			}
+			if f.requests != 0 {
+				t.Fatal("本地生成访问了站点", f.requests)
+			}
+		})
+	}
+}
+
+func TestProjectActionRejectsObsoleteParametersAndPreservesUserWorkflow(t *testing.T) {
+	old := version
+	version = "v1.2.3"
+	t.Cleanup(func() { version = old })
 	f := projectTestFixture(t)
-	if out, err := exec.Command("git", "-C", f.dir, "remote", "set-url", "gitea", "ssh://git@127.0.0.1:2222/team/repo.git").CombinedOutput(); err != nil {
-		t.Fatal(string(out), err)
+	for _, flag := range []string{"--version", "--merge-instance", "--instance", "--repo"} {
+		if _, _, err := command(t, "project", "--dir", f.dir, "install", "action", flag, "value"); err == nil {
+			t.Fatal("本地生成接受无关参数", flag)
+		}
 	}
-	args := []string{"project", "--dir", f.dir, "install", "action", "--version", "v1.2.3", "--dry-run"}
-	if _, _, err := command(t, args...); err != nil {
+	path := filepath.Join(f.dir, ".gitea", "workflows", "assistant.yml")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		t.Fatal(err)
 	}
-	file, _ := credentials.Load(f.path)
-	entry := file.Instances.Gitea[0]
-	entry.Name = "second-admin"
-	file.Instances.Gitea = append(file.Instances.Gitea, entry)
-	f.save(t, file.Instances.Gitea)
-	if _, _, err := command(t, args...); err == nil {
-		t.Fatal("多个管理员仍被猜测")
-	}
-	if _, _, err := command(t, append(args, "--instance", "admin")...); err != nil {
+	original := []byte("name: 用户 workflow")
+	if err := os.WriteFile(path, original, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if f.writes != 0 {
-		t.Fatal("演练写入")
+	if _, _, err := command(t, "project", "--dir", f.dir, "install", "action"); err == nil {
+		t.Fatal("覆盖用户 workflow")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != string(original) || f.requests != 0 {
+		t.Fatal("修改了用户配置或访问了站点", err)
 	}
 }
