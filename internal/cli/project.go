@@ -102,32 +102,75 @@ func newProvisionCommand() *cobra.Command {
 	return root
 }
 func newTokenCommand() *cobra.Command {
-	var passwordFile string
-	cmd := &cobra.Command{Use: "token <实例名>", Short: "为已登记 Gitea 账号新建令牌并替换本地凭据，保留其他令牌", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	var passwordFile, user, name, otp string
+	cmd := &cobra.Command{Use: "token <登录实例名>", Short: "用保存的登录凭据发令牌；管理员可指定目标用户", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) (resultErr error) {
 		path, file, entry, err := giteaInstance(args[0])
 		if err != nil {
 			return err
 		}
-		password, err := newPrompts(cmd).secret(passwordFile, "密码")
-		if err != nil {
-			return err
+		if user == "" || strings.EqualFold(user, entry.Username) {
+			user = entry.Username
 		}
-		token, err := project.IssueToken(cmd.Context(), entry.URL, entry.Username, password)
-		if err != nil {
-			return err
-		}
-		for i := range file.Instances.Gitea {
-			if file.Instances.Gitea[i].Name == entry.Name {
-				file.Instances.Gitea[i].Token = token
+		if name == "" {
+			name = entry.Name
+			if user != entry.Username {
+				name += "-" + user
 			}
+		}
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("目标实例名不能为空")
+		}
+		account := credentials.Gitea{Name: name, URL: entry.URL, Username: user}
+		var previous *credentials.Gitea
+		for i := range file.Instances.Gitea {
+			old := &file.Instances.Gitea[i]
+			if old.Name != name {
+				continue
+			}
+			if credentials.NormalizeHost(old.URL) != credentials.NormalizeHost(entry.URL) || !strings.EqualFold(old.Username, user) {
+				return fmt.Errorf("实例名 %s 已绑定不同站点或账号", name)
+			}
+			previous = old
+			account = *old
+		}
+		for _, row := range rows(file) {
+			if row.Name == name && row.Type != "gitea" {
+				return fmt.Errorf("实例名 %s 被其他平台使用", name)
+			}
+		}
+		password, err := entry.PasswordValue()
+		if passwordFile != "" {
+			password, err = newPrompts(cmd).secret(passwordFile, "登录账号密码")
+		}
+		if err != nil {
+			return err
+		}
+		defer func() { resultErr = credentials.RedactError(resultErr, password, entry.Token) }()
+		token, err := project.IssueTokenForUser(cmd.Context(), entry, user, password, otp)
+		if err != nil {
+			return err
+		}
+		account.Token = token
+		if user == entry.Username {
+			if err := account.SetPassword(password); err != nil {
+				return err
+			}
+		}
+		if previous != nil {
+			*previous = account
+		} else {
+			file.Instances.Gitea = append(file.Instances.Gitea, account)
 		}
 		if err := credentials.Save(path, file); err != nil {
 			return fmt.Errorf("令牌已创建，保存凭据失败: %w", err)
 		}
-		cmd.Printf("已为 @%s 创建令牌并保存；旧平台令牌未撤销\n", entry.Username)
+		cmd.Printf("已为 @%s 创建令牌并保存为实例 %s；旧平台令牌未撤销\n", user, name)
 		return nil
 	}}
-	cmd.Flags().StringVar(&passwordFile, "password-file", "", "账号密码文件（非交互必需）")
+	cmd.Flags().StringVar(&passwordFile, "password-file", "", "可选覆盖登录账号的已保存密码")
+	cmd.Flags().StringVar(&user, "user", "", "目标用户名（缺省登录账号，其他用户需管理员）")
+	cmd.Flags().StringVar(&name, "name", "", "保存目标凭据的实例名（缺省登录实例名或其加目标用户名）")
+	cmd.Flags().StringVar(&otp, "otp", "", "登录账号两步验证的当前验证码")
 	return cmd
 }
 

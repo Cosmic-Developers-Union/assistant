@@ -88,6 +88,8 @@ local 方案需备份 sessions；s3 方案备份对象桶。观测元数据不�
 
 `assistant instance add gitea --name work --url https://site --username developer`。
 缺字段在 TTY 逐项询问；密码不回显，非交互用 `--password-file`。
+Gitea 登录后保存 MCP 令牌与使用内置密钥加密的密码。instance token 复用密码发令牌，
+管理员可通过 --user 为其他账号发令牌；目标凭据独立保存，详见 [bootstrap.md](bootstrap.md)。
 QQ 用 `--app-id`/`--app-secret-file`，Telegram 用 `--token-file`，微信扫码登录。
 添加前实测平台身份，成功后保存唯一用户级 credentials.json，0600。
 

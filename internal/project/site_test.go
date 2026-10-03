@@ -57,7 +57,7 @@ func (f *fixture) client(t *testing.T) *Client {
 				if f.wrongUser {
 					user = "wrong"
 				}
-				fmt.Fprintf(w, `{"login":%q}`, user)
+				fmt.Fprintf(w, `{"login":%q,"is_admin":%t}`, user, user == "admin" && f.admin)
 				return
 			}
 			fmt.Fprintf(w, `{"login":"admin","is_admin":%t}`, f.admin)
@@ -112,7 +112,7 @@ func (f *fixture) client(t *testing.T) *Client {
 	}
 	return client
 }
-func TestProvisionCreatesAccountAndCredentialWithoutPersistingPassword(t *testing.T) {
+func TestProvisionCreatesAccountAndEncryptedCredential(t *testing.T) {
 	f := newFixture()
 	client := f.client(t)
 	entry, err := client.ProvisionAccount(t.Context(), "bots-ai", "ai", "ai@assistant.invalid", "", nil, false)
@@ -135,10 +135,65 @@ func TestProvisionCreatesAccountAndCredentialWithoutPersistingPassword(t *testin
 		}
 	}
 	data, _ := json.Marshal(entry)
-	if strings.Contains(string(data), "password") {
-		t.Fatal("密码进入凭据")
+	password, err := entry.PasswordValue()
+	if err != nil || password == "" || strings.Contains(string(data), password) {
+		t.Fatal("密码未加密保存", err)
 	}
 }
+func TestProvisionReusesEncryptedPasswordsWithoutResettingAccounts(t *testing.T) {
+	for _, scenario := range []string{"admin-password", "target-password", "invalid-admin-password", "invalid-target-password", "admin-token-failure"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newFixture()
+			f.existing = true
+			client := f.client(t)
+			var old *credentials.Gitea
+			if strings.Contains(scenario, "target") {
+				old = &credentials.Gitea{Name: "bots-ai", URL: client.Entry.URL, Username: "ai", Token: "old-token"}
+				if err := old.SetPassword("target-password"); err != nil {
+					t.Fatal(err)
+				}
+				if scenario == "invalid-target-password" {
+					old.EncryptedPassword = "invalid"
+				}
+			} else {
+				if err := client.Entry.SetPassword("admin-password"); err != nil {
+					t.Fatal(err)
+				}
+				if scenario == "invalid-admin-password" {
+					client.Entry.EncryptedPassword = "invalid"
+				}
+				if scenario == "admin-token-failure" {
+					f.failMethod, f.failPath = "POST", "/api/v1/users/ai/tokens"
+				}
+			}
+			entry, err := client.ProvisionAccount(t.Context(), "bots-ai", "ai", "ai@assistant.invalid", "", old, false)
+			if strings.HasPrefix(scenario, "invalid") || scenario == "admin-token-failure" {
+				if err == nil {
+					t.Fatal("密码或发令牌失败被忽略")
+				}
+				return
+			}
+			if err != nil || entry.Token != "new-token" {
+				t.Fatal(entry, err)
+			}
+			if scenario == "admin-password" && entry.EncryptedPassword != "" {
+				t.Fatal("管理员密码进入目标凭据")
+			}
+			if scenario == "target-password" {
+				password, err := entry.PasswordValue()
+				if err != nil || password != "target-password" {
+					t.Fatal("目标密码未保留", err)
+				}
+			}
+			for _, request := range f.requests {
+				if strings.HasPrefix(request, "PATCH ") || request == "POST /api/v1/admin/users" {
+					t.Fatal("重置或重建已有账号")
+				}
+			}
+		})
+	}
+}
+
 func TestProvisionReusesValidCredentialsAndDryRunNeverWrites(t *testing.T) {
 	for _, dry := range []bool{false, true} {
 		f := newFixture()

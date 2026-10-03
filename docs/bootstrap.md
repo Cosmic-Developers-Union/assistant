@@ -19,22 +19,35 @@ SIGTERM 也会取消输入并退出（退出码 143）；取消输入不会写�
 
 缺省创建 ai、merge，实例名为 work-ai、work-merge。新账号使用随机密码，
 发放 read:user、read:organization、write:repository、write:issue 的限定令牌；
-持久凭据是令牌，密码不落盘、不回显。平台账号不是站点管理员。
+持久凭据包含令牌和加密密码，密码不以明文落盘、不回显。平台账号不是站点管理员。
 管理员个人实例的令牌另含 write:admin，才可创建站点账号；不会向机器人授予该范围。
 凭据放在用户级 credentials.json，目录 0700、文件 0600。列表和 show 不显示令牌。
 
 重复执行时验证并复用已有令牌，不每次发令牌，也不删除账号的其他令牌。
 每个账号接入成功立即保存；如果下一步失败，先前成功的账号可在重试时复用。
 
-已有账号但未登记、或本地令牌失效时，不自动重置账号密码。用密码文件接入：
+已有账号但未登记、或本地令牌失效时，不自动重置账号密码；管理员登录已保存加密密码时，
+可直接为已有用户发令牌。也可以提供目标账号密码文件接入：
 
 ```sh
 assistant instance provision gitea --admin work \
   --reviewer-password-file /secure/ai-password \
   --merger-password-file /secure/merge-password
-# 单独给已有实例发新令牌，替换本地条目，不删除旧平台令牌：
-assistant instance token work-ai --password-file /secure/ai-password
+# 给登录账号发新令牌，无需再输入用户名和密码：
+assistant instance token work
+# 管理员为其他用户发令牌，保存为独立实例供 MCP 使用：
+assistant instance token work --user ai --name work-ai
+assistant mcp gitea --instance work-ai
 ```
+
+首次登录成功即创建令牌供 MCP 使用，并以 AES-GCM 加密密码保存到 credentials.json。
+按用户指定采用内置密钥；持有二进制者可以提取密钥解密，这不提供独立于二进制的
+安全边界。文件仍为 0600，目录 0700；list/show 不显示密码或令牌。
+旧记录仅有令牌时，重新运行 instance add gitea --name work 登录一次补齐加密密码，
+站点和用户名复用原记录，登录失败保留旧凭据。密码变更后也用该方式重新登录。
+token 可用 --password-file 覆盖已保存密码；启用两步验证时用 --otp 提供当前验证码。
+未指定 --user 时更新登录账号令牌；指定其他用户时，缺省保存为“登录实例名-用户名”，
+可用 --name 指定名称。管理员密码不会复制到目标账号，旧平台令牌不自动撤销。
 
 也可用 instance add gitea 单独登记 ai 或 merge。创建账号成功但发令牌/落盘失败，
 命令会报错，不能把它当成完整成功；管理员应恢复账号凭据后重试，工具不隐式回滚

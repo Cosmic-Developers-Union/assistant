@@ -52,7 +52,8 @@
   Linux 为 ~/.config/Cosmic-Developers-Union/assistant/credentials.json，与 cwd 无关。
 - connects/mcp/bots/session/runtime 分别声明连接、工具、工人、存储与运行参数。
   未知字段、悬空引用、跨平台字段、重复事件消费者均在启动前报错。
-- 密钥用 {{VAR}} 引用，不回写、不进日志；密码只在 instance 登录时使用，不落盘。
+- run 密钥用 {{VAR}} 引用，不回写、不进日志。instance 登录密码按用户指定的内置
+  密钥方案加密保存在 credentials.json，供后续发令牌复用，禁止明文落盘或回显。
 - 所有产物在运行 root 内：repos/workspaces/chat/sessions/observations/api.json。
   config.yaml、.env 和 data 不入库；用户真实配置不改不删。
 - 旧版配置有意不自动迁移，格式错误应清楚报告。迁移说明在 docs/config.md。

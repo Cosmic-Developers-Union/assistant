@@ -23,12 +23,13 @@ type Instances struct {
 	Telegram []Telegram `json:"telegram,omitempty"`
 }
 
-// Gitea 保存一个站点上的个人访问令牌，密码永不落盘。
+// Gitea 保存一个站点上的个人令牌与加密登录密码；MCP 只使用令牌。
 type Gitea struct {
-	Name     string `json:"name"`
-	URL      string `json:"url"`
-	Username string `json:"username"`
-	Token    string `json:"token"`
+	Name              string `json:"name"`
+	URL               string `json:"url"`
+	Username          string `json:"username"`
+	Token             string `json:"token"`
+	EncryptedPassword string `json:"password,omitempty"`
 }
 
 // QQ 保存开放平台的应用身份。
@@ -104,6 +105,11 @@ func (f *File) Validate() error {
 		}
 		if item.Username == "" || item.Token == "" {
 			return fmt.Errorf("gitea 实例缺少 username/token")
+		}
+		if item.EncryptedPassword != "" {
+			if _, err := item.PasswordValue(); err != nil {
+				return fmt.Errorf("gitea 实例 %s: %w", item.Name, err)
+			}
 		}
 	}
 	for _, item := range f.Instances.QQ {

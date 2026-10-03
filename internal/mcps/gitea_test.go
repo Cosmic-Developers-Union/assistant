@@ -15,6 +15,9 @@ func TestResolutionAndStrictAmbiguity(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "credentials.json")
 	t.Setenv("ASSISTANT_CREDENTIALS", path)
 	file := &credentials.File{Instances: credentials.Instances{Gitea: []credentials.Gitea{{Name: "site", URL: "https://site/", Username: "dev", Token: "stored"}}}}
+	if err := file.Instances.Gitea[0].SetPassword("login-secret"); err != nil {
+		t.Fatal(err)
+	}
 	if err := credentials.Save(path, file); err != nil {
 		t.Fatal(err)
 	}

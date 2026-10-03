@@ -139,15 +139,34 @@ func newInstanceCommandWithLogins(logins instanceLogins) *cobra.Command {
 			if name, err = prompts.value(name, "实例名"); err != nil {
 				return err
 			}
+			var previous *credentials.Gitea
+			for i := range file.Instances.Gitea {
+				if kind == "gitea" && file.Instances.Gitea[i].Name == name {
+					previous = &file.Instances.Gitea[i]
+				}
+			}
 			for _, row := range rows(file) {
 				if row.Name == name {
-					return fmt.Errorf("实例 %s 已存在，先 remove 后重新添加", name)
+					if previous == nil {
+						return fmt.Errorf("实例 %s 已存在，先 remove 后重新添加", name)
+					}
 				}
 			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Minute)
 			defer cancel()
 			switch kind {
 			case "gitea":
+				if previous != nil {
+					if address == "" {
+						address = previous.URL
+					}
+					if user == "" {
+						user = previous.Username
+					}
+					if credentials.NormalizeHost(address) != credentials.NormalizeHost(previous.URL) || user != previous.Username {
+						return fmt.Errorf("实例 %s 已绑定不同站点或账号，先 remove 后重新添加", name)
+					}
+				}
 				if address, err = prompts.value(address, "Gitea 地址"); err != nil {
 					return err
 				}
@@ -165,7 +184,15 @@ func newInstanceCommandWithLogins(logins instanceLogins) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				file.Instances.Gitea = append(file.Instances.Gitea, credentials.Gitea{Name: name, URL: credentials.NormalizeHost(address), Username: user, Token: token})
+				entry := credentials.Gitea{Name: name, URL: credentials.NormalizeHost(address), Username: user, Token: token}
+				if err := entry.SetPassword(password); err != nil {
+					return err
+				}
+				if previous != nil {
+					*previous = entry
+				} else {
+					file.Instances.Gitea = append(file.Instances.Gitea, entry)
+				}
 			case "qq":
 				if appID, err = prompts.value(appID, "AppID"); err != nil {
 					return err
@@ -336,7 +363,8 @@ func (s *promptStream) Read(data []byte) (int, error) {
 
 func (s *promptStream) Write(data []byte) (int, error) { return s.output.Write(data) }
 
-func loginGitea(ctx context.Context, host, user, password, otp, name string) (string, error) {
+func loginGitea(ctx context.Context, host, user, password, otp, name string) (result string, resultErr error) {
+	defer func() { resultErr = credentials.RedactError(resultErr, password) }()
 	client, err := sdk.NewClient(host, sdk.SetBasicAuth(user, password), sdk.SetOTP(otp), sdk.SetGiteaVersion(""), sdk.SetHTTPClient(&http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}))
 	if err != nil {
 		return "", err

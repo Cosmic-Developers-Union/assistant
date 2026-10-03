@@ -50,6 +50,9 @@ func TestProjectGiteaBootstrapAndCrossRepositoryMention(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := client.Entry.SetPassword(password); err != nil {
+		t.Fatal(err)
+	}
 	reviewer, merger := "ai-"+suffix, "merge-"+suffix
 	var accounts []credentials.Gitea
 	for _, name := range []string{reviewer, merger} {
@@ -69,6 +72,30 @@ func TestProjectGiteaBootstrapAndCrossRepositoryMention(t *testing.T) {
 		if err != nil || again != entry {
 			t.Fatal("重复接入未复用", err)
 		}
+	}
+	// 管理员不提供机器人密码，给已有账号发令牌；验证实际令牌属于目标账号。
+	adminPassword, err := client.Entry.PasswordValue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	delegated, err := project.IssueTokenForUser(ctx, client.Entry, reviewer, adminPassword, "")
+	if err != nil {
+		t.Fatal("管理员代发令牌失败", err)
+	}
+	delegatedClient, err := project.NewClient(credentials.Gitea{URL: host, Username: reviewer, Token: delegated})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, _, err := delegatedClient.SDK.Users.GetMyUserInfo(ctx)
+	if err != nil || identity.UserName != reviewer || identity.IsAdmin {
+		t.Fatal("代发令牌身份错误", err)
+	}
+	botPassword, err := accounts[0].PasswordValue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := project.IssueTokenForUser(ctx, accounts[0], merger, botPassword, ""); err == nil {
+		t.Fatal("普通账号能给其他用户发令牌")
 	}
 	path := filepath.Join(t.TempDir(), "credentials.json")
 	if err := credentials.Save(path, &credentials.File{Instances: credentials.Instances{Gitea: accounts}}); err != nil {

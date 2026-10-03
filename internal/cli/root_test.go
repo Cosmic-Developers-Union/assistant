@@ -93,7 +93,7 @@ func TestInstanceListShowRemove(t *testing.T) {
 		}
 	}
 }
-func TestGiteaInstanceLoginUsesSDKAndDoesNotPersistPassword(t *testing.T) {
+func TestGiteaInstanceLoginUsesSDKAndStoresEncryptedPassword(t *testing.T) {
 	var requests []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests = append(requests, r.Method+" "+r.URL.Path)
@@ -131,6 +131,25 @@ func TestGiteaInstanceLoginUsesSDKAndDoesNotPersistPassword(t *testing.T) {
 	}
 	if len(requests) != 2 {
 		t.Fatal(requests)
+	}
+	password, err := file.Instances.Gitea[0].PasswordValue()
+	if err != nil || password != "password-only-for-login" {
+		t.Fatal("登录密码没有加密保存", err)
+	}
+	if _, _, err := command(t, "instance", "add", "gitea", "--name", "site", "--password-file", passwordFile); err != nil {
+		t.Fatal("重新登录必须支持补齐旧密码凭据", err)
+	}
+	updated, err := credentials.Load(path)
+	if err != nil || len(updated.Instances.Gitea) != 1 || updated.Instances.Gitea[0].EncryptedPassword == file.Instances.Gitea[0].EncryptedPassword {
+		t.Fatal("重新登录没有原子替换同一账号", err)
+	}
+	before, _ := os.ReadFile(path)
+	if _, _, err := command(t, "instance", "add", "gitea", "--name", "site", "--username", "other", "--password-file", passwordFile); err == nil {
+		t.Fatal("重新登录覆盖了其他账号")
+	}
+	after, _ := os.ReadFile(path)
+	if string(before) != string(after) {
+		t.Fatal("失败重新登录修改凭据")
 	}
 	if _, _, err := command(t, "instance", "add", "gitea", "--name", "site"); err == nil {
 		t.Fatal("重复实例触发登录")

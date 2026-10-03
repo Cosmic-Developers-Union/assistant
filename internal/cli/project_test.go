@@ -249,11 +249,16 @@ func TestProvisionCommandDryRunAndFailurePaths(t *testing.T) {
 	}
 }
 func TestTokenCommandOnlyReplacesChosenLocalCredential(t *testing.T) {
-	for _, scenario := range []string{"ok", "missing-password", "bad-password", "issue-failure", "save-failure"} {
+	for _, scenario := range []string{"ok", "saved-password", "missing-password", "bad-password", "issue-failure", "save-failure"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := projectTestFixture(t)
 			file, _ := credentials.Load(f.path)
 			file.Instances.Gitea[0].Token = "token-old"
+			if scenario == "saved-password" {
+				if err := file.Instances.Gitea[0].SetPassword("secret-password"); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if err := credentials.Save(f.path, file); err != nil {
 				t.Fatal(err)
 			}
@@ -261,6 +266,8 @@ func TestTokenCommandOnlyReplacesChosenLocalCredential(t *testing.T) {
 			_ = os.WriteFile(password, []byte("secret-password"), 0600)
 			args := []string{"instance", "token", "admin", "--password-file", password}
 			switch scenario {
+			case "saved-password":
+				args = args[:3]
 			case "missing-password":
 				args = args[:3]
 			case "bad-password":
@@ -272,7 +279,7 @@ func TestTokenCommandOnlyReplacesChosenLocalCredential(t *testing.T) {
 				f.onToken = func() { _ = os.Remove(f.path); _ = os.Mkdir(f.path, 0700) }
 			}
 			out, _, err := command(t, args...)
-			if scenario == "ok" {
+			if scenario == "ok" || scenario == "saved-password" {
 				if err != nil || strings.Contains(out, "token-admin") {
 					t.Fatal(out, err)
 				}
@@ -286,6 +293,94 @@ func TestTokenCommandOnlyReplacesChosenLocalCredential(t *testing.T) {
 		})
 	}
 }
+func TestTokenCommandAdminTargetAndLocalIsolation(t *testing.T) {
+	for _, scenario := range []string{"new", "named", "existing", "not-admin", "missing-user", "name-collision", "platform-collision", "missing-login-password", "empty-name"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := projectTestFixture(t)
+			f.users["ai"], f.users["merge"] = true, true
+			file, err := credentials.Load(f.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := file.Instances.Gitea[0].SetPassword("admin-password"); err != nil {
+				t.Fatal(err)
+			}
+			args := []string{"instance", "token", "admin", "--user", "ai"}
+			name := "admin-ai"
+			switch scenario {
+			case "named":
+				name = "work-ai"
+				args = append(args, "--name", name)
+			case "empty-name":
+				args = append(args, "--name", " ")
+			case "existing":
+				name = "merge"
+				args = []string{"instance", "token", "admin", "--user", "merge", "--name", name}
+				file.Instances.Gitea[1].Token = "old-merge"
+				if err := file.Instances.Gitea[1].SetPassword("merge-password"); err != nil {
+					t.Fatal(err)
+				}
+			case "not-admin":
+				f.admin = false
+			case "missing-user":
+				f.users["ai"] = false
+			case "name-collision":
+				args = append(args, "--name", "admin")
+			case "platform-collision":
+				file.Instances.QQ = []credentials.QQ{{Name: name, AppID: "id", AppSecret: "qq-secret"}}
+			case "missing-login-password":
+				file.Instances.Gitea[0].EncryptedPassword = ""
+			}
+			if err := credentials.Save(f.path, file); err != nil {
+				t.Fatal(err)
+			}
+			before, _ := os.ReadFile(f.path)
+			out, errOut, err := command(t, args...)
+			if scenario != "new" && scenario != "named" && scenario != "existing" {
+				if err == nil || f.writes != 0 {
+					t.Fatal("拒绝条件未阻止发令牌", err, f.writes)
+				}
+				after, _ := os.ReadFile(f.path)
+				if string(before) != string(after) {
+					t.Fatal("失败修改本地凭据")
+				}
+				return
+			}
+			if err != nil || f.writes != 1 || strings.Contains(out+errOut, "password") || strings.Contains(out+errOut, "token-") {
+				t.Fatal(out, errOut, err, f.writes)
+			}
+			after, err := credentials.Load(f.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Instances.Gitea[0] != file.Instances.Gitea[0] {
+				t.Fatal("目标发令牌修改了管理员凭据")
+			}
+			found := false
+			for _, account := range after.Instances.Gitea {
+				if account.Name != name {
+					continue
+				}
+				found = true
+				if account.Token != "token-"+account.Username {
+					t.Fatal("目标令牌没有保存")
+				}
+				password, err := account.PasswordValue()
+				if scenario == "existing" {
+					if err != nil || password != "merge-password" {
+						t.Fatal("既有目标密码没有保留", err)
+					}
+				} else if account.EncryptedPassword != "" {
+					t.Fatal("管理员密码复制到目标账号")
+				}
+			}
+			if !found {
+				t.Fatal("目标实例没有保存")
+			}
+		})
+	}
+}
+
 func TestProjectCommandLifecycle(t *testing.T) {
 	f := projectTestFixture(t)
 	for _, args := range [][]string{{"configure", "--required-checks", "build"}, {"labels"}, {"install", "action"}, {"install", "mcp"}} {

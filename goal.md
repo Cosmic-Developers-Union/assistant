@@ -29,7 +29,11 @@ assistant instance remove instance-name
 assistant instance show instance-name
 ```
 
-- `add` 对缺失的参数逐项交互询问;密码只在登录时使用,不落盘、不回显。
+- `add` 对缺失的参数逐项交互询问；Gitea 登录成功即创建 MCP 可用的令牌，密码用
+  内置密钥加密保存，不写明文、不回显。重复登录同一实例会更新凭据，失败不覆盖旧值。
+- `instance token <登录实例名>` 复用已保存密码，为当前账号创建令牌，不再询问密码。
+  `--user <目标用户名>` 为其他用户创建令牌，需要管理员；`--name` 指定目标实例名。
+  管理员凭据与目标账号凭据分开保存，MCP 只使用目标账号的令牌。
 - `remove` 只删本地实例条目,不动平台侧的账号。
 
 ### 实例的存放:credentials.json
