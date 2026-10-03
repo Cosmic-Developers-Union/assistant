@@ -465,9 +465,9 @@ assistant instance provision gitea --admin admin-instance
 assistant instance create-token ai-instance
 assistant project configure --instance admin-instance
 assistant project labels --instance admin-instance
-assistant project protection show --instance admin-instance
-assistant project protection update --instance admin-instance
-assistant project protection remove --instance admin-instance --branch main
+assistant project protection show
+assistant project protection update
+assistant project protection remove --branch main
 assistant project install action
 assistant project uninstall action
 assistant project install mcp
@@ -481,6 +481,8 @@ assistant project uninstall mcp
 
 protection 提供独立的 show/update/remove；install/uninstall 分别是 update/remove
 的别名。只操作所选仓库的具体分支规则，缺省平台默认分支，不改标签或协作者。
+缺省通过 Git remote 匹配已登记的登录实例和仓库，--instance 是可选覆盖；多个
+匹配站点或同站点多账号存在歧义时提示显式选择，不把 --instance 设为必填。
 更新复用 configure 的双批准规范，保留未指定的检查与非托管字段；必要检查可以
 显式清空。show 只读并支持 JSON，remove 删除整条同名规则且缺失幂等，其他规则
 保留；更新和移除都支持只读演练。

@@ -14,19 +14,18 @@ func newProtectionCommand() *cobra.Command {
 	var instance, repo, branch, merger string
 	var checks []string
 	var asJSON bool
-	root := &cobra.Command{Use: "protection", Short: "查看、更新或移除当前项目的分支保护", Args: cobra.NoArgs, Example: "  assistant project protection show --instance me\n  assistant project protection update --instance me --dry-run\n  assistant project protection update --instance me --required-checks build,test\n  assistant project protection remove --instance me --branch main"}
-	root.PersistentFlags().StringVar(&instance, "instance", "", "已登记的 Gitea 实例名，写操作需要仓库管理员权限")
-	root.MarkPersistentFlagRequired("instance")
+	root := &cobra.Command{Use: "protection", Short: "查看、更新或移除当前项目的分支保护", Args: cobra.NoArgs, Example: "  assistant project protection show\n  assistant project protection update --dry-run\n  assistant project protection update --required-checks build,test\n  assistant project protection remove --branch main"}
+	root.PersistentFlags().StringVar(&instance, "instance", "", "可选覆盖 Git remote 匹配的登录实例；写操作需要仓库管理员权限")
 	root.PersistentFlags().StringVar(&repo, "repo", "", "owner/name（缺省从所选实例匹配 Git remote）")
 	root.PersistentFlags().StringVar(&branch, "branch", "", "具体分支名（缺省平台默认分支），不接受通配符")
 	for _, kind := range []string{"show", "update", "remove"} {
 		cmd := &cobra.Command{Use: kind, Args: cobra.NoArgs, Short: map[string]string{"show": "显示当前实际保护规则，不修改状态", "update": "创建或更新双批准保护，不改标签和协作者", "remove": "移除选定分支的同名保护规则"}[kind], RunE: func(cmd *cobra.Command, _ []string) (resultErr error) {
-			_, _, entry, err := giteaInstance(instance)
+			dir, _ := cmd.Flags().GetString("dir")
+			entry, err := projectGiteaInstance(dir, instance)
 			if err != nil {
 				return err
 			}
 			defer func() { resultErr = credentials.RedactError(resultErr, entry.Token) }()
-			dir, _ := cmd.Flags().GetString("dir")
 			owner, name, err := projectRepo(dir, repo, entry.URL)
 			if err != nil {
 				return err

@@ -80,18 +80,20 @@ merge 需要仓库管理员权限登记他人评审请求，但不成为站点�
 ## 单独管理分支保护
 
 ```sh
-assistant project protection show --instance work
-assistant project protection show --instance work --json
-assistant project protection update --instance work --dry-run
-assistant project protection update --instance work --required-checks build,test
-assistant project protection update --instance work --required-checks=
-assistant project protection remove --instance work --branch main --dry-run
-assistant project protection remove --instance work --branch main
+assistant project protection show
+assistant project protection show --json
+assistant project protection update --dry-run
+assistant project protection update --required-checks build,test
+assistant project protection update --required-checks=
+assistant project protection remove --branch main --dry-run
+assistant project protection remove --branch main
 ```
 
 `install` 是 `update` 的别名，`uninstall` 是 `remove` 的别名。这些命令实际访问
-Gitea，须指定已登记的 `--instance`；写操作需要仓库管理员权限。仓库从匹配站点的
-Git remote 推导，也可用 `--repo owner/name` 指定。分支缺省取平台默认分支，
+Gitea，缺省通过 Git remote 匹配已登记的登录实例和仓库；`--instance` 是可选覆盖，
+同站点多账号或多个匹配站点时才需要明确选择。GitHub origin 不会盖过匹配的 Gitea
+remote，SSH remote 使用已登记的 Web 地址。写操作需要仓库管理员权限。
+也可用 `--repo owner/name` 指定仓库。分支缺省取平台默认分支，
 `--branch` 可选具体分支（包括 `feature/demo`），不接受通配符。
 
 `show` 只读，显示平台实际设置；`--json` 输出完整规则，没有同名规则时 `rule` 为

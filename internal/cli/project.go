@@ -333,3 +333,41 @@ func remoteMatchesHost(remote gitremote.GitRemote, host string) bool {
 	b, err := url.Parse(credentials.NormalizeHost(host))
 	return err == nil && a.Hostname() != "" && strings.EqualFold(a.Hostname(), b.Hostname()) && b.Path == ""
 }
+
+// projectGiteaInstance 只从已登记凭据匹配 Git remote，不向未知 remote 发认证请求。
+// Git 能识别站点和仓库，但不能消除同站点多个登录账号的身份歧义。
+func projectGiteaInstance(dir, explicit string) (credentials.Gitea, error) {
+	if explicit != "" {
+		_, _, entry, err := giteaInstance(explicit)
+		return entry, err
+	}
+	path, err := credentials.Path()
+	if err != nil {
+		return credentials.Gitea{}, err
+	}
+	file, err := credentials.Load(path)
+	if err != nil {
+		return credentials.Gitea{}, err
+	}
+	remotes := gitremote.ListRemotes(dir)
+	var candidates []credentials.Gitea
+	for _, entry := range file.Instances.Gitea {
+		for _, remote := range remotes {
+			if remoteMatchesHost(remote, entry.URL) {
+				candidates = append(candidates, entry)
+				break
+			}
+		}
+	}
+	if len(candidates) == 0 {
+		return credentials.Gitea{}, fmt.Errorf("Git remote 未匹配已登录的 Gitea 实例；先 instance add gitea，或用 --instance 显式选择")
+	}
+	if len(candidates) > 1 {
+		var names []string
+		for _, entry := range candidates {
+			names = append(names, entry.Name)
+		}
+		return credentials.Gitea{}, fmt.Errorf("Git remote 匹配多个登录实例（%s），请用 --instance 明确选择", strings.Join(names, "、"))
+	}
+	return candidates[0], nil
+}
