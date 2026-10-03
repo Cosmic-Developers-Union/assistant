@@ -124,6 +124,36 @@ func TestProjectGiteaBootstrapAndCrossRepositoryMention(t *testing.T) {
 	if protection.RequiredApprovals != 2 || !protection.BlockAdminMergeOverride || !protection.DismissStaleApprovals || len(protection.MergeWhitelistUsernames) != 1 || protection.MergeWhitelistUsernames[0] != merger {
 		t.Fatal("保护不符合双批准契约", protection)
 	}
+	opt := project.ProtectionOptions{Owner: user, Name: managed, Merger: merger, DryRun: true}
+	if _, err := client.RemoveProtection(ctx, opt); err != nil {
+		t.Fatal(err)
+	}
+	state, err := client.GetProtection(ctx, opt)
+	if err != nil || state.Rule == nil {
+		t.Fatal("演练移除了平台保护", err)
+	}
+	opt.DryRun = false
+	for range 2 {
+		if _, err := client.RemoveProtection(ctx, opt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state, err = client.GetProtection(ctx, opt)
+	if err != nil || state.Rule != nil {
+		t.Fatal("平台保护未移除", err)
+	}
+	opt.Checks = []string{"build"}
+	if _, err := client.UpdateProtection(ctx, opt); err != nil {
+		t.Fatal(err)
+	}
+	opt.Checks = nil
+	if _, err := client.UpdateProtection(ctx, opt); err != nil {
+		t.Fatal(err)
+	}
+	state, err = client.GetProtection(ctx, opt)
+	if err != nil || state.Rule == nil || state.Rule.RequiredApprovals != 2 || len(state.Rule.StatusCheckContexts) != 1 || state.Rule.StatusCheckContexts[0] != "build" {
+		t.Fatal("平台保护更新或检查保留失败", err)
+	}
 	dir := t.TempDir()
 	if err := project.InstallWorkflow(dir, project.WorkflowOptions{Version: "v1.2.3", Remove: false, DryRun: false}); err != nil {
 		t.Fatal(err)

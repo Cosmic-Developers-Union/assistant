@@ -77,6 +77,33 @@ merge 需要仓库管理员权限登记他人评审请求，但不成为站点�
 标签规范化会删除规范之外的标签，与 goal.md 的 action 规则相同。
 --reviewer/--merger 可以配置账号名称；需要自定义内容评审/合并流程时须同步 CI 身份约定。
 
+## 单独管理分支保护
+
+```sh
+assistant project protection show --instance work
+assistant project protection show --instance work --json
+assistant project protection update --instance work --dry-run
+assistant project protection update --instance work --required-checks build,test
+assistant project protection update --instance work --required-checks=
+assistant project protection remove --instance work --branch main --dry-run
+assistant project protection remove --instance work --branch main
+```
+
+`install` 是 `update` 的别名，`uninstall` 是 `remove` 的别名。这些命令实际访问
+Gitea，须指定已登记的 `--instance`；写操作需要仓库管理员权限。仓库从匹配站点的
+Git remote 推导，也可用 `--repo owner/name` 指定。分支缺省取平台默认分支，
+`--branch` 可选具体分支（包括 `feature/demo`），不接受通配符。
+
+`show` 只读，显示平台实际设置；`--json` 输出完整规则，没有同名规则时 `rule` 为
+`null`。`update` 在缺失时创建、存在时更新双批准规范，合并白名单只保留
+`--merger`（缺省 `merge`），清除旧合并团队白名单。未指定 `--required-checks`
+保留已有检查，显式空值清空检查；签名提交、文件保护等非托管字段在更新时保留。
+独立保护命令不修改标签、协作者或本地文件；`project configure` 使用同一规范实现。
+
+`remove` 删除选定分支的整条同名规则，包括该规则原有的自定义字段；不会删除其他
+分支或通配符规则。规则不存在时成功返回，重复移除不发删除请求。平台返回的规则
+名称与选定分支不符时拒绝更新或移除。`--dry-run` 只读取并报告，不写平台。
+
 ## 安装和卸载 Gitea Actions
 
 ```sh

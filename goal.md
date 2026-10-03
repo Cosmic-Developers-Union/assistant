@@ -465,6 +465,9 @@ assistant instance provision gitea --admin admin-instance
 assistant instance create-token ai-instance
 assistant project configure --instance admin-instance
 assistant project labels --instance admin-instance
+assistant project protection show --instance admin-instance
+assistant project protection update --instance admin-instance
+assistant project protection remove --instance admin-instance --branch main
 assistant project install action
 assistant project uninstall action
 assistant project install mcp
@@ -475,6 +478,12 @@ assistant project uninstall mcp
 管理员创建缺失的 ai/merge，持久保存限定令牌；不自动重置已有账号密码，不删无关
 令牌。ai 为 write 协作者，merge 为 admin 协作者以登记他人评审请求，但必须受
 默认分支双批准、批准随提交过期、落后/驳回/未回应门禁和 merge 合并白名单约束。
+
+protection 提供独立的 show/update/remove；install/uninstall 分别是 update/remove
+的别名。只操作所选仓库的具体分支规则，缺省平台默认分支，不改标签或协作者。
+更新复用 configure 的双批准规范，保留未指定的检查与非托管字段；必要检查可以
+显式清空。show 只读并支持 JSON，remove 删除整条同名规则且缺失幂等，其他规则
+保留；更新和移除都支持只读演练。
 
 只读演练不写平台或文件。Actions 安装只在本地生成托管 workflow，不读取凭据、
 站点或 remote，不修改平台设置或 secret。每个生成物自动绑定生成器的构建版本：

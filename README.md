@@ -84,6 +84,6 @@ make compose-up
 Go 版本以 go.mod 为准。评审状态与调度语义分别由 `spec/ReviewStateMachine.tla`
 与 `formal/Dispatcher.lean` 约束。开发约定见 [AGENTS.md](AGENTS.md)。
 
-站点账号/令牌与项目标签、权限、Actions/MCP 安装见 [接入指南](docs/bootstrap.md)。
+站点账号/令牌与项目标签、权限、分支保护、Actions/MCP 安装见 [接入指南](docs/bootstrap.md)。
 轻量聊天运行时独立放在 [agent-runtime](agent-runtime/README.md)，保留 TUI 调试，
 当前主线只定义协议、不接入尚未实现的引擎。

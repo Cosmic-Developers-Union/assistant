@@ -189,7 +189,7 @@ func newCreateTokenCommand() *cobra.Command {
 func newProjectCommand() *cobra.Command {
 	var instance, dir, repo, reviewer, merger string
 	var dry, force bool
-	root := &cobra.Command{Use: "project", Short: "当前项目的 Gitea 标签、协作者、Actions 与 MCP", Args: cobra.NoArgs}
+	root := &cobra.Command{Use: "project", Short: "当前项目的 Gitea 标签、协作者、分支保护、Actions 与 MCP", Args: cobra.NoArgs}
 	root.PersistentFlags().StringVar(&dir, "dir", ".", "当前项目目录")
 	root.PersistentFlags().BoolVar(&dry, "dry-run", false, "只读检查并报告，不写平台或文件")
 	var checks []string
@@ -288,7 +288,7 @@ func newProjectCommand() *cobra.Command {
 			return nil
 		}})
 	}
-	root.AddCommand(install, uninstall)
+	root.AddCommand(install, uninstall, newProtectionCommand())
 	return root
 }
 func projectDir(dir string) (string, error) {

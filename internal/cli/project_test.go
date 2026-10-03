@@ -18,6 +18,7 @@ import (
 type projectFixture struct {
 	host, path, dir      string
 	users                map[string]bool
+	protection           map[string]any
 	writes               int
 	requests             int
 	admin                bool
@@ -146,11 +147,29 @@ func projectTestFixture(t *testing.T) *projectFixture {
 		case strings.Contains(r.URL.Path, "/collaborators/"):
 			w.WriteHeader(204)
 		case strings.Contains(r.URL.Path, "/branch_protections"):
-			if r.Method == "GET" {
-				w.WriteHeader(404)
+			switch r.Method {
+			case "GET":
+				if f.protection == nil {
+					w.WriteHeader(404)
+					return
+				}
+			case "DELETE":
+				f.protection = nil
+				w.WriteHeader(204)
 				return
+			default:
+				var body map[string]any
+				_ = json.UnmarshalRead(r.Body, &body)
+				if f.protection == nil {
+					f.protection = map[string]any{}
+				}
+				for k, v := range body {
+					if v != nil {
+						f.protection[k] = v
+					}
+				}
 			}
-			fmt.Fprint(w, `{"rule_name":"main"}`)
+			_ = json.MarshalWrite(w, f.protection)
 		case r.URL.Path == "/api/v1/repos/team/repo":
 			fmt.Fprint(w, `{"name":"repo","default_branch":"main"}`)
 		default:

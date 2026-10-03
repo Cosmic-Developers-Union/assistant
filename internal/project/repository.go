@@ -59,21 +59,6 @@ func (c *Client) Configure(ctx context.Context, opt RepositoryOptions) error {
 			return fmt.Errorf("配置协作者 @%s: %w", role.name, err)
 		}
 	}
-	old, response, err := c.SDK.Repositories.GetBranchProtection(ctx, opt.Owner, opt.Name, repo.DefaultBranch)
-	if err != nil && (response == nil || response.StatusCode != 404) {
-		return fmt.Errorf("读取分支保护: %w", err)
-	}
-	checks := opt.Checks
-	if checks == nil && old != nil {
-		checks = old.StatusCheckContexts
-	}
-	if response != nil && response.StatusCode == 404 {
-		_, _, err = c.SDK.Repositories.CreateBranchProtection(ctx, opt.Owner, opt.Name, gitea.CreateBranchProtectionOption{BranchName: repo.DefaultBranch, RuleName: repo.DefaultBranch, EnablePush: false, RequiredApprovals: 2, EnableMergeWhitelist: true, MergeWhitelistUsernames: []string{opt.Merger}, BlockAdminMergeOverride: true, DismissStaleApprovals: true, BlockOnRejectedReviews: true, BlockOnOfficialReviewRequests: true, BlockOnOutdatedBranch: true, EnableStatusCheck: len(checks) > 0, StatusCheckContexts: checks})
-	} else {
-		_, _, err = c.SDK.Repositories.EditBranchProtection(ctx, opt.Owner, opt.Name, repo.DefaultBranch, gitea.EditBranchProtectionOption{EnablePush: new(false), RequiredApprovals: new(int64(2)), EnableMergeWhitelist: new(true), MergeWhitelistUsernames: []string{opt.Merger}, BlockAdminMergeOverride: new(true), DismissStaleApprovals: new(true), BlockOnRejectedReviews: new(true), BlockOnOfficialReviewRequests: new(true), BlockOnOutdatedBranch: new(true), EnableStatusCheck: new(len(checks) > 0), StatusCheckContexts: checks})
-	}
-	if err != nil {
-		return fmt.Errorf("配置分支保护: %w", err)
-	}
-	return nil
+	_, err = c.UpdateProtection(ctx, ProtectionOptions{Owner: opt.Owner, Name: opt.Name, Branch: repo.DefaultBranch, Merger: opt.Merger, Checks: opt.Checks})
+	return err
 }
