@@ -16,6 +16,7 @@ import (
 	"github.com/Cosmic-Developers-Union/assistant/internal/integration/qq"
 	"github.com/Cosmic-Developers-Union/assistant/internal/integration/telegram"
 	"github.com/Cosmic-Developers-Union/assistant/internal/integration/weixin"
+	"github.com/Cosmic-Developers-Union/assistant/internal/project"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -69,6 +70,7 @@ func newInstanceCommand() *cobra.Command {
 }
 func newInstanceCommandWithLogins(logins instanceLogins) *cobra.Command {
 	root := &cobra.Command{Use: "instance", Short: "管理用户级平台连接（与 run 配置独立）", Args: cobra.NoArgs}
+	root.AddCommand(newProvisionCommand(), newTokenCommand())
 	load := func() (string, *credentials.File, error) {
 		path, err := credentials.Path()
 		if err != nil {
@@ -291,7 +293,7 @@ func loginGitea(ctx context.Context, host, user, password, otp, name string) (st
 	if me.UserName != user {
 		return "", fmt.Errorf("Gitea 返回的账号身份不匹配")
 	}
-	token, _, err := client.Users.CreateAccessToken(ctx, sdk.CreateAccessTokenOption{Name: "assistant-instance-" + name + "-" + uuid.New().String(), Scopes: []sdk.AccessTokenScope{"read:repository", "write:repository", "read:issue", "write:issue", "read:user"}})
+	token, _, err := client.Users.CreateAccessToken(ctx, sdk.CreateAccessTokenOption{Name: "assistant-instance-" + name + "-" + uuid.New().String(), Scopes: project.TokenScopes(me.IsAdmin)})
 	if err != nil {
 		return "", fmt.Errorf("创建个人工具令牌: %w", err)
 	}

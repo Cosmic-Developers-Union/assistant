@@ -1,6 +1,6 @@
 # 按 goal.md 重构的架构
 
-产品只有一个二进制和四个操作面。CLI 负责输入和装配，业务规则分别留在
+产品只有一个二进制和四个核心操作面，另有 project 接入命令。CLI 负责输入和装配，业务规则分别留在
 runtime 与 status；平台 SDK、消息协议、Claude 子进程通过窄接口接入。
 
 | 操作面 | 输入 | 职责 | 可写数据 |
@@ -9,6 +9,7 @@ runtime 与 status；平台 SDK、消息协议、Claude 子进程通过窄接口
 | mcp gitea | 显式参数、环境、Git remote、个人连接 | 解析站点与访问身份、启动工具 | 平台工具授权的操作 |
 | action | 三项 GITEA 环境变量 | 单仓库标签收敛与实时合并门禁 | 显式仓库 |
 | run | config.yaml 与环境 | 发现待办、运行 bot、收尾 | 平台操作及运行 root |
+| project | 个人实例与当前 Git 项目 | 标签、权限与工具安装/卸载 | 显式项目及其托管配置 |
 | mcp sessions | config.yaml | 查询执行元数据 | 无 |
 
 删除原 dispatcher/daemon 双调度、providers/channels/runtimes 间接配置、独立
@@ -57,3 +58,17 @@ Lean 证明调度守卫与平台待办语义；TLC 检查状态机和当前 head
 新旧配置与会话落点有意不自动转换，迁移步骤见 [config.md](config.md#旧版迁移)。
 真实 Claude 模型调用和生产 Gitea 写操作仍须在操作者准备的测试站点验收；本地验证
 不触碰生产账号、仓库或服务。系统故障与单测边界见 [coverage-gaps.md](coverage-gaps.md)。
+
+## 账号范围与独立聊天运行时
+
+Gitea run 按账号发现召唤，不接受 repos 白名单。全站 mention 搜索能找到可读公开
+仓库，标签待办仍扫描账号可见仓库；回应以该账号的原生 review 为边界，新提及
+才能重新召唤。action 仍是单仓库 CI 动作，两者权限与运行场景不同。
+
+instance provision 创建机器人账号并保存令牌；project configure 管当前仓库的
+标签、协作者与双批准保护；project install/uninstall 管局部托管配置，不恢复
+旧版的一次性全局安装器。
+
+新的聊天运行时在 agent-runtime 独立 Go module 定义 contract.Runner 与事件流，
+保留 TUI 调试；另一位 agent 实现其引擎/权限/执行环境。主线不导入新 module，
+未来通过适配器对接现有 AgentRunner，宿主仍负责平台与持久化生命周期。

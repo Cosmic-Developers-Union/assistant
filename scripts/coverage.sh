@@ -38,6 +38,7 @@ declare -A thresholds=(
 	[internal/integration]=90
 	[internal/cli]=90
 	[internal/runtime]=90
+	[internal/project]=90
 	[internal/integration/gitea]=90
 	[internal/integration/weixin]=80
 	[internal/integration/qq]=80

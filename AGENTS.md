@@ -73,7 +73,7 @@ stdout 是主体/协议输出，stderr 是日志/错误；stdio MCP 不能混入
 - 错误用 fmt.Errorf("语境: %w", err) 包装，用 errors.Is/As 识别链，不匹配错误字符串。
 - 单测与代码同目录，端到端在 test/e2e，使用 //go:build e2e。
 - 不引入无必要依赖；删死代码、旧引用和失效测试，保留有独立价值的契约测试。
-- 核心 runtime/status/credentials/cli/claude/integration ≥90%；平台/MCP/skills ≥80%。
+- 核心 runtime/project/status/credentials/cli/claude/integration ≥90%；平台/MCP/skills ≥80%。
   覆盖率逐包算；公共 API、边界、失败/恢复与协议必须有测试，数字不是充分条件。
 - 真实 Claude、真实 Gitea、真实 S3 调用用 e2e；逻辑通过窄接口注入替身。
   不可触达的系统故障如实登记 docs/coverage-gaps.md，不堆无意义测试。
@@ -95,5 +95,9 @@ PR 先 draft/WIP；相关实现、文档与技能可在同一 PR。评审与合�
 ai 内容批准、merge 会签/合并流程；不擅自合并或部署。
 
 `.agents/skills/` 与 `.claude/skills/` 的既有托管文件不要直接修改；修改评审协议
-用 skills/review/SKILL.md 源。本仓库没有自动脚手架安装命令，旧托管文件保留给
+用 skills/review/SKILL.md 源。新项目工具只管理 project install/uninstall 指定的 Actions/MCP；旧托管技能保留给
 开发工具使用。项目自有约定仍放 `.assistant/review.md` 的托管段落之外。
+
+`run` 的 Gitea 消费范围是账号可见仓库与全站 @ 召唤，不加仓库白名单。
+`project` 只规范当前项目；禁止把站点接入、项目安装和常驻调度混成一个命令。
+`agent-runtime/` 是独立 module，TUI 与轻量引擎由独立任务实现，本轮不集成主线。

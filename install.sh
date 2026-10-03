@@ -143,7 +143,7 @@ BINDIR=$PREFIX/bin
 write_config_example() {
   cat <<'YAML'
 connects:
-  site: {type: gitea, url: https://gitea.example.com, token: "{{GITEA_REVIEW_TOKEN}}", repos: [acme/repo]}
+  site: {type: gitea, url: https://gitea.example.com, token: "{{GITEA_REVIEW_TOKEN}}"}
 mcp:
   site: {cmd: assistant, args: [mcp, gitea]}
 bots:

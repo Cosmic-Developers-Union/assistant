@@ -1,7 +1,7 @@
 # assistant
 
 一个 Go 二进制，提供平台实例管理、AI 会话工具、仓库自动化和 bot 常驻运行。
-设计规范见 [goal.md](goal.md)，实现分为四个操作面：
+设计规范见 [goal.md](goal.md)，核心分为四个操作面，另有项目接入工具 project：
 
 ```sh
 assistant instance add gitea --name work --url https://gitea.example --username developer
@@ -30,7 +30,8 @@ assistant run                # 常驻运行，Ctrl+C 收尾退出
 `.env` 不会自动加载；容器使用 `env_file`，systemd 使用 `EnvironmentFile`，
 前台运行由 shell 注入。配置说明见 [docs/config.md](docs/config.md)。
 
-`run` 消费平台上的 `status/review` PR 与 `status/triage` Issue。
+`run` 消费可见仓库的 `status/review` PR 与 `status/triage` Issue，并在全站
+处理 @ 当前连接账号的 PR 召唤；没有单仓库或配置仓库白名单的限制。
 工作区使用受管克隆与独立 worktree；评审钉住事件 head，并以基线 `.claude/` 和 `.assistant/`
 替换 PR 自带规则。同一待办同时至多一个会话；每轮重新读平台待办，进程退出
 或模型声称完成均不算业务完成。评审协议由二进制内嵌的
@@ -69,7 +70,7 @@ label-sync 收敛标签和原生评审状态；automerge 实时校验当前 head
 `api.json`（0600），退出时删除。
 
 本次架构替换移除了 `assistantd`、旧 login/setup/init/install/doctor/config
-命令与 providers/channels/runtimes JSON 配置。迁移步骤见
+命令（新的项目接入使用 project 子命令）与 providers/channels/runtimes JSON 配置。迁移步骤见
 [docs/config.md](docs/config.md#旧版迁移)；旧文件不会自动覆盖或转换。
 
 ```sh
@@ -82,3 +83,7 @@ make compose-up
 
 Go 版本以 go.mod 为准。评审状态与调度语义分别由 `spec/ReviewStateMachine.tla`
 与 `formal/Dispatcher.lean` 约束。开发约定见 [AGENTS.md](AGENTS.md)。
+
+站点账号/令牌与项目标签、权限、Actions/MCP 安装见 [接入指南](docs/bootstrap.md)。
+轻量聊天运行时独立放在 [agent-runtime](agent-runtime/README.md)，保留 TUI 调试，
+当前主线只定义协议、不接入尚未实现的引擎。

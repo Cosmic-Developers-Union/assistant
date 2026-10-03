@@ -120,3 +120,46 @@ func TestMCPCommandAndExitPropagation(t *testing.T) {
 		t.Fatal("密钥未打码")
 	}
 }
+
+func TestExplicitInstanceSelectsAccountWithoutGuessingOrEnvironmentFallback(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "credentials.json")
+	t.Setenv("ASSISTANT_CREDENTIALS", path)
+	file := &credentials.File{Instances: credentials.Instances{Gitea: []credentials.Gitea{{Name: "ai", URL: "https://site", Username: "ai", Token: "review-token"}, {Name: "merge", URL: "https://site", Username: "merge", Token: "merge-token"}}}}
+	if err := credentials.Save(path, file); err != nil {
+		t.Fatal(err)
+	}
+	env := func(key string) string {
+		if key == "GITEA_ACCESS_TOKEN" {
+			return "environment-token"
+		}
+		if key == "GITEA_HOST" {
+			return "https://wrong"
+		}
+		return ""
+	}
+	for _, name := range []string{"ai", "merge"} {
+		spec, err := ResolveGitea(t.Context(), GiteaOptions{Instance: name, Getenv: env})
+		if err != nil || spec.Host != "https://site" || spec.Token != map[string]string{"ai": "review-token", "merge": "merge-token"}[name] {
+			t.Fatal(spec, err)
+		}
+	}
+	for _, opt := range []GiteaOptions{{Instance: "missing"}, {Instance: "ai", Host: "https://other"}} {
+		if _, err := ResolveGitea(t.Context(), opt); err == nil {
+			t.Fatal("无效实例选择被接受")
+		}
+	}
+	spec, err := ResolveGitea(t.Context(), GiteaOptions{Instance: "ai", Host: "https://site", Token: "override"})
+	if err != nil || spec.Token != "override" {
+		t.Fatal(spec, err)
+	}
+	_ = os.WriteFile(path, []byte("bad"), 0600)
+	if _, err := ResolveGitea(t.Context(), GiteaOptions{Instance: "ai"}); err == nil {
+		t.Fatal("损坏实例库被忽略")
+	}
+	t.Setenv("ASSISTANT_CREDENTIALS", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("HOME", "")
+	if _, err := ResolveGitea(t.Context(), GiteaOptions{Instance: "ai"}); err == nil {
+		t.Fatal("无法定位用户凭据未报错")
+	}
+}

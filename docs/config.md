@@ -10,14 +10,16 @@
 
 | 块 | 职责 |
 |---|---|
-| connects | 平台连接：type、url、token；Gitea 可用 repos 限定扫描范围 |
+| connects | 平台连接：type、url、token；Gitea 以令牌账号为召唤身份 |
 | mcp | 命名 stdio server：cmd、args、env |
 | bots | kind、use、with、workspace、agent 的组合 |
 | session | local 或 s3 记忆副本 |
 | runtime | root、interval、timeout、concurrency、api-listen |
 
-`connects.gitea` 的 repos 缺省时发现该服务令牌可见的仓库；配置 repos 时直接
-访问这些仓库。CI 的 `action` 始终要求显式指定一个仓库，不做发现。
+`run` 没有仓库白名单。Gitea 连接扫描可见仓库的标签待办，同时通过全站
+`mentioned_by` 搜索发现 @ 当前账号的 PR；公开仓库不必先安装 workflow 或加入协作者。
+正式回应后的历史提及不重复触发，最新回应后的新 @ 评论可再次召唤。
+CI 的 `action` 始终要求显式指定一个仓库，不做发现。
 
 bot 内置 kind 是 `gitea-review`、`triage`、`chat`。`use` 必须绑定一个匹配平台
 的连接。重复消费同一连接的同一种事件会报错；评审与分诊可以共享连接。
@@ -114,3 +116,6 @@ MCP token：--token → GITEA_ACCESS_TOKEN → GITEA_ACCESS_TOKEN_FILE → 对�
 运行根的 run.lock 使用操作系统锁；正常退出或进程崩溃后锁自动释放。
 锁文件保留，不要通过删除文件启动第二个进程；并行部署须使用不同 root。
 --debug 会在 --verbose 信息上增加装配与续接原因，所有已知连接密钥均从日志遮蔽。
+
+MCP 的 --instance 明确选择同站点的某个个人账号；安装命令只把实例名写入 .mcp.json。
+站点接入与项目安装见 [bootstrap.md](bootstrap.md)，不会改写 run 的服务连接。

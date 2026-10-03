@@ -9,7 +9,7 @@ import (
 )
 
 const validConfig = `connects:
-  site: {type: gitea, url: https://gitea.example, token: "{{TOKEN}}", repos: [acme/repo]}
+  site: {type: gitea, url: https://gitea.example, token: "{{TOKEN}}"}
 mcp:
   site: {cmd: assistant, args: [mcp, gitea], env: {CUSTOM: "{{TOKEN}}"}}
 bots:
@@ -44,8 +44,9 @@ func TestDecodeConfig(t *testing.T) {
 		"secret-suffix":        strings.Replace(validConfig, "{{TOKEN}}", "{{TOKEN}}suffix", 1),
 		"missing-env":          strings.ReplaceAll(validConfig, "TOKEN", "MISSING"),
 		"bad-url":              strings.Replace(validConfig, "https://gitea.example", "https://user:secret@gitea.example", 1),
-		"bad-repo":             strings.Replace(validConfig, "acme/repo", "../repo", 1),
-		"cross-fields":         strings.Replace(validConfig, "repos: [acme/repo]", "app-id: 1", 1),
+		"removed-repo-filter":  strings.Replace(validConfig, "type: gitea,", "type: gitea, repos: [acme/repo],", 1),
+		"bad-repo":             strings.Replace(validConfig, "{{event.repo}}", "../repo", 1),
+		"cross-fields":         strings.Replace(validConfig, "type: gitea,", "type: gitea, app-id: 1,", 1),
 		"missing-connection":   strings.Replace(validConfig, "gitea: site", "gitea: missing", 1),
 		"wrong-role":           strings.Replace(validConfig, "gitea: site", "qq: site", 1),
 		"multiple-connections": strings.Replace(validConfig, "gitea: site", "gitea: site, qq: site", 1),
@@ -87,7 +88,10 @@ func TestPlatformConfig(t *testing.T) {
 			t.Fatal(err)
 		}
 		conn := cfg.Connects["chat"]
-		conn.Repos = []string{"acme/repo"}
+		conn.AppID = "混入其他平台字段"
+		if platform == "qq" {
+			conn.UserID = "unexpected"
+		}
 		cfg.Connects["chat"] = conn
 		if err := cfg.Validate(); err == nil {
 			t.Fatal("消息平台接受仓库字段")

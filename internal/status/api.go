@@ -98,6 +98,8 @@ type Issue struct {
 }
 
 type PullRequest struct {
+	Repository Repository
+
 	Index     int64
 	Title     string
 	HTMLURL   string

@@ -130,7 +130,12 @@ func Start(ctx context.Context, cfg *Config, dryRun, verbose bool, log func(stri
 					return err
 				}
 
-				source = &GiteaSource{API: client, Host: conn.URL, Repos: conn.Repos}
+				source = &GiteaSource{API: client, Host: conn.URL}
+				identity, err := client.AuthenticatedUser(ctx)
+				if err != nil {
+					return err
+				}
+				source.Identity = identity
 				sources[ref] = source
 				clients[ref] = client
 			}

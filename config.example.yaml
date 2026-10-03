@@ -3,7 +3,6 @@ connects:
     type: gitea
     url: https://gitea.example.com
     token: "{{GITEA_REVIEW_TOKEN}}"
-    repos: [acme/repo]
 mcp:
   gitea:
     cmd: assistant

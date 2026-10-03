@@ -30,7 +30,6 @@ type Connect struct {
 	Type       string   `yaml:"type"`
 	URL        string   `yaml:"url"`
 	Token      string   `yaml:"token"`
-	Repos      []string `yaml:"repos"`
 	AppID      string   `yaml:"app-id"`
 	AppSecret  string   `yaml:"app-secret"`
 	UserID     string   `yaml:"user-id"`
@@ -245,17 +244,12 @@ func (c *Config) Validate() error {
 			if conn.Token == "" || conn.AppID != "" || conn.AppSecret != "" || conn.UserID != "" || len(conn.AdminUsers) > 0 {
 				return fmt.Errorf("connects.%s 的 gitea 字段不完整或混入其他平台字段", name)
 			}
-			for _, repo := range conn.Repos {
-				if _, _, err := credentials.ParseRepoName(repo); err != nil {
-					return err
-				}
-			}
 		case "qq":
-			if conn.AppID == "" || conn.AppSecret == "" || conn.Token != "" || len(conn.Repos) > 0 || conn.UserID != "" {
+			if conn.AppID == "" || conn.AppSecret == "" || conn.Token != "" || conn.UserID != "" {
 				return fmt.Errorf("connects.%s 的 qq 字段不完整或混入其他平台字段", name)
 			}
 		case "telegram", "weixin":
-			if conn.Token == "" || conn.AppID != "" || conn.AppSecret != "" || len(conn.Repos) > 0 || (conn.Type == "telegram" && conn.UserID != "") {
+			if conn.Token == "" || conn.AppID != "" || conn.AppSecret != "" || (conn.Type == "telegram" && conn.UserID != "") {
 				return fmt.Errorf("connects.%s 的消息平台字段不完整或混入其他平台字段", name)
 			}
 		default:

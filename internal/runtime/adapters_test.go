@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Cosmic-Developers-Union/assistant/internal/claude"
 	"github.com/Cosmic-Developers-Union/assistant/internal/status"
@@ -30,6 +31,15 @@ func (p *platformFake) ListOpenPullRequests(context.Context, status.Repository) 
 func (p *platformFake) ListTriageIssues(context.Context, status.Repository) ([]status.Issue, error) {
 	return p.issues, p.err
 }
+func (p *platformFake) ListMentionedPullRequests(context.Context, string) ([]status.PullRequest, error) {
+	return nil, p.err
+}
+func (p *platformFake) ListPullReviews(context.Context, status.Repository, int64) ([]status.Review, error) {
+	return nil, p.err
+}
+func (p *platformFake) ListIssueCommentsSince(context.Context, status.Repository, int64, time.Time) ([]status.Comment, error) {
+	return nil, p.err
+}
 func TestSourceUsesLabelsAndPlatformState(t *testing.T) {
 	api := &platformFake{pulls: []status.PullRequest{
 		{Index: 1, Open: true, HeadSHA: "h1", BaseRef: "main", Labels: []status.Label{{Name: status.LabelReview}}},
@@ -38,15 +48,14 @@ func TestSourceUsesLabelsAndPlatformState(t *testing.T) {
 		{Index: 4, Open: true, Title: "WIP: test", Labels: []status.Label{{Name: status.LabelReview}}},
 		{Index: 5, Open: false, Labels: []status.Label{{Name: status.LabelReview}}},
 	}, issues: []status.Issue{{Index: 9, Title: "triage"}, {Index: 10, IsPull: true}}}
-	source := GiteaSource{API: api, Host: "https://site", Repos: []string{"acme/repo"}, ReviewBot: "review", TriageBot: "triage"}
+	source := GiteaSource{API: api, Host: "https://site", ReviewBot: "review", TriageBot: "triage"}
 	events, err := source.Poll(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if api.listed || len(events) != 2 || events[0].Head != "h1" || events[1].Kind != "triage" {
+	if !api.listed || len(events) != 2 || events[0].Head != "h1" || events[1].Kind != "triage" {
 		t.Fatalf("错误待办 %+v", events)
 	}
-	source.Repos = nil
 	events, err = source.Poll(t.Context())
 	if err != nil || !api.listed || len(events) != 2 {
 		t.Fatal(err)
@@ -55,7 +64,6 @@ func TestSourceUsesLabelsAndPlatformState(t *testing.T) {
 	if _, err := source.Poll(t.Context()); err == nil {
 		t.Fatal("平台错误被吞掉")
 	}
-	source.Repos = []string{"acme/repo"}
 	if _, err := source.Poll(t.Context()); err == nil {
 		t.Fatal("仓库查询错误被吞掉")
 	}

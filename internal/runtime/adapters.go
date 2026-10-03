@@ -29,34 +29,28 @@ type GiteaAPI interface {
 	ListRepositories(context.Context) ([]status.Repository, error)
 	ListOpenPullRequests(context.Context, status.Repository) ([]status.PullRequest, error)
 	ListTriageIssues(context.Context, status.Repository) ([]status.Issue, error)
+	ListMentionedPullRequests(context.Context, string) ([]status.PullRequest, error)
+	ListPullReviews(context.Context, status.Repository, int64) ([]status.Review, error)
+	ListIssueCommentsSince(context.Context, status.Repository, int64, time.Time) ([]status.Comment, error)
 }
 
-// GiteaSource 消费标签；评审请求与提及的归一化属于 action label-sync。
+// GiteaSource 发现账号可见标签待办与全站新提及，召唤不依赖仓库 workflow。
 type GiteaSource struct {
 	API       GiteaAPI
 	Host      string
-	Repos     []string
+	Identity  string
 	ReviewBot string
 	TriageBot string
 }
 
 // Poll 每轮重读平台事实，不从 agent 输出或历史结局构造待办。
 func (s GiteaSource) Poll(ctx context.Context) ([]Event, error) {
-	var repos []status.Repository
-	if len(s.Repos) == 0 {
-		found, err := s.API.ListRepositories(ctx)
-		if err != nil {
-			return nil, err
-		}
-		repos = found
-	} else {
-		for _, name := range s.Repos {
-			owner, repo, _ := strings.Cut(name, "/")
-			repos = append(repos, status.Repository{Owner: owner, Name: repo})
-		}
-	}
+	repos, repoErr := s.API.ListRepositories(ctx)
 	var result []Event
 	var failures []error
+	if repoErr != nil {
+		failures = append(failures, repoErr)
+	}
 	for _, repo := range repos {
 		if s.ReviewBot != "" {
 			pulls, err := s.API.ListOpenPullRequests(ctx, repo)
@@ -90,7 +84,80 @@ func (s GiteaSource) Poll(ctx context.Context) ([]Event, error) {
 			}
 		}
 	}
+	if s.ReviewBot != "" && s.Identity != "" {
+		mentioned, err := s.API.ListMentionedPullRequests(ctx, s.Identity)
+		if err != nil {
+			failures = append(failures, err)
+		}
+		seen := map[string]bool{}
+		for _, event := range result {
+			seen[event.key()] = true
+		}
+		for _, pr := range mentioned {
+			if !pr.Open || pr.Draft || isWIP(pr.Title) {
+				continue
+			}
+			ev := Event{Bot: s.ReviewBot, Kind: "gitea-review", Host: s.Host, Repo: pr.Repository.FullName(), Number: pr.Index, Title: pr.Title, Head: pr.HeadSHA, Ref: fmt.Sprintf("refs/pull/%d/head", pr.Index), Base: pr.BaseRef}
+			if seen[ev.key()] {
+				continue
+			}
+			requested, err := s.freshMention(ctx, pr)
+			if err != nil {
+				failures = append(failures, err)
+				continue
+			}
+			if requested {
+				result = append(result, ev)
+				seen[ev.key()] = true
+			}
+		}
+	}
+
 	return result, errors.Join(failures...)
+}
+
+func (s GiteaSource) freshMention(ctx context.Context, pr status.PullRequest) (bool, error) {
+	reviews, err := s.API.ListPullReviews(ctx, pr.Repository, pr.Index)
+	if err != nil {
+		return false, err
+	}
+	var since time.Time
+	for _, review := range reviews {
+		if review.User == s.Identity && review.State != status.ReviewStatePending && review.State != status.ReviewStateRequestReview && review.Submitted.After(since) {
+			since = review.Submitted
+		}
+	}
+	// 全站搜索已由 Gitea 解析正文/评论的 mention；没有任何回应时直接处理。
+	if since.IsZero() {
+		return true, nil
+	}
+	comments, err := s.API.ListIssueCommentsSince(ctx, pr.Repository, pr.Index, since)
+	if err != nil {
+		return false, err
+	}
+	for _, comment := range comments {
+		if comment.User != s.Identity && comment.Created.After(since) && mentionsAccount(comment.Body, s.Identity) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+func mentionsAccount(text, user string) bool {
+	text = strings.ToLower(text)
+	mention := "@" + strings.ToLower(user)
+	for {
+		before, after, ok := strings.Cut(text, mention)
+		if !ok {
+			return false
+		}
+		boundary := func(c byte) bool {
+			return c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_' || c == '-' || c == '.'
+		}
+		if (len(before) == 0 || !boundary(before[len(before)-1])) && (len(after) == 0 || !boundary(after[0])) {
+			return true
+		}
+		text = after
+	}
 }
 
 func isWIP(title string) bool {

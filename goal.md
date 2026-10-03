@@ -446,3 +446,43 @@ func (s S3Session) Sync(ev Event, dir string) error {
    已有同 id 会话以 --resume 续接;结束后 `Session.Sync` 固化会话副本、
    登记元数据,执行 cleanup。
 6. 完成判定在平台侧:下一轮待办消失,这一单才算完成。
+
+## 5. 站点接入与当前项目工具
+
+instance 负责管理员接入、机器人账号与令牌；project 负责当前检出的 Gitea 配置。
+不能把项目接入配置当作 run 的仓库白名单：Gitea run 按实际令牌账号处理所有
+可见仓库待办和全站 @ 召唤，包括未安装 workflow 的可读公开仓库。
+
+基础命令：
+
+```shell
+assistant instance provision gitea --admin admin-instance
+assistant instance token ai-instance --password-file /secure/password
+assistant project configure --instance admin-instance
+assistant project labels --instance admin-instance
+assistant project install action --instance admin-instance --merge-instance merge-instance
+assistant project uninstall action
+assistant project install mcp --instance ai-instance
+assistant project uninstall mcp
+```
+
+管理员创建缺失的 ai/merge，持久保存限定令牌；不自动重置已有账号密码，不删无关
+令牌。ai 为 write 协作者，merge 为 admin 协作者以登记他人评审请求，但必须受
+默认分支双批准、批准随提交过期、落后/驳回/未回应门禁和 merge 合并白名单约束。
+
+只读演练不写平台或文件。Actions secret 通过 SDK 注入，托管 workflow 本地生成，
+提交推送后生效；卸载只移除自己的 workflow，不关闭整个仓库 Actions、不删其他
+workflow 或共享 secret。MCP 配置只写明确的实例名，保留其他 server 和用户字段。
+无归属标记或同名用户配置拒绝覆盖/删除。
+
+## 6. 独立轻量运行时与 TUI
+
+轻量 chat/客服/work 引擎在 agent-runtime 独立 Go module 设计实现，保留 TUI 调试。
+主线本轮只定义 contract.Runner/Request/Result、事件流、会话、权限与执行环境，
+不引入上游完整 CLI/TUI 依赖、不把尚未实现的后端接入 run。
+
+另一位 agent 可以评估裁剪/复用 claude-code-go 与独立 agtkeel 核心；TUI/headless
+必须共享同一引擎和权限判定。平台/workspace 准备、Session 恢复/固化、完成判定
+由 assistant 宿主负责，运行时只执行一轮。后续通过适配器衔接 AgentRunner。
+chat 默认无工具；客服只读显式知识范围；work 分别授权读/写/执行，执行不得默认
+落在宿主 shell，容器环境和工具权限分别约束。详细交付契约见 agent-runtime/README.md。

@@ -34,7 +34,9 @@ func platformServer(t *testing.T) *httptest.Server {
 				return
 			}
 			fmt.Fprint(w, `{"login":"ai"}`)
-		case "/api/v1/repos/acme/repo/pulls", "/api/v1/repos/acme/repo/issues":
+		case "/api/v1/user/repos":
+			fmt.Fprint(w, `[{"name":"repo","owner":{"login":"acme"}}]`)
+		case "/api/v1/repos/issues/search", "/api/v1/repos/acme/repo/pulls", "/api/v1/repos/acme/repo/issues":
 			fmt.Fprint(w, `[]`)
 		default:
 			t.Errorf("未预期的请求: %s", r.URL)

@@ -1,0 +1,281 @@
+package cli
+
+import (
+	json "encoding/json/v2"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
+)
+
+type projectFixture struct {
+	host, path, dir      string
+	users                map[string]bool
+	writes               int
+	admin                bool
+	failMethod, failPath string
+	onToken              func()
+}
+
+func projectTestFixture(t *testing.T) *projectFixture {
+	t.Helper()
+	f := &projectFixture{users: map[string]bool{"admin": true}, admin: true}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != "GET" {
+			f.writes++
+		}
+		if r.Method == f.failMethod && r.URL.Path == f.failPath {
+			w.WriteHeader(400)
+			fmt.Fprint(w, `{"message":"失败"}`)
+			return
+		}
+		switch {
+		case r.URL.Path == "/api/v1/version":
+			fmt.Fprint(w, `{"version":"1.27.0"}`)
+		case r.URL.Path == "/api/v1/user":
+			user := strings.TrimPrefix(r.Header.Get("Authorization"), "token token-")
+			if basic, _, ok := r.BasicAuth(); ok {
+				user = basic
+			}
+			fmt.Fprintf(w, `{"login":%q,"is_admin":%t}`, user, f.admin && user == "admin")
+		case r.URL.Path == "/api/v1/admin/users":
+			var body struct {
+				User string `json:"username"`
+			}
+			_ = json.UnmarshalRead(r.Body, &body)
+			f.users[body.User] = true
+			fmt.Fprintf(w, `{"login":%q}`, body.User)
+		case strings.HasSuffix(r.URL.Path, "/tokens"):
+			user := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/users/"), "/tokens")
+			if f.onToken != nil {
+				f.onToken()
+			}
+			fmt.Fprintf(w, `{"sha1":%q}`, "token-"+user)
+		case strings.HasPrefix(r.URL.Path, "/api/v1/users/"):
+			user := strings.TrimPrefix(r.URL.Path, "/api/v1/users/")
+			if !f.users[user] {
+				w.WriteHeader(404)
+				return
+			}
+			fmt.Fprintf(w, `{"login":%q}`, user)
+		case strings.HasSuffix(r.URL.Path, "/labels"):
+			if r.Method == "GET" {
+				fmt.Fprint(w, `[]`)
+			} else {
+				var body map[string]any
+				_ = json.UnmarshalRead(r.Body, &body)
+				fmt.Fprintf(w, `{"id":%d,"name":%q}`, f.writes, body["name"])
+			}
+		case strings.Contains(r.URL.Path, "/labels/"):
+			fmt.Fprint(w, `{"id":1,"exclusive":true}`)
+		case strings.Contains(r.URL.Path, "/collaborators/"):
+			w.WriteHeader(204)
+		case strings.Contains(r.URL.Path, "/branch_protections"):
+			if r.Method == "GET" {
+				w.WriteHeader(404)
+				return
+			}
+			fmt.Fprint(w, `{"rule_name":"main"}`)
+		case strings.Contains(r.URL.Path, "/actions/secrets/"):
+			w.WriteHeader(204)
+		case r.URL.Path == "/api/v1/repos/team/repo":
+			fmt.Fprint(w, `{"name":"repo","default_branch":"main"}`)
+		default:
+			t.Errorf("未预期请求: %s %s", r.Method, r.URL)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	f.host = server.URL
+	f.path = filepath.Join(t.TempDir(), "credentials.json")
+	t.Setenv("ASSISTANT_CREDENTIALS", f.path)
+	f.dir = t.TempDir()
+	for _, args := range [][]string{{"init", "--quiet", f.dir}, {"-C", f.dir, "remote", "add", "gitea", server.URL + "/team/repo.git"}} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatal(string(out), err)
+		}
+	}
+	f.save(t, []credentials.Gitea{{Name: "admin", URL: server.URL, Username: "admin", Token: "token-admin"}, {Name: "merge", URL: server.URL, Username: "merge", Token: "token-merge"}})
+	return f
+}
+func (f *projectFixture) save(t *testing.T, entries []credentials.Gitea) {
+	t.Helper()
+	if err := credentials.Save(f.path, &credentials.File{Instances: credentials.Instances{Gitea: entries}}); err != nil {
+		t.Fatal(err)
+	}
+}
+func TestProvisionCommandCreatesAndReusesBothAccounts(t *testing.T) {
+	f := projectTestFixture(t)
+	out, _, err := command(t, "instance", "provision", "gitea", "--admin", "admin", "--name-prefix", "bots")
+	if err != nil || !strings.Contains(out, "bots-ai") || !strings.Contains(out, "bots-merge") || strings.Contains(out, "token-ai") {
+		t.Fatal(out, err)
+	}
+	file, err := credentials.Load(f.path)
+	if err != nil || len(file.Instances.Gitea) != 4 {
+		t.Fatal(file, err)
+	}
+	old := f.writes
+	if _, _, err := command(t, "instance", "provision", "gitea", "--admin", "admin", "--name-prefix", "bots"); err != nil || f.writes != old {
+		t.Fatal("重复接入创建令牌", err, f.writes, old)
+	}
+}
+func TestProvisionCommandDryRunAndFailurePaths(t *testing.T) {
+	for _, scenario := range []string{"dry", "same-user", "existing-account", "bad-password-file", "other-platform-name", "platform-error", "save-error", "missing-admin"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := projectTestFixture(t)
+			args := []string{"instance", "provision", "gitea", "--admin", "admin", "--name-prefix", "bots"}
+			switch scenario {
+			case "dry":
+				args = append(args, "--dry-run")
+			case "same-user":
+				args = append(args, "--reviewer", "merge")
+			case "existing-account":
+				f.users["ai"] = true
+			case "bad-password-file":
+				args = append(args, "--reviewer-password-file", filepath.Join(t.TempDir(), "missing"))
+			case "other-platform-name":
+				file, _ := credentials.Load(f.path)
+				file.Instances.QQ = []credentials.QQ{{Name: "bots-ai", AppID: "a", AppSecret: "secret"}}
+				if err := credentials.Save(f.path, file); err != nil {
+					t.Fatal(err)
+				}
+			case "platform-error":
+				f.failMethod = "POST"
+				f.failPath = "/api/v1/admin/users"
+			case "save-error":
+				f.onToken = func() { _ = os.Remove(f.path); _ = os.Mkdir(f.path, 0700) }
+			case "missing-admin":
+				args[4] = "missing"
+			}
+			out, _, err := command(t, args...)
+			if scenario == "dry" {
+				if err != nil || f.writes != 0 || !strings.Contains(out, "演练") {
+					t.Fatal(out, err, f.writes)
+				}
+			} else if err == nil {
+				t.Fatal("失败被吞掉", scenario)
+			}
+		})
+	}
+	f := projectTestFixture(t)
+	f.users["ai"] = true
+	password := filepath.Join(t.TempDir(), "password")
+	_ = os.WriteFile(password, []byte("explicit-password"), 0600)
+	if _, _, err := command(t, "instance", "provision", "gitea", "--admin", "admin", "--reviewer-password-file", password); err != nil {
+		t.Fatal(err)
+	}
+}
+func TestTokenCommandOnlyReplacesChosenLocalCredential(t *testing.T) {
+	for _, scenario := range []string{"ok", "missing-password", "bad-password", "issue-failure", "save-failure"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := projectTestFixture(t)
+			file, _ := credentials.Load(f.path)
+			file.Instances.Gitea[0].Token = "token-old"
+			if err := credentials.Save(f.path, file); err != nil {
+				t.Fatal(err)
+			}
+			password := filepath.Join(t.TempDir(), "password")
+			_ = os.WriteFile(password, []byte("secret-password"), 0600)
+			args := []string{"instance", "token", "admin", "--password-file", password}
+			switch scenario {
+			case "missing-password":
+				args = args[:3]
+			case "bad-password":
+				_ = os.WriteFile(password, nil, 0600)
+			case "issue-failure":
+				f.failMethod = "POST"
+				f.failPath = "/api/v1/users/admin/tokens"
+			case "save-failure":
+				f.onToken = func() { _ = os.Remove(f.path); _ = os.Mkdir(f.path, 0700) }
+			}
+			out, _, err := command(t, args...)
+			if scenario == "ok" {
+				if err != nil || strings.Contains(out, "token-admin") {
+					t.Fatal(out, err)
+				}
+				file, err := credentials.Load(f.path)
+				if err != nil || file.Instances.Gitea[0].Token != "token-admin" || file.Instances.Gitea[1].Token != "token-merge" {
+					t.Fatal(file, err)
+				}
+			} else if err == nil {
+				t.Fatal("失败被忽略")
+			}
+		})
+	}
+}
+func TestProjectCommandLifecycle(t *testing.T) {
+	f := projectTestFixture(t)
+	for _, args := range [][]string{{"configure", "--required-checks", "build"}, {"labels"}, {"install", "action"}, {"install", "mcp"}} {
+		args = append([]string{"project", "--instance", "admin", "--dir", f.dir}, args...)
+		if _, _, err := command(t, args...); err != nil {
+			t.Fatal(args, err)
+		}
+	}
+	for _, name := range []string{filepath.Join(".gitea", "workflows", "assistant.yml"), ".mcp.json"} {
+		if _, err := os.Stat(filepath.Join(f.dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writes := f.writes
+	for _, kind := range []string{"action", "mcp"} {
+		if _, _, err := command(t, "project", "--dir", f.dir, "uninstall", kind); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if f.writes != writes {
+		t.Fatal("卸载修改了平台账号或 secret")
+	}
+}
+func TestProjectCommandDryRunAndValidation(t *testing.T) {
+	f := projectTestFixture(t)
+	for _, args := range [][]string{{"configure"}, {"labels"}, {"install", "action", "--merge-instance", "merge"}, {"install", "mcp"}, {"uninstall", "action"}, {"uninstall", "mcp"}} {
+		args = append([]string{"project", "--instance", "admin", "--dir", f.dir, "--dry-run"}, args...)
+		if _, _, err := command(t, args...); err != nil {
+			t.Fatal(args, err)
+		}
+	}
+	if f.writes != 0 {
+		t.Fatal("演练写平台")
+	}
+	if _, err := os.Stat(filepath.Join(f.dir, ".mcp.json")); !os.IsNotExist(err) {
+		t.Fatal("演练写工具配置")
+	}
+	if _, _, err := command(t, "project", "--dir", "/missing/project", "uninstall", "mcp"); err == nil {
+		t.Fatal("非法项目目录被接受")
+	}
+	for _, args := range [][]string{{"--instance", "missing", "configure"}, {"--instance", "admin", "--repo", "../repo", "labels"}, {"--instance", "admin", "install", "action", "--merge-instance", "missing"}} {
+		args = append([]string{"project", "--dir", f.dir}, args...)
+		if _, _, err := command(t, args...); err == nil {
+			t.Fatal("无效参数被接受", args)
+		}
+	}
+	if _, _, err := command(t, "project", "--dir", f.dir, "--instance", "admin", "--repo", "team/repo", "labels"); err != nil {
+		t.Fatal(err)
+	}
+}
+func TestProjectSelectionAndCredentialFailures(t *testing.T) {
+	f := projectTestFixture(t)
+	if _, _, _, err := giteaInstance("missing"); err == nil {
+		t.Fatal("不存在的实例被猜测")
+	}
+	if _, _, err := projectRepo(f.dir, "", "https://unknown"); err == nil {
+		t.Fatal("无匹配 remote 仍选择了仓库")
+	}
+	if out, err := exec.Command("git", "-C", f.dir, "remote", "add", "other", f.host+"/other/repo.git").CombinedOutput(); err != nil {
+		t.Fatal(string(out), err)
+	}
+	if _, _, err := projectRepo(f.dir, "", f.host); err == nil {
+		t.Fatal("多个仓库 remote 被猜测")
+	}
+	_ = os.WriteFile(f.path, []byte("bad"), 0600)
+	if _, _, _, err := giteaInstance("admin"); err == nil {
+		t.Fatal("损坏凭据被忽略")
+	}
+}

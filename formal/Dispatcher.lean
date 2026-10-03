@@ -77,3 +77,18 @@ theorem issue_retry_keeps_memory (h h' title generation : Nat) :
     anchor .triage h title generation = anchor .triage h' title generation := rfl
 
 end Dispatcher
+
+namespace Dispatcher
+
+/-- 账号召唤来自平台的可见性与新请求，不需要仓库安装或协作者标记。 -/
+def accountSummons (readable fresh : Bool) (_installed _collaborator : Bool) : Bool :=
+  readable && fresh
+
+theorem public_uninstalled_repo_can_summon (readable fresh : Bool) :
+    accountSummons readable fresh false false = (readable && fresh) := rfl
+
+theorem historical_mention_does_not_summon (readable installed collaborator : Bool) :
+    accountSummons readable false installed collaborator = false := by
+  simp [accountSummons]
+
+end Dispatcher
