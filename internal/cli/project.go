@@ -194,7 +194,7 @@ func newProjectCommand() *cobra.Command {
 	root.PersistentFlags().BoolVar(&dry, "dry-run", false, "只读检查并报告，不写平台或文件")
 	var checks []string
 	configure := &cobra.Command{Use: "configure", Short: "规范标签、协作者和默认分支双批准保护", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		_, _, entry, err := giteaInstance(instance)
+		entry, err := projectGiteaInstance(dir, instance)
 		if err != nil {
 			return err
 		}
@@ -212,11 +212,11 @@ func newProjectCommand() *cobra.Command {
 	configure.Flags().StringVar(&reviewer, "reviewer", "ai", "内容评审账号（write 权限）")
 	configure.Flags().StringVar(&merger, "merger", "merge", "合并账号（admin 权限，仍受分支保护）")
 	configure.Flags().StringSliceVar(&checks, "required-checks", nil, "必要检查 context，缺省保留已有设置")
-	configure.Flags().StringVar(&instance, "instance", "", "标签和权限配置使用的 Gitea 实例名")
+	configure.Flags().StringVar(&instance, "instance", "", "可选覆盖 Git remote 匹配的登录实例")
 	configure.Flags().StringVar(&repo, "repo", "", "owner/name（缺省从匹配实例的 Git remote 推导）")
 	root.AddCommand(configure)
 	labels := &cobra.Command{Use: "labels", Short: "只规范当前仓库标签，不修改协作者或分支保护", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		_, _, entry, err := giteaInstance(instance)
+		entry, err := projectGiteaInstance(dir, instance)
 		if err != nil {
 			return err
 		}
@@ -238,7 +238,7 @@ func newProjectCommand() *cobra.Command {
 		cmd.Printf("标签配置已处理：%s/%s\n", owner, name)
 		return nil
 	}}
-	labels.Flags().StringVar(&instance, "instance", "", "标签配置使用的 Gitea 实例名")
+	labels.Flags().StringVar(&instance, "instance", "", "可选覆盖 Git remote 匹配的登录实例")
 	labels.Flags().StringVar(&repo, "repo", "", "owner/name（缺省从匹配实例的 Git remote 推导）")
 	root.AddCommand(labels)
 	install := &cobra.Command{Use: "install", Short: "安装项目工具配置", Args: cobra.NoArgs}

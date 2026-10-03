@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"uuid"
 )
 
@@ -50,7 +51,9 @@ func InstallWorkflow(dir string, options WorkflowOptions) error {
 		}
 		return root.Remove(name)
 	}
-	return replaceFile(root, name, bytes.ReplaceAll(workflow, []byte("__ASSISTANT_VERSION__"), []byte(options.Version)))
+	// 源码 Action 的提交引用不带镜像标签的 sha- 前缀；runner 自行构建该提交。
+	ref := strings.TrimPrefix(options.Version, "sha-")
+	return replaceFile(root, name, bytes.ReplaceAll(workflow, []byte("__ASSISTANT_REF__"), []byte(ref)))
 }
 
 // MCPOptions 只允许显式强制安装覆盖冲突；卸载仍须验证归属。

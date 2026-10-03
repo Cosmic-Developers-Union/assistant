@@ -463,8 +463,8 @@ instance 负责管理员接入、机器人账号与令牌；project 负责当前
 ```shell
 assistant instance provision gitea --admin admin-instance
 assistant instance create-token ai-instance
-assistant project configure --instance admin-instance
-assistant project labels --instance admin-instance
+assistant project configure
+assistant project labels
 assistant project protection show
 assistant project protection update
 assistant project protection remove --branch main
@@ -489,7 +489,8 @@ protection 提供独立的 show/update/remove；install/uninstall 分别是 upda
 
 只读演练不写平台或文件。Actions 安装只在本地生成托管 workflow，不读取凭据、
 站点或 remote，不修改平台设置或 secret。每个生成物自动绑定生成器的构建版本：
-发布标签或 sha-<完整 commit>，两个任务使用同一固定镜像；版本由构建与发布链保证，
+发布标签或 sha-<完整 commit>（源码引用去掉 sha- 前缀），两个任务使用同一固定
+源码 Action，由 runner 构建执行，不依赖对应 assistant 镜像先发布；引用的源码须已推送且含 action.yml。
 不提供 --version / --instance / --merge-instance 参数，不接受 latest/dev/分支名。
 平台连接与 secret 由 workflow 运行时引用 CI 环境和仓库设置。
 提交推送后生效；卸载只移除自己的 workflow，不关闭整个仓库 Actions、不删其他

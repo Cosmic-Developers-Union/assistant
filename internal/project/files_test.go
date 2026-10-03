@@ -6,7 +6,79 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
+
+func TestWorkflowUsesPackagedActionContract(t *testing.T) {
+	// 同时检查入口和生成物，防止生成器引用不存在的输入或把合并令牌交给状态任务。
+	var action struct {
+		Inputs map[string]struct {
+			Default string
+		}
+		Runs struct {
+			Using string
+			Image string
+			Args  []string
+			Env   map[string]string
+		}
+	}
+	data, err := os.ReadFile("../../action.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal(data, &action); err != nil {
+		t.Fatal(err)
+	}
+	if action.Runs.Using != "docker" || action.Runs.Image != "Dockerfile" {
+		t.Fatal("Action 缺少源码构建入口", action.Runs)
+	}
+	if _, err := os.Stat(filepath.Join("../..", action.Runs.Image)); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(action.Runs.Args, " ") != "action ${{ inputs.command }} --verbose" || action.Runs.Env["GITEA_ACCESS_TOKEN"] != "${{ inputs.token }}" {
+		t.Fatal("命令或令牌传递契约错误", action.Runs)
+	}
+	for key, env := range map[string]string{"host": "GITEA_HOST", "repository": "GITEA_REPOSITORY"} {
+		if action.Inputs[key].Default == "" || action.Runs.Env[env] != "${{ inputs."+key+" }}" {
+			t.Fatal("Action 缺少平台上下文", key)
+		}
+	}
+	dir := t.TempDir()
+	if err := InstallWorkflow(dir, WorkflowOptions{Version: "sha-" + strings.Repeat("b", 40)}); err != nil {
+		t.Fatal(err)
+	}
+	data, err = os.ReadFile(filepath.Join(dir, ".gitea/workflows/assistant.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var generated struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				Uses string
+				With map[string]string
+			}
+		}
+	}
+	if err := yaml.Unmarshal(data, &generated); err != nil {
+		t.Fatal(err)
+	}
+	for job, token := range map[string]string{"sync": "GITHUB_TOKEN", "automerge": "MERGE_TOKEN"} {
+		steps := generated.Jobs[job].Steps
+		if len(steps) != 1 || steps[0].Uses != "https://github.com/Cosmic-Developers-Union/assistant@"+strings.Repeat("b", 40) {
+			t.Fatal("生成物未绑定固定源码", job, steps)
+		}
+		command := steps[0].With["command"]
+		if job == "sync" && command != "label-sync" || job == "automerge" && command != "automerge" || steps[0].With["token"] != "${{ secrets."+token+" }}" {
+			t.Fatal("动作或令牌身份错误", job, steps)
+		}
+		for input := range steps[0].With {
+			if _, ok := action.Inputs[input]; !ok {
+				t.Fatal("生成物使用未声明输入", input)
+			}
+		}
+	}
+}
 
 func TestManagedWorkflowLifecycleAndPreservation(t *testing.T) {
 	dir := t.TempDir()
@@ -23,7 +95,7 @@ func TestManagedWorkflowLifecycleAndPreservation(t *testing.T) {
 		}
 	}
 	data, _ := os.ReadFile(path)
-	if !strings.Contains(string(data), "GITEA_REPOSITORY") || strings.Contains(string(data), "private-token") {
+	if !strings.Contains(string(data), "command: label-sync") || strings.Contains(string(data), "private-token") {
 		t.Fatal(string(data))
 	}
 	if err := os.WriteFile(path, []byte("name: 用户 workflow"), 0644); err != nil {
@@ -312,7 +384,7 @@ func TestWorkflowVersionIsFixedAndCanBeUpdated(t *testing.T) {
 			t.Fatal(err)
 		}
 		data, err := os.ReadFile(path)
-		if err != nil || strings.Count(string(data), "ghcr.io/cosmic-developers-union/assistant:"+v) != 2 || strings.Contains(string(data), "assistant:latest") || strings.Contains(string(data), "__ASSISTANT_VERSION__") {
+		if err != nil || strings.Count(string(data), "uses: https://github.com/Cosmic-Developers-Union/assistant@"+strings.TrimPrefix(v, "sha-")) != 2 || strings.Contains(string(data), "assistant@latest") || strings.Contains(string(data), "__ASSISTANT_REF__") {
 			t.Fatal(string(data), err)
 		}
 	}

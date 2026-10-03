@@ -1,0 +1,26 @@
+name: Gitea Assistant
+description: 收敛 Gitea 标签与评审状态，或执行受分支保护约束的机械合并
+inputs:
+  command:
+    description: 执行动作（label-sync 或 automerge）
+    required: true
+  host:
+    description: Gitea 站点地址
+    default: ${{ github.server_url }}
+  repository:
+    description: 当前仓库 owner/name
+    default: ${{ github.repository }}
+  token:
+    description: 动作使用的令牌；合并动作须使用 merge 账号令牌
+    required: true
+runs:
+  using: docker
+  image: Dockerfile
+  args:
+    - action
+    - ${{ inputs.command }}
+    - --verbose
+  env:
+    GITEA_HOST: ${{ inputs.host }}
+    GITEA_ACCESS_TOKEN: ${{ inputs.token }}
+    GITEA_REPOSITORY: ${{ inputs.repository }}

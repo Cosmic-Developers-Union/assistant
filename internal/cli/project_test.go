@@ -604,7 +604,7 @@ func TestProjectActionGenerationIsLocalAndUsesBinaryVersion(t *testing.T) {
 				}
 			}
 			data, err := os.ReadFile(path)
-			if err != nil || strings.Count(string(data), "assistant:"+version) != 2 || strings.Contains(string(data), "other") {
+			if err != nil || strings.Count(string(data), "uses: https://github.com/Cosmic-Developers-Union/assistant@"+strings.TrimPrefix(version, "sha-")) != 2 || strings.Contains(string(data), "other") {
 				t.Fatal(string(data), err)
 			}
 			// 更换执行项目不改变生成物版本；版本来自二进制，不能取目标项目的 Git 信息。
@@ -653,5 +653,48 @@ func TestProjectActionRejectsObsoleteParametersAndPreservesUserWorkflow(t *testi
 	data, err := os.ReadFile(path)
 	if err != nil || string(data) != string(original) || f.requests != 0 {
 		t.Fatal("修改了用户配置或访问了站点", err)
+	}
+}
+
+func TestEveryProjectPlatformCommandInfersInstanceFromGit(t *testing.T) {
+	for _, operation := range []string{"configure", "labels"} {
+		t.Run(operation, func(t *testing.T) {
+			f := projectTestFixture(t)
+			f.save(t, []credentials.Gitea{{Name: "me", URL: f.host, Username: "admin", Token: "token-admin"}})
+			if out, err := exec.Command("git", "-C", f.dir, "remote", "add", "origin", "git@github.com:team/repo.git").CombinedOutput(); err != nil {
+				t.Fatal(string(out), err)
+			}
+			args := []string{"project", "--dir", f.dir, operation}
+			if _, _, err := command(t, append(args, "--dry-run")...); err != nil {
+				t.Fatal(err)
+			}
+			if f.writes != 0 {
+				t.Fatal("演练写平台")
+			}
+			if _, _, err := command(t, args...); err != nil {
+				t.Fatal("项目命令仍要求空实例名", operation, err)
+			}
+			if f.writes == 0 {
+				t.Fatal("没有执行项目配置")
+			}
+		})
+	}
+}
+
+func TestEveryProjectPlatformCommandRejectsMissingAndAmbiguousGitIdentity(t *testing.T) {
+	for _, operation := range []string{"configure", "labels"} {
+		f := projectTestFixture(t)
+		_, _, err := command(t, "project", "--dir", f.dir, operation)
+		if err == nil || !strings.Contains(err.Error(), "--instance") || strings.Contains(err.Error(), `实例 ""`) || f.requests != 0 {
+			t.Fatal(operation, err)
+		}
+		if _, _, err := command(t, "project", "--dir", f.dir, operation, "--instance", "admin", "--dry-run"); err != nil {
+			t.Fatal(err)
+		}
+		f.save(t, nil)
+		_, _, err = command(t, "project", "--dir", f.dir, operation)
+		if err == nil || strings.Contains(err.Error(), `实例 ""`) {
+			t.Fatal(operation, err)
+		}
 	}
 }

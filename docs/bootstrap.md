@@ -57,15 +57,16 @@ create-token 可用 --password-file 覆盖已保存密码；启用两步验证�
 
 ## 当前项目标签、协作者与分支保护
 
-在 Git 项目里选择对应站点的管理员或仓库管理员实例：
+在 Git 项目里执行，默认按 Git remote 匹配已登录实例与仓库：
 
 ```sh
-assistant project configure --instance work --dry-run
-assistant project configure --instance work --required-checks build,test
-assistant project labels --instance work       # 只规范标签
+assistant project configure --dry-run
+assistant project configure --required-checks build,test
+assistant project labels       # 只规范标签
 ```
 
-从所选实例站点匹配 Git remote（GitHub origin 不会盖过 Gitea remote），多个不同
+仅在多站点或同站点多账号有歧义时用 --instance work 选择账号。
+从匹配实例站点解析 Git remote（GitHub origin 不会盖过 Gitea remote），多个不同
 仓库 remote 报错；无法推导时用 --repo owner/name。--dir 可指定项目目录。
 
 configure 规范完整标签体系；ai 加为 write 协作者，merge 加为 admin 协作者。
@@ -120,11 +121,18 @@ assistant project uninstall action
 workflow 使用平台提供的 GITEA_HOST / GITEA_REPOSITORY / GITHUB_TOKEN，并引用
 仓库 Actions secret MERGE_TOKEN；运行前在平台配置该 secret，生成器不接触它。
 
-生成物自动绑定当前 assistant 构建版本，两个任务使用同一固定镜像标签。
-发布构建使用发布标签，未打标签的构建使用 sha-<完整 commit>；本地 Make 构建、
-Release 与镜像发布沿用相同规则。无需 --version，也不提供 --instance、--repo
-或 --merge-instance。工具升级不改变已经提交的 workflow；重新生成并提交才更新。
-对应版本镜像由发布流程提供，本地新 commit 的镜像须发布后才能由 runner 拉取。
+生成物自动绑定当前 assistant 构建版本，两个任务引用同一固定源码 Action。
+发布构建使用发布标签，未打标签的构建将 sha-<完整 commit> 转为原始 commit 引用。
+仓库根部提供 action.yml，runner 下载指定源码并按 Dockerfile 构建执行；不依赖
+对应版本的 assistant 镜像先发布。源码提交须已推送到 GitHub 主仓库，所引用版本
+须含 action.yml（旧版本不支持这个入口）。runner 需要 Docker、网络和 Go 模块下载能力。
+无需 --version，也不提供 --instance、--repo 或 --merge-instance。
+工具升级不改变已经提交的 workflow；重新生成并提交才更新。
+
+首次接入的顺序是：创建 ai/merge 账号与令牌 → project configure → 在平台启用
+Actions 并配置 MERGE_TOKEN → 安装 workflow 并提交推送。label-sync 自行规范标签，
+不要求标签预先存在；不要把 sync/automerge 配成合并的必要检查，避免合并门禁依赖
+负责执行合并的任务。内容评审由独立运行的 bot 完成，Action 负责状态收敛和机械合并。
 
 存在同名的非托管 workflow 则拒绝覆盖；重复安装可更新自己的 workflow。
 --dry-run 不写文件。本地文件的安装/卸载需提交推送后生效；命令不替用户提交或推送。

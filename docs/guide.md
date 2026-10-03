@@ -18,14 +18,13 @@ Actions 示例：
 
 ```yaml
 steps:
-  - run: assistant action label-sync --verbose
-    env:
-      GITEA_HOST: ${{ github.server_url }}
-      GITEA_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      GITEA_REPOSITORY: ${{ github.repository }}
+  - uses: https://github.com/Cosmic-Developers-Union/assistant@<含-action.yml-的固定版本或完整-commit>
+    with:
+      command: label-sync
+      token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
-automerge 同样注入三项环境，用 merge secret 替换令牌，按事件及 schedule 调用。
+automerge 使用同一固定源码版本，command 设为 automerge，用 merge secret 替换令牌，按事件及 schedule 调用。
 先执行 `--dry-run` 验证门禁与标签动作。任何 merge 请求结果未知时本轮停止，避免
 网络失败已经合并后又尝试另一条；读取候选失败则聚合错误并继续其余候选。
 
