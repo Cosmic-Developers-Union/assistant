@@ -79,13 +79,16 @@ assistant project uninstall action
 ## 安装和卸载 MCP
 
 ```sh
+assistant project install mcp
+# 可选：绑定已保存的账号
 assistant project install mcp --instance work-ai
 assistant project uninstall mcp
 ```
 
-.mcp.json 内新增命名 server assistant-gitea，启动参数为
-assistant mcp gitea --instance work-ai。配置只含实例名，令牌在启动时从用户凭据库
-读取。同一站点有 ai/merge/admin 多个账号时，通过 --instance 明确选择，不猜。
+.mcp.json 内新增命名 server assistant-gitea，默认启动参数为 assistant mcp gitea。
+安装只需要本地 Git 项目，无需凭据、Gitea remote 或运行配置；站点与令牌在 MCP
+启动时按现有规则解析，缺失或歧义届时报错。显式指定 --instance 时，安装会检查
+该实例并把实例名写入启动参数，不写密钥。同一站点有多个账号时可用此方式明确选择。
 
 保留所有其他 server 和顶层字段；同名 server 若不是本工具的启动配置则拒绝
 覆盖或卸载。读写限制在当前项目根，symlink 越界报错。卸载不删除用户的其他配置。

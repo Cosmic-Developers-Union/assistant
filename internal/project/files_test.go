@@ -93,13 +93,39 @@ func TestMCPPreservesOtherServersAndNeverStoresSecrets(t *testing.T) {
 			t.Fatal("无效/非托管配置被覆盖", bad)
 		}
 	}
-	if err := ConfigureMCP(dir, "", false, false); err == nil {
-		t.Fatal("空实例被接受")
-	}
 	if err := ConfigureMCP("/missing/project-dir", "name", false, false); err == nil {
 		t.Fatal("缺失目录被接受")
 	}
 }
+func TestMCPDefaultAndBoundConfigurationsCanReplaceEachOther(t *testing.T) {
+	dir := t.TempDir()
+	for _, instance := range []string{"", "work-ai", "", "work-merge"} {
+		if err := ConfigureMCP(dir, instance, false, false); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(filepath.Join(dir, ".mcp.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var config struct {
+			Servers map[string]struct {
+				Args []string `json:"args"`
+			} `json:"mcpServers"`
+		}
+		if err := json.Unmarshal(data, &config); err != nil {
+			t.Fatal(err)
+		}
+		args := config.Servers["assistant-gitea"].Args
+		if instance == "" {
+			if len(args) != 2 || args[0] != "mcp" || args[1] != "gitea" {
+				t.Fatal(args)
+			}
+		} else if len(args) != 4 || args[2] != "--instance" || args[3] != instance {
+			t.Fatal(args)
+		}
+	}
+}
+
 func TestManagedFilesRejectSymlinkEscapeAndFilesystemFailures(t *testing.T) {
 	dir, outside := t.TempDir(), t.TempDir()
 	if err := os.Symlink(outside, filepath.Join(dir, ".gitea")); err != nil {

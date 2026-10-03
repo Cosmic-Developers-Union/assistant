@@ -233,9 +233,11 @@ func newProjectCommand() *cobra.Command {
 	}}
 	action.Flags().StringVar(&mergeInstance, "merge-instance", "", "用于 MERGE_TOKEN 的实例名（缺省该站点唯一 merge 账号）")
 	install.AddCommand(action)
-	install.AddCommand(&cobra.Command{Use: "mcp", Short: "安装 assistant-gitea server，只写实例名，不写密钥", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		if _, _, _, err := giteaInstance(instance); err != nil {
-			return err
+	install.AddCommand(&cobra.Command{Use: "mcp", Short: "安装 assistant-gitea server，无需凭据，可选绑定实例", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		if instance != "" {
+			if _, _, _, err := giteaInstance(instance); err != nil {
+				return err
+			}
 		}
 		path, err := projectDir(dir)
 		if err != nil {

@@ -462,7 +462,7 @@ assistant project configure --instance admin-instance
 assistant project labels --instance admin-instance
 assistant project install action --instance admin-instance --merge-instance merge-instance
 assistant project uninstall action
-assistant project install mcp --instance ai-instance
+assistant project install mcp
 assistant project uninstall mcp
 ```
 
@@ -472,7 +472,8 @@ assistant project uninstall mcp
 
 只读演练不写平台或文件。Actions secret 通过 SDK 注入，托管 workflow 本地生成，
 提交推送后生效；卸载只移除自己的 workflow，不关闭整个仓库 Actions、不删其他
-workflow 或共享 secret。MCP 配置只写明确的实例名，保留其他 server 和用户字段。
+workflow 或共享 secret。MCP 安装无需凭据或运行配置，默认写通用启动命令；可选
+--instance 绑定账号，只写实例名不写密钥，保留其他 server 和用户字段。
 无归属标记或同名用户配置拒绝覆盖/删除。
 
 ## 6. 独立轻量运行时与 TUI

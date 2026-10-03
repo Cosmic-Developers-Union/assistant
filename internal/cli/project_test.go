@@ -23,6 +23,71 @@ type projectFixture struct {
 	onToken              func()
 }
 
+func TestProjectMCPInstallWithoutCredentialsOrConfig(t *testing.T) {
+	for _, state := range []string{"missing", "invalid", "directory"} {
+		t.Run(state, func(t *testing.T) {
+			dir := t.TempDir()
+			if out, err := exec.Command("git", "init", "--quiet", dir).CombinedOutput(); err != nil {
+				t.Fatal(string(out), err)
+			}
+			credentialPath := filepath.Join(t.TempDir(), "credentials.json")
+			switch state {
+			case "invalid":
+				if err := os.WriteFile(credentialPath, []byte("invalid"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "directory":
+				if err := os.Mkdir(credentialPath, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("ASSISTANT_CREDENTIALS", credentialPath)
+			t.Setenv("ASSISTANT_CONFIG", filepath.Join(dir, "missing-config.json"))
+			args := []string{"project", "--dir", dir, "install", "mcp"}
+			if _, _, err := command(t, append(args, "--dry-run")...); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, ".mcp.json")
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatal("演练写入配置", err)
+			}
+			for range 2 {
+				if _, _, err := command(t, args...); err != nil {
+					t.Fatal(err)
+				}
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var config struct {
+				Servers map[string]struct {
+					Command string   `json:"command"`
+					Args    []string `json:"args"`
+				} `json:"mcpServers"`
+			}
+			if err := json.Unmarshal(data, &config); err != nil {
+				t.Fatal(err)
+			}
+			server := config.Servers["assistant-gitea"]
+			if server.Command != "assistant" || len(server.Args) != 2 || server.Args[0] != "mcp" || server.Args[1] != "gitea" {
+				t.Fatal(string(data))
+			}
+			if _, _, err := command(t, append(args, "--instance", "missing")...); err == nil {
+				t.Fatal("显式绑定未知实例被接受")
+			}
+			if _, _, err := command(t, "project", "--dir", dir, "uninstall", "mcp"); err != nil {
+				t.Fatal(err)
+			}
+			if state == "missing" {
+				if _, err := os.Stat(credentialPath); !os.IsNotExist(err) {
+					t.Fatal("安装创建了凭据文件", err)
+				}
+			}
+		})
+	}
+}
+
 func projectTestFixture(t *testing.T) *projectFixture {
 	t.Helper()
 	f := &projectFixture{users: map[string]bool{"admin": true}, admin: true}

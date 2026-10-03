@@ -117,5 +117,6 @@ MCP token：--token → GITEA_ACCESS_TOKEN → GITEA_ACCESS_TOKEN_FILE → 对�
 锁文件保留，不要通过删除文件启动第二个进程；并行部署须使用不同 root。
 --debug 会在 --verbose 信息上增加装配与续接原因，所有已知连接密钥均从日志遮蔽。
 
-MCP 的 --instance 明确选择同站点的某个个人账号；安装命令只把实例名写入 .mcp.json。
+MCP 安装默认无需配置或凭据，只写 assistant mcp gitea 启动命令；连接在启动时解析。
+可选 --instance 明确选择同站点的某个个人账号，安装时只写实例名，不写密钥。
 站点接入与项目安装见 [bootstrap.md](bootstrap.md)，不会改写 run 的服务连接。

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"uuid"
 )
 
@@ -43,11 +42,8 @@ func InstallWorkflow(dir string, remove, dry bool) error {
 }
 
 // ConfigureMCP 安装或卸载一个命名 server，保留所有其他 server 和顶层字段。
-// 工具配置只写个人实例名，不写 token；实例解析在启动时完成。
+// 工具配置可选绑定个人实例，不写 token；站点和凭据在启动时解析。
 func ConfigureMCP(dir, instance string, remove, dry bool) error {
-	if strings.TrimSpace(instance) == "" && !remove {
-		return fmt.Errorf("MCP 安装缺少实例名")
-	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return err
@@ -87,7 +83,11 @@ func ConfigureMCP(dir, instance string, remove, dry bool) error {
 	if remove {
 		delete(servers, key)
 	} else {
-		servers[key] = map[string]any{"command": "assistant", "args": []string{"mcp", "gitea", "--instance", instance}}
+		args := []string{"mcp", "gitea"}
+		if instance != "" {
+			args = append(args, "--instance", instance)
+		}
+		servers[key] = map[string]any{"command": "assistant", "args": args}
 	}
 	config["mcpServers"] = servers
 	if dry {
@@ -104,7 +104,10 @@ func ownedMCP(entry map[string]any) bool {
 		return false
 	}
 	args, ok := entry["args"].([]any)
-	return ok && len(args) == 4 && args[0] == "mcp" && args[1] == "gitea" && args[2] == "--instance"
+	if !ok || len(args) < 2 || args[0] != "mcp" || args[1] != "gitea" {
+		return false
+	}
+	return len(args) == 2 || len(args) == 4 && args[2] == "--instance"
 }
 func replaceFile(root *os.Root, name string, data []byte) error {
 	if err := root.MkdirAll(filepath.Dir(name), 0755); err != nil {
