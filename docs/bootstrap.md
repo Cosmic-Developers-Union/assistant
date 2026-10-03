@@ -80,14 +80,26 @@ merge 需要仓库管理员权限登记他人评审请求，但不成为站点�
 ## 安装和卸载 Gitea Actions
 
 ```sh
-assistant project install action --instance work --merge-instance work-merge --dry-run
-assistant project install action --instance work --merge-instance work-merge
+assistant project install action --dry-run
+assistant project install action
+# 开发版或指定其他发布版本（将 v1.2.3 替换为实际已发布版本）：
+assistant project install action --version v1.2.3 --instance work --merge-instance work-merge
 assistant project uninstall action
 ```
 
 安装启用项目 Actions，通过 SDK 写 MERGE_TOKEN secret，生成
 .gitea/workflows/assistant.yml。workflow 只引用 CI 环境与 secret，不包含明文令牌。
 存在同名的非托管 workflow 则拒绝覆盖；重复安装可更新自己的 workflow。
+
+未指定 --instance 时，从 Git remote 匹配已登录的 Gitea 站点；只有一个账号时复用该
+账号，多个账号时优先选择唯一站点管理员，否则选择唯一仓库管理员。多个匹配站点或
+管理员时报错并提示 --instance，不把空字符串当作实例名。SSH remote 使用已登记的
+Web 地址，不把 SSH 端口当成 API 端口。缺少 merge 令牌时提示先接入合并账号。
+
+两个任务的 assistant 镜像都绑定同一个完整发布版本，默认取当前发布二进制的版本，
+可用 --version 指定其他已发布版本。latest、dev、分支名和缺失版本均拒绝；开发版
+必须显式指定发布版本。生成后工具升级不会自动改变已提交 workflow 的镜像版本；
+更新版本需重新安装并提交文件。版本与文件冲突在平台写入前检查。
 
 本地文件的安装/卸载都需要提交推送后才在平台生效；命令不替用户提交或推送。
 卸载只删除带 managed-by: assistant 标记的 workflow，不关掉整个仓库的 Actions、
@@ -98,6 +110,7 @@ assistant project uninstall action
 
 ```sh
 assistant project install mcp
+assistant project install mcp --force   # 备份后修复错误 JSON 或覆盖同名冲突
 assistant project uninstall mcp
 ```
 
@@ -107,7 +120,13 @@ assistant project uninstall mcp
 有多个账号时，通过原有 GITEA_ACCESS_TOKEN 或 GITEA_ACCESS_TOKEN_FILE 明确提供令牌。
 
 保留所有其他 server 和顶层字段；同名 server 若不是本工具的启动配置则拒绝
-覆盖或卸载。读写限制在当前项目根，symlink 越界报错。卸载不删除用户的其他配置。
+覆盖或卸载。缺失、空白文件和空对象可直接初始化；错误 JSON 或错误结构默认保留
+原文件并报告修复方式。安装的 --force / -f 会先保存原始字节到同目录的
+.mcp.json.assistant-backup-<UUID>（权限 0600），报告备份路径，再修复配置。
+可解析配置只覆盖 gitea 或损坏的 mcpServers 字段，其余字段和 server 保留；
+整个 JSON 无法解析时备份后重建。--force --dry-run 不写配置或备份。
+卸载不支持 --force。读写限制在当前项目根，symlink 越界仍报错。
+卸载不删除用户的其他配置。
 重新安装会将此前本工具生成的 assistant-gitea 配置迁移为 gitea；卸载也兼容旧名称。
 此前生成的 --instance 启动参数会在重新安装时移除。
 原 assistant mcp gitea 的显式 host/token 与 remote 探测方式继续可用。

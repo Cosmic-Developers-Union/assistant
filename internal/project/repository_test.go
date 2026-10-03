@@ -1,6 +1,10 @@
 package project
 
 import (
+	"fmt"
+	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -140,6 +144,65 @@ func TestActionsSettingsInstallAndDryRun(t *testing.T) {
 			if scenario == "ok" {
 				if len(f.bodies) != 2 || f.bodies[0]["has_actions"] != true || f.bodies[1]["data"] != "merge-token" {
 					t.Fatal(f.bodies)
+				}
+			}
+		})
+	}
+}
+
+func TestSelectAdministratorUsesActualPermissions(t *testing.T) {
+	for _, scenario := range []string{"single", "site-admin", "repo-admin", "ambiguous-site-admin", "ambiguous-repo-admin", "none", "no-candidates", "invalid-host", "user-error", "repo-error"} {
+		t.Run(scenario, func(t *testing.T) {
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				w.Header().Set("Content-Type", "application/json")
+				user := strings.TrimPrefix(r.Header.Get("Authorization"), "token ")
+				switch r.URL.Path {
+				case "/api/v1/user":
+					if scenario == "user-error" {
+						w.WriteHeader(401)
+						return
+					}
+					admin := scenario == "site-admin" && user == "one" || scenario == "ambiguous-site-admin"
+					fmt.Fprintf(w, `{"login":%q,"is_admin":%t}`, user, admin)
+				case "/api/v1/repos/team/repo":
+					if scenario == "repo-error" {
+						w.WriteHeader(403)
+						return
+					}
+					admin := scenario == "repo-admin" && user == "two" || scenario == "ambiguous-repo-admin"
+					fmt.Fprintf(w, `{"name":"repo","permissions":{"admin":%t}}`, admin)
+				default:
+					t.Errorf("未预期请求 %s", r.URL)
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(server.Close)
+			entries := []credentials.Gitea{{Name: "first", URL: server.URL, Username: "one", Token: "one"}, {Name: "second", URL: server.URL, Username: "two", Token: "two"}}
+			switch scenario {
+			case "single":
+				entries = entries[:1]
+			case "no-candidates":
+				entries = nil
+			case "invalid-host":
+				entries[0].URL = "bad"
+			}
+			got, err := SelectAdministrator(t.Context(), entries, "team", "repo")
+			success := scenario == "single" || scenario == "site-admin" || scenario == "repo-admin"
+			if (err == nil) != success {
+				t.Fatal(got, err)
+			}
+			if success {
+				want := "first"
+				if scenario == "repo-admin" {
+					want = "second"
+				}
+				if got.Name != want {
+					t.Fatal(got.Name, want)
+				}
+				if scenario == "single" && requests != 0 {
+					t.Fatal("单实例不应触发额外权限探测")
 				}
 			}
 		})

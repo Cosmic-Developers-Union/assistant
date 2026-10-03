@@ -26,7 +26,7 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/cosmic-developers-union/assistant:latest
+      image: ghcr.io/cosmic-developers-union/assistant:__ASSISTANT_VERSION__
     steps:
       - run: assistant action label-sync --verbose
         env:
@@ -37,7 +37,7 @@ jobs:
     needs: sync
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/cosmic-developers-union/assistant:latest
+      image: ghcr.io/cosmic-developers-union/assistant:__ASSISTANT_VERSION__
     steps:
       - run: assistant action automerge --verbose
         env:

@@ -34,7 +34,7 @@ func TestParseGitRemoteURLHTTPForm(t *testing.T) {
 			t.Errorf("ParseGitRemoteURL(%q) = _, false; want true", test.input)
 			continue
 		}
-		if remote.Host != test.wantHost || remote.Repository != test.wantRepo {
+		if remote.URL != test.input || remote.Host != test.wantHost || remote.Repository != test.wantRepo {
 			t.Errorf("ParseGitRemoteURL(%q) = %+v, want %s %s", test.input, remote, test.wantHost, test.wantRepo)
 		}
 	}
@@ -55,7 +55,7 @@ func TestParseGitRemoteURLSSHForm(t *testing.T) {
 			t.Errorf("ParseGitRemoteURL(%q) = _, false; want true", test.input)
 			continue
 		}
-		if remote.Host != test.wantHost || remote.Repository != test.wantRepo {
+		if remote.URL != test.input || remote.Host != test.wantHost || remote.Repository != test.wantRepo {
 			t.Errorf("ParseGitRemoteURL(%q) = %+v, want %s %s", test.input, remote, test.wantHost, test.wantRepo)
 		}
 	}
@@ -76,7 +76,7 @@ func TestParseGitRemoteURLSCPForm(t *testing.T) {
 			t.Errorf("ParseGitRemoteURL(%q) = _, false; want true", test.input)
 			continue
 		}
-		if remote.Host != test.wantHost || remote.Repository != test.wantRepo {
+		if remote.URL != test.input || remote.Host != test.wantHost || remote.Repository != test.wantRepo {
 			t.Errorf("ParseGitRemoteURL(%q) = %+v, want %s %s", test.input, remote, test.wantHost, test.wantRepo)
 		}
 	}

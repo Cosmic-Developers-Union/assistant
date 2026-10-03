@@ -15,6 +15,8 @@ import (
 
 // GitRemote 是从 remote URL 推导出的站点与仓库。
 type GitRemote struct {
+	// URL 保留原始协议，以便 SSH remote 匹配已登记的 Web 地址时不猜测端口。
+	URL string
 	// Name 是 remote 名（如 origin / upstream）。
 	Name string
 	// Host 是 Gitea API 根地址（scheme://host[:port]，无尾斜杠）
@@ -43,7 +45,7 @@ func ParseGitRemoteURL(url string) (GitRemote, bool) {
 		if port != "" {
 			host += ":" + port
 		}
-		return GitRemote{Host: host, Repository: strings.TrimSuffix(path, ".git")}, true
+		return GitRemote{URL: trimmed, Host: host, Repository: strings.TrimSuffix(path, ".git")}, true
 	}
 	if match := scpRemote.FindStringSubmatch(trimmed); match != nil {
 		hostname, port, path := match[1], match[2], match[3]
@@ -51,7 +53,7 @@ func ParseGitRemoteURL(url string) (GitRemote, bool) {
 		if port != "" {
 			host += ":" + port
 		}
-		return GitRemote{Host: host, Repository: strings.TrimSuffix(path, ".git")}, true
+		return GitRemote{URL: trimmed, Host: host, Repository: strings.TrimSuffix(path, ".git")}, true
 	}
 	return GitRemote{}, false
 }

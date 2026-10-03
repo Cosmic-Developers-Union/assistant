@@ -139,16 +139,16 @@ func TestProjectGiteaBootstrapAndCrossRepositoryMention(t *testing.T) {
 		t.Fatal("Actions secret 未写入")
 	}
 	dir := t.TempDir()
-	if err := project.InstallWorkflow(dir, false, false); err != nil {
+	if err := project.InstallWorkflow(dir, project.WorkflowOptions{Version: "v1.2.3", Remove: false, DryRun: false}); err != nil {
 		t.Fatal(err)
 	}
-	if err := project.ConfigureMCP(dir, false, false); err != nil {
+	if err := project.ConfigureMCP(dir, project.MCPOptions{Remove: false, DryRun: false}); err != nil {
 		t.Fatal(err)
 	}
-	if err := project.InstallWorkflow(dir, true, false); err != nil {
+	if err := project.InstallWorkflow(dir, project.WorkflowOptions{Version: "v1.2.3", Remove: true, DryRun: false}); err != nil {
 		t.Fatal(err)
 	}
-	if err := project.ConfigureMCP(dir, true, false); err != nil {
+	if err := project.ConfigureMCP(dir, project.MCPOptions{Remove: true, DryRun: false}); err != nil {
 		t.Fatal(err)
 	}
 	public := "public-" + suffix

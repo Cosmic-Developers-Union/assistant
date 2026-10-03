@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"net/url"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -186,10 +188,10 @@ func newCreateTokenCommand() *cobra.Command {
 }
 
 func newProjectCommand() *cobra.Command {
-	var instance, dir, repo, reviewer, merger, mergeInstance string
-	var dry bool
+	var instance, dir, repo, reviewer, merger, mergeInstance, actionVersion string
+	var dry, force bool
 	root := &cobra.Command{Use: "project", Short: "当前项目的 Gitea 标签、协作者、Actions 与 MCP", Args: cobra.NoArgs}
-	root.PersistentFlags().StringVar(&instance, "instance", "", "明确选择个人 Gitea 实例")
+	root.PersistentFlags().StringVar(&instance, "instance", "", "管理员实例名（Actions 缺省按 Git remote 自动匹配）")
 	root.PersistentFlags().StringVar(&dir, "dir", ".", "当前项目目录")
 	root.PersistentFlags().StringVar(&repo, "repo", "", "owner/name（缺省从匹配实例的 Git remote 推导）")
 	root.PersistentFlags().BoolVar(&dry, "dry-run", false, "只读检查并报告，不写平台或文件")
@@ -245,10 +247,10 @@ func newProjectCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		if err := project.InstallWorkflow(path, false, true); err != nil {
+		if err := project.InstallWorkflow(path, project.WorkflowOptions{Version: actionVersion, DryRun: true}); err != nil {
 			return err
 		}
-		_, file, entry, err := giteaInstance(instance)
+		file, entry, err := projectInstance(cmd.Context(), path, repo, instance)
 		if err != nil {
 			return err
 		}
@@ -272,6 +274,9 @@ func newProjectCommand() *cobra.Command {
 				token = candidate.Token
 			}
 		}
+		if token == "" {
+			return fmt.Errorf("该站点没有有效 merge 令牌；先 instance provision gitea --admin %s，或用 --merge-instance 指定已登记的合并实例", entry.Name)
+		}
 		client, err := project.NewClient(entry)
 		if err != nil {
 			return err
@@ -279,15 +284,16 @@ func newProjectCommand() *cobra.Command {
 		if err := client.InstallActionsSettings(cmd.Context(), owner, name, token, dry); err != nil {
 			return credentials.RedactError(err, token, entry.Token)
 		}
-		if err := project.InstallWorkflow(path, false, dry); err != nil {
+		if err := project.InstallWorkflow(path, project.WorkflowOptions{Version: actionVersion, DryRun: dry}); err != nil {
 			return err
 		}
-		cmd.Println("workflow 配置已处理；提交并推送文件变更后平台生效")
+		cmd.Printf("workflow 配置已处理：版本 %s，实例 %s；提交并推送文件变更后平台生效\n", actionVersion, entry.Name)
 		return nil
 	}}
 	action.Flags().StringVar(&mergeInstance, "merge-instance", "", "用于 MERGE_TOKEN 的实例名（缺省该站点唯一 merge 账号）")
+	action.Flags().StringVar(&actionVersion, "version", version, "固定的 assistant 发布版本（缺省当前二进制版本，开发版须显式指定）")
 	install.AddCommand(action)
-	install.AddCommand(&cobra.Command{Use: "mcp", Short: "安装 gitea MCP server，无需凭据或实例参数", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	mcp := &cobra.Command{Use: "mcp", Short: "安装 gitea MCP server，无需凭据或实例参数", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		if cmd.Flag("instance").Changed {
 			return fmt.Errorf("MCP 安装不使用 --instance，只写 assistant mcp gitea 启动命令")
 		}
@@ -295,12 +301,14 @@ func newProjectCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		if err := project.ConfigureMCP(path, false, dry); err != nil {
+		if err := project.ConfigureMCP(path, project.MCPOptions{DryRun: dry, Force: force, Log: func(message string) { fmt.Fprintln(cmd.ErrOrStderr(), message) }}); err != nil {
 			return err
 		}
 		cmd.Println("MCP 配置已处理：gitea（不含密钥）")
 		return nil
-	}})
+	}}
+	mcp.Flags().BoolVarP(&force, "force", "f", false, "备份原文件后覆盖冲突或修复无效 JSON，保留可解析的其他配置")
+	install.AddCommand(mcp)
 	for _, kind := range []string{"action", "mcp"} {
 		uninstall.AddCommand(&cobra.Command{Use: kind, Short: "移除本工具托管配置，保留其他配置", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 			path, err := projectDir(dir)
@@ -308,13 +316,13 @@ func newProjectCommand() *cobra.Command {
 				return err
 			}
 			if kind == "action" {
-				if err := project.InstallWorkflow(path, true, dry); err != nil {
+				if err := project.InstallWorkflow(path, project.WorkflowOptions{Remove: true, DryRun: dry}); err != nil {
 					return err
 				}
 				cmd.Println("本地 workflow 已处理；提交推送后生效，MERGE_TOKEN 与其他 workflow 保留")
 				return nil
 			}
-			if err := project.ConfigureMCP(path, true, dry); err != nil {
+			if err := project.ConfigureMCP(path, project.MCPOptions{Remove: true, DryRun: dry}); err != nil {
 				return err
 			}
 			cmd.Println("MCP 托管 server 已处理，其他配置保留")
@@ -338,7 +346,7 @@ func projectRepo(dir, explicit, host string) (string, string, error) {
 	}
 	var found string
 	for _, remote := range gitremote.ListRemotes(dir) {
-		if credentials.NormalizeHost(remote.Host) == credentials.NormalizeHost(host) {
+		if remoteMatchesHost(remote, host) {
 			if found != "" && found != remote.Repository {
 				return "", "", fmt.Errorf("当前站点有多个仓库 remote，请指定 --repo")
 			}
@@ -349,4 +357,63 @@ func projectRepo(dir, explicit, host string) (string, string, error) {
 		return "", "", fmt.Errorf("没有匹配所选实例的 Git remote，请指定 --repo owner/name")
 	}
 	return credentials.ParseRepoName(found)
+}
+
+func remoteMatchesHost(remote gitremote.GitRemote, host string) bool {
+	if credentials.NormalizeHost(remote.Host) == credentials.NormalizeHost(host) {
+		return true
+	}
+	// HTTP remote 的协议与端口是确定的；SSH 的 Web 端口只能从已登记实例取得。
+	if strings.HasPrefix(strings.ToLower(remote.URL), "http://") || strings.HasPrefix(strings.ToLower(remote.URL), "https://") {
+		return false
+	}
+	a, err := url.Parse(remote.Host)
+	if err != nil {
+		return false
+	}
+	b, err := url.Parse(credentials.NormalizeHost(host))
+	return err == nil && a.Hostname() != "" && strings.EqualFold(a.Hostname(), b.Hostname()) && b.Path == ""
+}
+
+func projectInstance(ctx context.Context, dir, repo, explicit string) (*credentials.File, credentials.Gitea, error) {
+	if explicit != "" {
+		_, file, entry, err := giteaInstance(explicit)
+		return file, entry, err
+	}
+	path, err := credentials.Path()
+	if err != nil {
+		return nil, credentials.Gitea{}, err
+	}
+	file, err := credentials.Load(path)
+	if err != nil {
+		return nil, credentials.Gitea{}, err
+	}
+	remotes := gitremote.ListRemotes(dir)
+	var candidates []credentials.Gitea
+	var host string
+	for _, entry := range file.Instances.Gitea {
+		matched := false
+		for _, remote := range remotes {
+			if remoteMatchesHost(remote, entry.URL) {
+				matched = true
+			}
+		}
+		if !matched {
+			continue
+		}
+		if host != "" && host != credentials.NormalizeHost(entry.URL) {
+			return nil, credentials.Gitea{}, fmt.Errorf("Git remote 匹配多个 Gitea 站点，请指定 --instance")
+		}
+		host = credentials.NormalizeHost(entry.URL)
+		candidates = append(candidates, entry)
+	}
+	if len(candidates) == 0 {
+		return nil, credentials.Gitea{}, fmt.Errorf("没有匹配 Git remote 的 Gitea 登录实例；先 instance add gitea，或指定 --instance 和 --repo")
+	}
+	owner, name, err := projectRepo(dir, repo, host)
+	if err != nil {
+		return nil, credentials.Gitea{}, err
+	}
+	entry, err := project.SelectAdministrator(ctx, candidates, owner, name)
+	return file, entry, err
 }
