@@ -50,6 +50,7 @@
 EXTENDS TLC
 
 VARIABLES
+    approvalOnHead, \* 最新内容批准是否明确锚定当前 head（空提交号不计）
     contentState,   \* 最新内容结论（"ai" 提交的正式 review）: "none" | "approved" | "requestChanges" | "comment"
     requestedUsers, \* requested_reviewers 中的用户（⊆ {"ai","merge"}）
     requestedTeam,  \* 是否存在团队评审请求（无法按成员吸收，一律视为意图）
@@ -73,7 +74,7 @@ VARIABLES
     quiet,          \* 环境静默（活性性质的触发条件）
     merged          \* 已合并（终态）
 
-vars == <<contentState, requestedUsers, requestedTeam, responded, requestFresh,
+vars == <<approvalOnHead, contentState, requestedUsers, requestedTeam, responded, requestFresh,
           recordFresh, freshMention, stateState, behind, mergeable, checks,
           labels, dirty, quiet, merged>>
 
@@ -84,6 +85,7 @@ CheckStates == {"passed", "pending", "failed"}
 Labels == {"inProgress", "review", "changesRequested", "approved"}
 
 Init ==
+    /\ approvalOnHead = FALSE
     /\ contentState = "none"
     /\ requestedUsers = {}
     /\ requestedTeam = FALSE
@@ -140,16 +142,16 @@ Sync ==
     /\ IF ~ContentFound /\ ~Intent
        THEN \* 无内容结论且无意图：开发中；冲突/落后提升为「要求修改」
             /\ labels' = IF ~mergeable \/ behind THEN "changesRequested" ELSE "inProgress"
-            /\ UNCHANGED <<contentState, requestedUsers, responded, stateState>>
+            /\ UNCHANGED <<approvalOnHead, contentState, requestedUsers, responded, stateState>>
        ELSE IF EffectiveState \in {"requestReview", "approved"}
             THEN \* 评审意图 / 批准直接落标签：不被 checks/conflict/behind 阻断
                  /\ labels' = IF EffectiveState = "requestReview" THEN "review" ELSE "approved"
-                 /\ UNCHANGED <<contentState, requestedUsers, responded, stateState>>
+                 /\ UNCHANGED <<approvalOnHead, contentState, requestedUsers, responded, stateState>>
             ELSE \* 驳回或 COMMENT 讨论：等待作者
                  /\ labels' = "changesRequested"
-                 /\ UNCHANGED <<contentState, requestedUsers, responded, stateState>>
+                 /\ UNCHANGED <<approvalOnHead, contentState, requestedUsers, responded, stateState>>
     /\ dirty' = FALSE
-    /\ UNCHANGED <<requestedTeam, requestFresh, recordFresh, freshMention, behind,
+    /\ UNCHANGED <<approvalOnHead, requestedTeam, requestFresh, recordFresh, freshMention, behind,
                   mergeable, checks, quiet, merged>>
 
 (***************************************************************************)
@@ -164,7 +166,7 @@ AuthorRequest ==
     /\ requestedUsers' = requestedUsers \cup {"ai"}
     /\ requestFresh' = TRUE
     /\ dirty' = TRUE
-    /\ UNCHANGED <<contentState, requestedTeam, responded, recordFresh, freshMention,
+    /\ UNCHANGED <<approvalOnHead, contentState, requestedTeam, responded, recordFresh, freshMention,
                   stateState, behind, mergeable, checks, labels, quiet, merged>>
 
 \* 团队评审请求：无法按成员身份吸收，永不消费（保守建模，见模块头注释）。
@@ -172,7 +174,7 @@ AuthorRequestTeam ==
     /\ ~merged /\ ~quiet /\ ~requestedTeam
     /\ requestedTeam' = TRUE
     /\ dirty' = TRUE
-    /\ UNCHANGED <<contentState, requestedUsers, responded, requestFresh, recordFresh,
+    /\ UNCHANGED <<approvalOnHead, contentState, requestedUsers, responded, requestFresh, recordFresh,
                   freshMention, stateState, behind, mergeable, checks, labels, quiet, merged>>
 
 \* 原生按钮复审：reviewer 已回应后重新点击「请求评审」，生成晚于最新内容
@@ -182,7 +184,7 @@ AuthorRequestButton ==
     /\ ~merged /\ ~quiet /\ ~recordFresh
     /\ recordFresh' = TRUE
     /\ dirty' = TRUE
-    /\ UNCHANGED <<contentState, requestedUsers, requestedTeam, responded, requestFresh,
+    /\ UNCHANGED <<approvalOnHead, contentState, requestedUsers, requestedTeam, responded, requestFresh,
                   freshMention, stateState, behind, mergeable, checks, labels, quiet, merged>>
 
 \* 评论中 @ai/@reviewer 提及（最新内容结论之后才构成新意图；freshMention
@@ -191,7 +193,7 @@ AuthorMention ==
     /\ ~merged /\ ~quiet /\ ~freshMention
     /\ freshMention' = TRUE
     /\ dirty' = TRUE
-    /\ UNCHANGED <<contentState, requestedUsers, requestedTeam, responded, requestFresh,
+    /\ UNCHANGED <<approvalOnHead, contentState, requestedUsers, requestedTeam, responded, requestFresh,
                   recordFresh, stateState, behind, mergeable, checks, labels, quiet, merged>>
 
 \* 内容评审者提交正式 review。Gitea 是否消费其名下请求是非确定的：
@@ -199,6 +201,7 @@ AuthorMention ==
 \* responded 记录的是「当前 head 上已回应」，本次 review 正落在当前 head，
 \* 故加入 {"ai"}；后续 AuthorPush 会清空它（旧回应随 head 前移失效）。
 ReviewerSubmit(state) ==
+    /\ approvalOnHead' = (state = "approved")
     /\ ~merged /\ ~quiet
     /\ state \in {"approved", "requestChanges", "comment"}
     /\ contentState' = state
@@ -217,6 +220,7 @@ ReviewerSubmit(state) ==
 \* 旧 head 上的结论不再回应新请求（这正是 #199 缺陷的核心——旧规则把
 \* responded 当单调历史，于是重新请求评审被判为「已回应」而撤回）。
 AuthorPush ==
+    /\ approvalOnHead' = FALSE
     /\ ~merged /\ ~quiet
     /\ contentState' = IF contentState = "approved" THEN "none" ELSE contentState
     /\ stateState' = IF stateState = "approved" THEN "none" ELSE stateState
@@ -230,6 +234,7 @@ AuthorPush ==
 \* 作者 rebase 到最新基础分支：消除落后与冲突，检查重跑，旧批准同样作废
 \* （head 前移：responded 随之清空，理由同 AuthorPush）。
 AuthorRebase ==
+    /\ approvalOnHead' = FALSE
     /\ ~merged /\ ~quiet
     /\ contentState' = IF contentState = "approved" THEN "none" ELSE contentState
     /\ stateState' = IF stateState = "approved" THEN "none" ELSE stateState
@@ -246,7 +251,7 @@ BaseAdvances ==
     /\ ~merged /\ ~quiet /\ ~behind
     /\ behind' = TRUE
     /\ dirty' = TRUE
-    /\ UNCHANGED <<contentState, requestedUsers, requestedTeam, responded,
+    /\ UNCHANGED <<approvalOnHead, contentState, requestedUsers, requestedTeam, responded,
                   requestFresh, recordFresh, freshMention, stateState, mergeable,
                   checks, labels, quiet, merged>>
 
@@ -255,7 +260,7 @@ ConflictAppears ==
     /\ ~merged /\ ~quiet /\ mergeable
     /\ mergeable' = FALSE
     /\ dirty' = TRUE
-    /\ UNCHANGED <<contentState, requestedUsers, requestedTeam, responded, requestFresh,
+    /\ UNCHANGED <<approvalOnHead, contentState, requestedUsers, requestedTeam, responded, requestFresh,
                   recordFresh, freshMention, stateState, behind, checks, labels, quiet, merged>>
 
 \* 检查状态迁移：pending 出结果、重跑翻转、抖动，统一建模为任意迁移。
@@ -263,14 +268,14 @@ ChecksTransition ==
     /\ ~merged /\ ~quiet
     /\ checks' \in CheckStates \ {checks}
     /\ dirty' = TRUE
-    /\ UNCHANGED <<contentState, requestedUsers, requestedTeam, responded, requestFresh,
+    /\ UNCHANGED <<approvalOnHead, contentState, requestedUsers, requestedTeam, responded, requestFresh,
                   recordFresh, freshMention, stateState, behind, mergeable, labels, quiet, merged>>
 
 \* 环境静默：此后只有 sync（与终态）可发生，用于活性收敛性质。
 EnvQuiet ==
     /\ ~quiet
     /\ quiet' = TRUE
-    /\ UNCHANGED <<contentState, requestedUsers, requestedTeam, responded, requestFresh,
+    /\ UNCHANGED <<approvalOnHead, contentState, requestedUsers, requestedTeam, responded, requestFresh,
                   recordFresh, freshMention, stateState, behind, mergeable, checks,
                   labels, dirty, merged>>
 
@@ -279,7 +284,8 @@ EnvQuiet ==
 \* 没有会签在场（或召唤 automerge）就无法满足 required approvals。
 Merge ==
     /\ ~merged /\ ~quiet
-    /\ labels = "approved"
+    /\ contentState = "approved"
+    /\ approvalOnHead
     /\ checks = "passed"
     /\ mergeable
     /\ ~behind
@@ -287,14 +293,24 @@ Merge ==
     /\ responded' = responded \cup {"merge"}   \* 会签进入时间线
     /\ merged' = TRUE
     /\ dirty' = FALSE
-    /\ UNCHANGED <<contentState, requestedUsers, requestedTeam, requestFresh,
+    /\ UNCHANGED <<approvalOnHead, contentState, requestedUsers, requestedTeam, requestFresh,
                   recordFresh, freshMention, behind, mergeable, checks, labels, quiet>>
+
+UnknownHeadApproval ==
+    /\ ~merged /\ ~quiet
+    /\ contentState' = "approved"
+    /\ approvalOnHead' = FALSE
+    /\ dirty' = TRUE
+    /\ UNCHANGED <<requestedUsers, requestedTeam, responded, requestFresh,
+                  recordFresh, freshMention, stateState, behind, mergeable, checks,
+                  labels, quiet, merged>>
 
 MergedStutter ==
     /\ merged
     /\ UNCHANGED vars
 
 Next ==
+    \/ UnknownHeadApproval
     \/ Sync
     \/ AuthorRequest
     \/ AuthorRequestTeam
@@ -318,6 +334,7 @@ Spec == Init /\ [][Next]_vars /\ WF_vars(Sync)
 (***************************************************************************)
 
 TypeOK ==
+    /\ approvalOnHead \in BOOLEAN
     /\ contentState \in ContentStates
     /\ requestedUsers \subseteq {"ai"}
     /\ requestedTeam \in BOOLEAN
@@ -391,5 +408,10 @@ CountersignOnlyWhenGreen ==
 
 ConvergesWhenQuiet ==
     quiet ~> [](merged \/ (~dirty /\ labels = ExpectedLabels))
+
+
+MergedRequiresCurrentApproval ==
+    merged => (approvalOnHead /\ contentState = "approved" /\ stateState = "approved"
+               /\ checks = "passed" /\ mergeable /\ ~behind)
 
 ====

@@ -285,17 +285,16 @@ func TestManagerCreatesCompleteLabelSchema(t *testing.T) {
 	}
 }
 
-func TestManagerValidatesTargetRepositoryBeforeWriting(t *testing.T) {
-	visible := Repository{Owner: "acme", Name: "visible"}
-	target := Repository{Owner: "acme", Name: "target"}
-	api := newFakeAPI(visible, nil)
+type noRepositoryEnumeration struct{ API }
 
-	err := NewManager(api, WithRepository(target)).Sync(t.Context())
-	if err == nil || !strings.Contains(err.Error(), target.FullName()) {
-		t.Fatalf("Sync() error = %v", err)
-	}
-	if len(api.createdLabels) != 0 || len(api.exclusive) != 0 {
-		t.Fatalf("created labels = %+v, exclusive = %v", api.createdLabels, api.exclusive)
+func (noRepositoryEnumeration) ListRepositories(context.Context) ([]Repository, error) {
+	return nil, errors.New("禁止枚举其他仓库")
+}
+func TestManagerTargetDoesNotEnumerateRepositories(t *testing.T) {
+	target := Repository{Owner: "acme", Name: "target"}
+	api := newFakeAPI(target, completeLabels())
+	if err := NewManager(noRepositoryEnumeration{api}, WithRepository(target)).Sync(t.Context()); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -853,7 +852,7 @@ func TestManagerMarksCommentReviewChangesRequested(t *testing.T) {
 	api.pullRequests[repository.FullName()] = []PullRequest{{Index: 23}}
 	api.current[pullRequestKey(repository, 23)] = mergeablePullRequest(23, []Label{inProgressLabel, awaitingLabel})
 	api.reviews[pullRequestKey(repository, 23)] = []Review{{
-		ID: 1, State: ReviewStateComment, Submitted: time.Unix(10, 0),
+		ID: 1, User: "ai", State: ReviewStateComment, Submitted: time.Unix(10, 0),
 	}}
 
 	if err := NewManager(api).Sync(t.Context()); err != nil {
@@ -1788,15 +1787,6 @@ func TestManagerWithRepositoryVisibility(t *testing.T) {
 		}
 	})
 
-	t.Run("不可见时报错", func(t *testing.T) {
-		api := newFakeAPI(repository, completeLabels())
-		api.repositories = []Repository{other}
-
-		err := NewManager(api, WithRepository(repository)).Sync(t.Context())
-		if err == nil || !strings.Contains(err.Error(), "not visible") {
-			t.Fatalf("Sync() error = %v, want 不可见错误", err)
-		}
-	})
 }
 
 // reconcileRepository 的错误聚合：标签准备失败即中止（后续步骤没有标签可用），

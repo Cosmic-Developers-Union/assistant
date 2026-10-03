@@ -1,6 +1,4 @@
-// assistant 是 dev 侧 CLI 入口：交互命令（login / setup / init / install /
-// doctor / validate / config / migrate）、CI 自动化（action）与会话 MCP（mcp
-// gitea）。命令树与实现都在 internal/cli；常驻进程见 cmd/assistantd。
+// assistant 是单一二进制入口：instance、mcp、action 与常驻 run 共用命令层。
 package main
 
 import (

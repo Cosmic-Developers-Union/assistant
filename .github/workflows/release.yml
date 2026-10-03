@@ -1,7 +1,7 @@
 name: release
 
 # tag（v*）触发：交叉编译 linux / macos / windows 三端 64 位二进制，
-# 以 GitHub Release 附件发布（assistant[-d]-<os>-<arch>[.exe]）。
+# 以 GitHub Release 附件发布（assistant-<os>-<arch>[.exe]）。
 on:
   push:
     tags: ["v*"]
@@ -35,7 +35,7 @@ jobs:
           CGO_ENABLED: "0"
         run: |
           version_pkg="github.com/${GITHUB_REPOSITORY}/internal/cli"
-          for name in assistant assistantd; do
+          for name in assistant; do
             output="${name}-${GOOS}-${GOARCH}"
             [ "$GOOS" = "windows" ] && output="${output}.exe"
             go build -trimpath -ldflags="-s -w -X ${version_pkg}.version=${GITHUB_REF_NAME}" \

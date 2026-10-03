@@ -324,8 +324,6 @@ cython_debug/
 # assistant 构建产物与调度引擎运行时产物
 /assistant
 /assistant.exe
-/assistantd
-/assistantd.exe
 /dispatcher.lock
 /worktrees/
 /test/e2e/.env
@@ -348,3 +346,8 @@ run.yaml
 /data/
 /claude/
 /chat/
+
+/config.yaml
+
+# 旧版本地构建产物
+/assistantd

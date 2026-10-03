@@ -891,3 +891,47 @@ func TestClientListReviewRequestEventsReportsBadResponses(t *testing.T) {
 		}
 	})
 }
+
+func TestRepositoryLabelsPaginationAndFailures(t *testing.T) {
+	for _, code := range []int{200, 403, 500} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			pages := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !strings.Contains(r.URL.Path, "/labels") {
+					http.NotFound(w, r)
+					return
+				}
+				pages++
+				if code != 200 {
+					w.WriteHeader(code)
+					fmt.Fprint(w, `{"message":"拒绝"}`)
+					return
+				}
+				if r.URL.Query().Get("page") == "1" {
+					w.Header().Set("Link", fmt.Sprintf(`<%s?page=2>; rel="next"`, "http://"+r.Host+r.URL.Path))
+					fmt.Fprint(w, `[{"id":1,"name":"type/bug","color":"ffffff"}]`)
+				} else {
+					fmt.Fprint(w, `[{"id":2,"name":"status/triage"}]`)
+				}
+			}))
+			defer server.Close()
+			client, err := NewClient(server.URL, "token")
+			if err != nil {
+				t.Fatal(err)
+			}
+			labels, err := client.ListRepositoryLabels(t.Context(), Repository{Owner: "team", Name: "repo"})
+			if code == 200 {
+				if err != nil || len(labels) != 2 || pages != 2 {
+					t.Fatal(labels, pages, err)
+				}
+			} else {
+				if err == nil {
+					t.Fatal("平台错误被忽略")
+				}
+				if code == 403 && !IsPermissionError(err) {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}

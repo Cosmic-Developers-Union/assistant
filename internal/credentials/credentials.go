@@ -1,211 +1,159 @@
-// Package credentials 管理 credentials.json：本地凭据库，按 (host, user, purpose)
-// 索引「身份」与「用途令牌」。
-//
-// 身份（Identity）是一次 username/password 登录确定的事实：这台站点当前以谁登录、
-// 该账号是不是实例管理员。令牌（Credential）按用途派生，彼此不借用：
-//
-//	mcp    开发者本地工具面（编辑器/CLI 里的 gitea MCP）
-//	admin  实例管理面（setup/init/actions 等需要管理员的操作）
-//	review 内容评审机器人（默认 ai）
-//	merge  状态评审/合并机器人（默认 merge）
-//
-// 与 config.json 的分工：config.json 描述「管理哪些实例与仓库」，凭据只描述「以谁
-// 的身份、用哪条令牌访问」。凭据独立成文件（0600），便于轮换、审计与按账号隔离。
-//
-// 用途令牌之外，凭据库还收对话通道的密钥（weixin bot_token、qq app_secret、
-// telegram bot_token）。它们的 host 是**通道键**（weixin、weixin/work、qq/support）
-// 而非站点地址，取值与 instances.Channel.Type 同一套，因此按 (通道键, 平台用途)
-// 唯一。config.json 里的通道条目不写密钥，运行时按通道键回退到这里取。
+// Package credentials 管理用户级的平台实例；运行服务不读取这里的开发者登录态。
 package credentials
 
 import (
-	"encoding/json"
+	json "encoding/json/v2"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
-	"sort"
 	"strings"
-	"time"
-
-	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
 )
 
-// 用途常量。新用途必须在这里登记，避免拼写漂移。
-const (
-	PurposeMCP    = "mcp"
-	PurposeAdmin  = "admin"
-	PurposeReview = "review"
-	PurposeMerge  = "merge"
-)
-
-// 对话通道用途：取值与 instances.Channel.Type 同一套（weixin | qq | telegram），
-// host 存通道键而不是站点地址。这些凭据由平台自己签发（扫码 / 开放平台 /
-// BotFather），没有 Gitea 的权限集与站点侧令牌名概念。
-const (
-	PurposeWeixin   = "weixin"
-	PurposeQQ       = "qq"
-	PurposeTelegram = "telegram"
-)
-
-// MCPScopes 返回登录派生的 MCP 个人令牌权限集：仓库/Issue 读写 + 读取自身账号
-// （身份校验用）。刻意不含 organization/package——MCP 工具面用不到。
-//
-// 每次返回新切片：调用方会把它交给排序/序列化，共享同一个 backing array 会让
-// 「保存一次凭据」意外改掉全局定义。
-func MCPScopes() []string {
-	return []string{"read:repository", "write:repository", "read:issue", "write:issue", "read:user"}
-}
-
-// AdminScopes 返回登录为管理员派生的管理令牌权限集：仓库读写（分支保护/协作者/
-// Actions secret）、Issue 读写（标签）、读取自身账号，以及管理 API（setup 创建
-// 机器人账号）。管理令牌只在账号本身是实例管理员时派生。
-func AdminScopes() []string {
-	return []string{
-		"read:repository", "write:repository",
-		"read:issue", "write:issue",
-		"read:user", "write:admin",
-	}
-}
-
-// BotScopes 返回机器人账号（review/merge）令牌的权限集：仓库读写（分支/协作者/
-// 合并）、Issue 读写（标签、评论、PR review）与读取自身账号。
-func BotScopes() []string {
-	return []string{"read:repository", "write:repository", "read:issue", "write:issue", "read:user"}
-}
-
-// DefaultScopes 返回用途的缺省权限集：记录里没存 scopes 时的兜底。新增用途必须
-// 在这里显式登记——与 Purpose* 常量同文件，switch 漏掉会显式报错，不会静默
-// 错配成其它用途的权限集（用错 scope 的令牌是安全隐患，绝不兜底猜）。
-func DefaultScopes(purpose string) ([]string, error) {
-	switch purpose {
-	case PurposeMCP:
-		return MCPScopes(), nil
-	case PurposeAdmin:
-		return AdminScopes(), nil
-	case PurposeReview, PurposeMerge:
-		return BotScopes(), nil
-	case PurposeWeixin, PurposeQQ, PurposeTelegram:
-		// 对话通道的密钥由平台自己签发与吊销，没有 Gitea 权限集可言。显式返回空
-		// 而不是落到 default：落下去会把一条 Gitea 语境的报错带进 Telegram 流程。
-		return nil, nil
-	default:
-		return nil, fmt.Errorf("未知用途 %q 没有缺省权限集（支持 %s）", purpose, strings.Join(AllPurposes(), "、"))
-	}
-}
-
-// 令牌来源，用于诊断（Credential.Source 的取值）。
-const (
-	// SourceLogin 表示登录按身份派生（含轮换重建）。
-	SourceLogin = "login"
-	// SourceSetup 表示 setup 为机器人账号创建。
-	SourceSetup = "setup"
-)
-
-// CurrentVersion 是文件格式版本；升级格式时递增并在 Load 中做迁移。
-const CurrentVersion = 1
-
-// File 是 credentials.json 的根。
+// File 按平台分组，每个平台的字段集独立且严格校验。
 type File struct {
-	Version int `json:"version"`
-	// Identity 是每个站点当前登录的身份：一次登录确定一个（换账号即替换）。
-	Identity []Identity `json:"identity,omitempty"`
-	// Credentials 按 (host, user, purpose) 唯一。
-	Credentials []Credential `json:"credentials,omitempty"`
+	Instances Instances `json:"instances"`
 }
 
-// Identity 是某站点当前登录账号的身份事实。
-type Identity struct {
-	Host       string `json:"host"`
-	User       string `json:"user"`
-	IsAdmin    bool   `json:"is_admin"`
-	VerifiedAt string `json:"verified_at,omitempty"`
+// Instances 是已支持平台的类型注册面，未知平台或字段均拒绝。
+type Instances struct {
+	Gitea    []Gitea    `json:"gitea,omitempty"`
+	QQ       []QQ       `json:"qq,omitempty"`
+	Weixin   []Weixin   `json:"weixin,omitempty"`
+	Telegram []Telegram `json:"telegram,omitempty"`
 }
 
-// Credential 是一条用途令牌。
-type Credential struct {
-	Host    string `json:"host"`
-	User    string `json:"user"`
-	Purpose string `json:"purpose"`
-	// Token 是令牌明文。只有创建时能从站点读到一次，之后靠 LastEight 比对。
-	Token     string   `json:"token,omitempty"`
-	TokenName string   `json:"token_name,omitempty"`
-	LastEight string   `json:"last_eight,omitempty"`
-	Scopes    []string `json:"scopes,omitempty"`
-	// Source 说明令牌来源：login（登录派生）或 setup（机器人账号）。
-	Source    string `json:"source,omitempty"`
-	CreatedAt string `json:"created_at,omitempty"`
+// Gitea 保存一个站点上的个人访问令牌，密码永不落盘。
+type Gitea struct {
+	Name     string `json:"name"`
+	URL      string `json:"url"`
+	Username string `json:"username"`
+	Token    string `json:"token"`
 }
 
-// 凭据库的命名空间：Cosmic-Developers-Union/assistant（组织/应用两级，与
-// configNamespace 时代一致）。
-const (
-	credentialsNamespace = "Cosmic-Developers-Union"
-	credentialsApp       = "assistant"
-)
+// QQ 保存开放平台的应用身份。
+type QQ struct {
+	Name      string `json:"name"`
+	AppID     string `json:"app-id"`
+	AppSecret string `json:"app-secret"`
+}
 
-// Path 决定凭据文件落点：平台标准配置目录（Linux XDG_CONFIG_HOME、Windows
-// Known Folders、macOS Library）下的 credentials.json。凭据描述「这台机器上的
-// 当前用户是谁」，是用户级而非项目级状态——MCP/CLI 从任意项目目录启动都要能
-// 解析到同一份，绝不能锚定 cwd 或 config.json 所在目录（那会让换目录启动的
-// 凭据解析全部落空）。ASSISTANT_CREDENTIALS 可显式覆盖。
+// Weixin 保存扫码换得的身份与平台端点。
+type Weixin struct {
+	Name   string `json:"name"`
+	URL    string `json:"url"`
+	UserID string `json:"user-id"`
+	BotID  string `json:"bot-id"`
+	Token  string `json:"token"`
+}
+
+// Telegram 保存 BotFather 颁发并实测过的机器人令牌。
+type Telegram struct {
+	Name     string `json:"name"`
+	Username string `json:"username"`
+	Token    string `json:"token"`
+}
+
+// Path 使用平台标准用户目录，从任何项目启动都指向同一份凭据。
 func Path() (string, error) {
-	if override := strings.TrimSpace(os.Getenv("ASSISTANT_CREDENTIALS")); override != "" {
-		return override, nil
+	if path := os.Getenv("ASSISTANT_CREDENTIALS"); path != "" {
+		return path, nil
 	}
-	directory, err := os.UserConfigDir()
+	dir, err := os.UserConfigDir()
 	if err != nil {
-		return "", fmt.Errorf("定位凭据目录（平台标准配置目录）: %w", err)
+		return "", fmt.Errorf("定位用户凭据目录: %w", err)
 	}
-	return filepath.Join(directory, credentialsNamespace, credentialsApp, "credentials.json"), nil
+	return filepath.Join(dir, "Cosmic-Developers-Union", "assistant", "credentials.json"), nil
 }
 
-// Load 读取凭据文件；文件不存在返回空库（不是错误）。内容损坏时报错，不静默丢弃
-// 凭据。
+// Load 缺失文件返回空实例库，损坏或旧格式不会被静默覆盖。
 func Load(path string) (*File, error) {
 	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return new(File), nil
+	}
 	if err != nil {
-		if os.IsNotExist(err) {
-			return &File{Version: CurrentVersion}, nil
-		}
-		return nil, err
+		return nil, fmt.Errorf("读取凭据: %w", err)
 	}
-	file := &File{}
-	if err := json.Unmarshal(data, file); err != nil {
-		return nil, fmt.Errorf("解析凭据文件 %s: %w", path, err)
+	file := new(File)
+	if err := json.Unmarshal(data, file, json.RejectUnknownMembers(true)); err != nil {
+		return nil, fmt.Errorf("解析凭据（旧版凭据需重新登记实例）: %w", err)
 	}
-	file.Normalize()
 	if err := file.Validate(); err != nil {
-		return nil, fmt.Errorf("凭据文件 %s: %w", path, err)
+		return nil, err
 	}
 	return file, nil
 }
 
-// Save 原子写入凭据文件（0600）：临时文件 + rename，避免半截文件被读到。
+// Validate 拒绝重复名字、无效端点与缺失密钥，错误不回显令牌。
+func (f *File) Validate() error {
+	names := map[string]bool{}
+	nameOK := func(name string) error {
+		if strings.TrimSpace(name) == "" || names[name] {
+			return fmt.Errorf("实例名为空或重复：%q", name)
+		}
+		names[name] = true
+		return nil
+	}
+	for _, item := range f.Instances.Gitea {
+		if err := nameOK(item.Name); err != nil {
+			return err
+		}
+		if err := ValidateHost(item.URL); err != nil {
+			return err
+		}
+		if item.Username == "" || item.Token == "" {
+			return fmt.Errorf("gitea 实例缺少 username/token")
+		}
+	}
+	for _, item := range f.Instances.QQ {
+		if err := nameOK(item.Name); err != nil {
+			return err
+		}
+		if item.AppID == "" || item.AppSecret == "" {
+			return fmt.Errorf("qq 实例缺少 app-id/app-secret")
+		}
+	}
+	for _, item := range f.Instances.Weixin {
+		if err := nameOK(item.Name); err != nil {
+			return err
+		}
+		if err := ValidateHost(item.URL); err != nil {
+			return err
+		}
+		if item.Token == "" || item.UserID == "" || item.BotID == "" {
+			return fmt.Errorf("weixin 实例缺少身份或 token")
+		}
+	}
+	for _, item := range f.Instances.Telegram {
+		if err := nameOK(item.Name); err != nil {
+			return err
+		}
+		if item.Token == "" || item.Username == "" {
+			return fmt.Errorf("telegram 实例缺少 username/token")
+		}
+	}
+	return nil
+}
+
+// Save 用原子替换和 0600 防止半份凭据或其他用户读取。
 func Save(path string, file *File) error {
-	file.Normalize()
 	if err := file.Validate(); err != nil {
 		return err
 	}
+	data, err := json.Marshal(file)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
+		return fmt.Errorf("创建凭据目录: %w", err)
 	}
-	data, err := json.MarshalIndent(file, "", "  ")
+	temp, err := os.CreateTemp(filepath.Dir(path), ".credentials-*")
 	if err != nil {
 		return err
 	}
-	data = append(data, '\n')
-	temp, err := os.CreateTemp(filepath.Dir(path), ".credentials-*.tmp")
-	if err != nil {
-		return err
-	}
-	tempName := temp.Name()
-	defer os.Remove(tempName)
-	if err := temp.Chmod(0o600); err != nil {
-		temp.Close()
-		return err
-	}
-	if _, err := temp.Write(data); err != nil {
+	defer os.Remove(temp.Name())
+	if _, err := temp.Write(append(data, '\n')); err != nil {
 		temp.Close()
 		return err
 	}
@@ -216,406 +164,36 @@ func Save(path string, file *File) error {
 	if err := temp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tempName, path)
+	return os.Rename(temp.Name(), path)
 }
 
-// Empty 表示没有任何身份与凭据：调用方据此避免写出空文件。
-func (f *File) Empty() bool {
-	return f == nil || (len(f.Identity) == 0 && len(f.Credentials) == 0)
-}
+// NormalizeHost 让地址末尾斜杠不影响实例匹配。
+func NormalizeHost(host string) string { return strings.TrimRight(strings.TrimSpace(host), "/") }
 
-// Normalize 补齐版本、规范化 host、去掉重复项。
-func (f *File) Normalize() {
-	if f.Version == 0 {
-		f.Version = CurrentVersion
-	}
-	for index := range f.Identity {
-		f.Identity[index].Host = NormalizeHost(f.Identity[index].Host)
-	}
-	sort.SliceStable(f.Identity, func(i, j int) bool { return f.Identity[i].Host < f.Identity[j].Host })
-	dedupedIdentity := f.Identity[:0]
-	for _, identity := range f.Identity {
-		if n := len(dedupedIdentity); n > 0 && dedupedIdentity[n-1].Host == identity.Host {
-			dedupedIdentity[n-1] = identity
-			continue
-		}
-		dedupedIdentity = append(dedupedIdentity, identity)
-	}
-	f.Identity = dedupedIdentity
-
-	for index := range f.Credentials {
-		credential := &f.Credentials[index]
-		credential.Host = NormalizeHost(credential.Host)
-		credential.User = strings.TrimSpace(credential.User)
-		credential.Purpose = strings.TrimSpace(credential.Purpose)
-		if len(credential.Scopes) > 0 {
-			sort.Strings(credential.Scopes)
-		}
-	}
-	sort.SliceStable(f.Credentials, func(i, j int) bool {
-		return credentialKey(f.Credentials[i]) < credentialKey(f.Credentials[j])
-	})
-	deduped := f.Credentials[:0]
-	for _, credential := range f.Credentials {
-		if n := len(deduped); n > 0 && credentialKey(deduped[n-1]) == credentialKey(credential) {
-			deduped[n-1] = credential
-			continue
-		}
-		deduped = append(deduped, credential)
-	}
-	f.Credentials = deduped
-}
-
-// Validate 检查索引键完整且唯一。
-func (f *File) Validate() error {
-	for _, identity := range f.Identity {
-		if identity.Host == "" || identity.User == "" {
-			return fmt.Errorf("identity 缺少 host 或 user")
-		}
-	}
-	seen := make(map[string]bool, len(f.Credentials))
-	for _, credential := range f.Credentials {
-		if credential.Host == "" || credential.User == "" {
-			return fmt.Errorf("credential 缺少 host 或 user（purpose=%s）", credential.Purpose)
-		}
-		if !KnownPurpose(credential.Purpose) {
-			return fmt.Errorf("未知 purpose %q（支持 %s）", credential.Purpose, strings.Join(Purposes(), "、"))
-		}
-		if strings.TrimSpace(credential.Token) == "" {
-			return fmt.Errorf("credential %s@%s (%s) 缺少令牌", credential.User, credential.Host, credential.Purpose)
-		}
-		key := credentialKey(credential)
-		if seen[key] {
-			return fmt.Errorf("credential 重复：%s@%s (%s)", credential.User, credential.Host, credential.Purpose)
-		}
-		seen[key] = true
-	}
-	return nil
-}
-
-// Purposes 返回 Gitea 用途令牌清单（诊断/错误信息用）。刻意不含对话通道用途：
-// 那几条不是站点令牌，混进来会让「站点缺 mcp 令牌」之类的诊断多出无关项。
-func Purposes() []string {
-	return []string{PurposeMCP, PurposeAdmin, PurposeReview, PurposeMerge}
-}
-
-// ChannelPurposes 返回对话通道用途清单，取值与 channels[].type 同一套。
-func ChannelPurposes() []string {
-	return []string{PurposeWeixin, PurposeQQ, PurposeTelegram}
-}
-
-// AllPurposes 返回凭据库里全部已登记用途（Gitea + 对话通道）。凭据库自身的校验
-// 与「这个 purpose 认不认识」的判断用它——用 Purposes() 会让对话通道凭据被判非法。
-func AllPurposes() []string {
-	return append(Purposes(), ChannelPurposes()...)
-}
-
-// KnownPurpose 判断 purpose 是否已登记（Gitea 用途或对话通道用途）。
-func KnownPurpose(purpose string) bool {
-	return slices.Contains(AllPurposes(), purpose)
-}
-
-// ChannelPurpose 判断 purpose 是否是对话通道用途：这类凭据的 host 是通道键，
-// user 只是诊断身份（bot/app），没有站点、账号与权限集语义。RemoveUser 之类的
-// 按账号清理的接口必须绕开它们，否则 `login remove telegram` 会把通道密钥当成
-// 某站点下的账号凭据一起删掉，而 config.json 里的通道条目还留着。
-func ChannelPurpose(purpose string) bool {
-	return slices.Contains(ChannelPurposes(), purpose)
-}
-
-// NormalizeHost 统一站点比较口径：去尾斜杠、转小写。
-func NormalizeHost(host string) string {
-	return strings.ToLower(strings.TrimRight(strings.TrimSpace(host), "/"))
-}
-
-// SetIdentity 记录/替换某站点的登录身份（一个站点同时只有一个当前身份）。
-func (f *File) SetIdentity(identity Identity) {
-	identity.Host = NormalizeHost(identity.Host)
-	identity.User = strings.TrimSpace(identity.User)
-	if identity.VerifiedAt == "" {
-		identity.VerifiedAt = time.Now().UTC().Format(time.RFC3339)
-	}
-	for index := range f.Identity {
-		if f.Identity[index].Host == identity.Host {
-			f.Identity[index] = identity
-			return
-		}
-	}
-	f.Identity = append(f.Identity, identity)
-}
-
-// IdentityFor 返回站点当前登录身份。
-func (f *File) IdentityFor(host string) (Identity, bool) {
-	if f == nil {
-		return Identity{}, false
-	}
-	host = NormalizeHost(host)
-	for _, identity := range f.Identity {
-		if NormalizeHost(identity.Host) == host {
-			return identity, true
-		}
-	}
-	return Identity{}, false
-}
-
-// SetCredential 写入/替换一条用途令牌。
-func (f *File) SetCredential(credential Credential) {
-	credential.Host = NormalizeHost(credential.Host)
-	credential.User = strings.TrimSpace(credential.User)
-	credential.Purpose = strings.TrimSpace(credential.Purpose)
-	// 复制 Scopes：Normalize 会就地排序，不能改动调用方持有的切片
-	credential.Scopes = append([]string(nil), credential.Scopes...)
-	if credential.CreatedAt == "" {
-		credential.CreatedAt = time.Now().UTC().Format(time.RFC3339)
-	}
-	for index := range f.Credentials {
-		if credentialKey(f.Credentials[index]) == credentialKey(credential) {
-			f.Credentials[index] = credential
-			return
-		}
-	}
-	f.Credentials = append(f.Credentials, credential)
-}
-
-// SetChannelCredential 按（通道键, 平台用途）整条替换一条对话通道凭据。
-//
-// 刻意不走 SetCredential：它按 (host, user, purpose) 去重，而通道凭据的 user 是
-// bot/app 身份，重新登录时可能变（换微信号、换 QQ 机器人、换 Telegram bot）。
-// 按整三元组写入会留下一条查不到人的旧行，还会让 ChannelCredentialFor 的
-// 「同键多身份」分支炸掉——而通道解析点拿不到 user，根本无从消歧。
-func (f *File) SetChannelCredential(credential Credential) {
-	host, purpose := NormalizeHost(credential.Host), strings.TrimSpace(credential.Purpose)
-	kept := f.Credentials[:0]
-	for _, existing := range f.Credentials {
-		if NormalizeHost(existing.Host) == host && strings.TrimSpace(existing.Purpose) == purpose {
-			continue
-		}
-		kept = append(kept, existing)
-	}
-	f.Credentials = kept
-	f.SetCredential(credential)
-}
-
-// ChannelCredentialFor 返回通道键某平台用途的密钥。通道凭据的 user 只是诊断身份，
-// 调用方（daemon 启动、login list）只有 config.json 里的通道条目，给不出 user，
-// 所以这里不要求指定账号：同键多行按上面的写入约定本不该出现，真出现了就把行数
-// 与各自身份报出来叫人处理，而不是像 CredentialFor 那样让人「指定账号」——通道
-// 解析点没有账号可选。
-func (f *File) ChannelCredentialFor(channelKey, purpose string) (Credential, bool, error) {
-	if f == nil {
-		return Credential{}, false, nil
-	}
-	host := NormalizeHost(channelKey)
-	var matches []Credential
-	for _, credential := range f.Credentials {
-		if NormalizeHost(credential.Host) == host && strings.TrimSpace(credential.Purpose) == purpose {
-			matches = append(matches, credential)
-		}
-	}
-	switch len(matches) {
-	case 0:
-		return Credential{}, false, nil
-	case 1:
-		return matches[0], true, nil
-	default:
-		identities := make([]string, 0, len(matches))
-		for _, match := range matches {
-			identities = append(identities, orNone(match.User))
-		}
-		sort.Strings(identities)
-		return Credential{}, false, fmt.Errorf(
-			"通道 %s 有 %d 条 %s 凭据（%s）：用 assistant login add --type %s 重新登录以覆盖",
-			channelKey, len(matches), purpose, strings.Join(identities, "、"), purpose)
-	}
-}
-
-// CredentialForUser 返回指定账号某用途的令牌。
-func (f *File) CredentialForUser(host, user, purpose string) (Credential, bool) {
-	if f == nil {
-		return Credential{}, false
-	}
-	want := credentialKey(Credential{Host: host, User: user, Purpose: purpose})
-	for _, credential := range f.Credentials {
-		if credentialKey(credential) == want {
-			return credential, true
-		}
-	}
-	return Credential{}, false
-}
-
-// CredentialFor 返回站点某用途的令牌。同一用途在该站点存在多个账号时返回错误，
-// 要求调用方指定账号——不猜身份。
-func (f *File) CredentialFor(host, purpose string) (Credential, bool, error) {
-	if f == nil {
-		return Credential{}, false, nil
-	}
-	host = NormalizeHost(host)
-	var matches []Credential
-	for _, credential := range f.Credentials {
-		if NormalizeHost(credential.Host) == host && credential.Purpose == purpose {
-			matches = append(matches, credential)
-		}
-	}
-	switch len(matches) {
-	case 0:
-		return Credential{}, false, nil
-	case 1:
-		return matches[0], true, nil
-	default:
-		users := make([]string, 0, len(matches))
-		for _, match := range matches {
-			users = append(users, "@"+match.User)
-		}
-		sort.Strings(users)
-		return Credential{}, false, fmt.Errorf(
-			"站点 %s 有多个 %s 凭据（%s），请指定账号", host, purpose, strings.Join(users, "、"))
-	}
-}
-
-// CredentialForIdentity 返回站点当前登录身份在指定用途上的令牌；没有身份记录或
-// 该身份没有这条令牌时退回 CredentialFor（唯一匹配；同用途多账号才要求指定）。
-// 身份是「这台站点现在以谁登录」的事实，因此多账号并存时它是有依据的裁决者。
-func (f *File) CredentialForIdentity(host, purpose string) (Credential, bool, error) {
-	if identity, ok := f.IdentityFor(host); ok {
-		if credential, ok := f.CredentialForUser(host, identity.User, purpose); ok {
-			return credential, true, nil
-		}
-	}
-	return f.CredentialFor(host, purpose)
-}
-
-// RemoveUser 删除某账号在该站点的全部凭据（不动远端令牌；只清本地记录）。
-// 对话通道凭据不在范围内：它们的 host 是通道键、user 是 bot 名，删掉之后
-// config.json 里的通道条目会变成一条永远起不来的悬空配置。
-func (f *File) RemoveUser(host, user string) int {
-	if f == nil {
-		return 0
-	}
-	host, user = NormalizeHost(host), strings.TrimSpace(user)
-	kept := f.Credentials[:0]
-	removed := 0
-	for _, credential := range f.Credentials {
-		if ChannelPurpose(credential.Purpose) {
-			kept = append(kept, credential)
-			continue
-		}
-		if NormalizeHost(credential.Host) == host && credential.User == user {
-			removed++
-			continue
-		}
-		kept = append(kept, credential)
-	}
-	f.Credentials = kept
-	identities := f.Identity[:0]
-	for _, identity := range f.Identity {
-		if NormalizeHost(identity.Host) == host && identity.User == user {
-			continue
-		}
-		identities = append(identities, identity)
-	}
-	f.Identity = identities
-	return removed
-}
-
-// Hosts 返回凭据库里出现过的 Gitea 站点（规范化、排序、去重）：身份与用途令牌
-// 的并集。「这台机器登录过哪些站点」是 host 兜底解析的事实来源。跳过对话通道
-// 凭据——它们的 host 是通道键（weixin/work），不是站点，混进来会让 MCP 与
-// `login list` 把通道键当站点列出来。
+// Hosts 返回凭据库已登记的唯一站点，不把多账号误算成多站点。
 func (f *File) Hosts() []string {
-	if f == nil {
-		return nil
-	}
-	seen := map[string]bool{}
 	var hosts []string
-	add := func(host string) {
-		host = NormalizeHost(host)
-		if host != "" && !seen[host] {
-			seen[host] = true
+	seen := map[string]bool{}
+	for _, entry := range f.Instances.Gitea {
+		host := NormalizeHost(entry.URL)
+		if !seen[host] {
 			hosts = append(hosts, host)
+			seen[host] = true
 		}
 	}
-	for _, identity := range f.Identity {
-		add(identity.Host)
-	}
-	for _, credential := range f.Credentials {
-		if ChannelPurpose(credential.Purpose) {
-			continue
-		}
-		add(credential.Host)
-	}
-	sort.Strings(hosts)
 	return hosts
 }
 
-// Users 返回站点上已登记的账号名（排序、去重）。
-func (f *File) Users(host string) []string {
-	if f == nil {
-		return nil
-	}
-	host = NormalizeHost(host)
-	var users []string
-	seen := map[string]bool{}
-	add := func(user string) {
-		if user != "" && !seen[user] {
-			seen[user] = true
-			users = append(users, user)
+// GiteaToken 要求一个站点唯一账号，多账号时明确拒绝猜测。
+func (f *File) GiteaToken(host string) (string, error) {
+	token := ""
+	for _, entry := range f.Instances.Gitea {
+		if NormalizeHost(entry.URL) == NormalizeHost(host) {
+			if token != "" {
+				return "", fmt.Errorf("该站点登记了多个账号，请显式指定令牌")
+			}
+			token = entry.Token
 		}
 	}
-	for _, identity := range f.Identity {
-		if NormalizeHost(identity.Host) == host {
-			add(identity.User)
-		}
-	}
-	for _, credential := range f.Credentials {
-		if ChannelPurpose(credential.Purpose) {
-			continue
-		}
-		if NormalizeHost(credential.Host) == host {
-			add(credential.User)
-		}
-	}
-	sort.Strings(users)
-	return users
-}
-
-// TokenName 由 (host, user, purpose) 确定性派生**Gitea 站点侧**令牌名：同名即同一
-// 用途令牌，重登复用而不是堆积。user 参与命名，保证多账号同站点互不覆盖。
-// 对话通道用途在这里显式拒绝：它派生的名字会被 HostSlug 截断到主机名
-// （weixin/work 与 weixin/personal 会得到同一个名），而通道密钥根本不存在于站点侧。
-func TokenName(host, user, purpose string) (string, error) {
-	if ChannelPurpose(purpose) {
-		return "", fmt.Errorf("通道用途 %q 没有站点侧令牌名（令牌名只属于 Gitea 用途令牌）", purpose)
-	}
-	slug, err := instances.HostSlug(NormalizeHost(host))
-	if err != nil {
-		return "", err
-	}
-	user = strings.TrimSpace(user)
-	if user == "" || !KnownPurpose(purpose) {
-		return "", fmt.Errorf("派生令牌名需要账号与已登记的用途")
-	}
-	return "assistant-" + purpose + "-" + slug + "-" + user, nil
-}
-
-// LastEight 返回令牌末 8 位：Gitea 只回读末 8 位，用于本地复用校验。
-func LastEight(token string) string {
-	token = strings.TrimSpace(token)
-	if len(token) <= 8 {
-		return token
-	}
-	return token[len(token)-8:]
-}
-
-// orNone 是诊断身份为空时的占位：通道凭据的 user 是 bot/app 名，理论上总有，
-// 但平台接口不保证（例如未设 username 的 Telegram bot），报错时不能印出空串。
-func orNone(user string) string {
-	if user = strings.TrimSpace(user); user == "" {
-		return "（未记录）"
-	}
-	return user
-}
-
-func credentialKey(credential Credential) string {
-	return NormalizeHost(credential.Host) + "\x00" + strings.TrimSpace(credential.User) + "\x00" +
-		strings.TrimSpace(credential.Purpose)
+	return token, nil
 }

@@ -13,7 +13,7 @@
 //     msg_id（15 分钟窗口），msg_seq 区分同一条消息的多次回复（平台按
 //     msg_id+msg_seq 去重）。
 //
-// 本包只做协议；通道适配（会话映射、准入、切块）在 internal/daemon。
+// 本包只做协议；通道适配（会话映射、准入、切块）由本包适配器与 internal/runtime 承担。
 package qq
 
 import (

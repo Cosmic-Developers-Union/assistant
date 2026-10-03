@@ -18,8 +18,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/Cosmic-Developers-Union/assistant/internal/instances"
 )
 
 // 协议常量。
@@ -48,7 +46,7 @@ type Config struct {
 
 func (c *Config) normalize() {
 	if strings.TrimSpace(c.BaseURL) == "" {
-		c.BaseURL = instances.DefaultWeixinBaseURL
+		c.BaseURL = DefaultBaseURL
 	}
 	c.BaseURL = strings.TrimRight(strings.TrimSpace(c.BaseURL), "/")
 	if strings.TrimSpace(c.BotAgent) == "" {
@@ -330,3 +328,6 @@ func randomClientID() (string, error) {
 	}
 	return "assistant-" + hex.EncodeToString(buffer), nil
 }
+
+// DefaultBaseURL 是微信 ilink 的官方端点。
+const DefaultBaseURL = "https://ilinkai.weixin.qq.com"

@@ -28,14 +28,15 @@ import (
 // 批准（approved、未 dismiss、CommitID==head）。标签（status/approved、
 // awaiting/merge 等）由 action label-sync 继续维护，但只是观测产物。
 func (m *Manager) AutoMerge(ctx context.Context) error {
-	if err := m.ReconcileReviewRequests(ctx); err != nil {
-		return err
-	}
+	requestErr := m.ReconcileReviewRequests(ctx)
 	repositories, err := m.visibleRepositories(ctx)
 	if err != nil {
 		return err
 	}
 	var runErrors []error
+	if requestErr != nil {
+		runErrors = append(runErrors, requestErr)
+	}
 	for _, repository := range repositories {
 		merged, err := m.autoMergeRepository(ctx, repository)
 		if err != nil {
@@ -67,16 +68,21 @@ func (m *Manager) autoMergeRepository(ctx context.Context, repository Repository
 	}
 	// 编号升序：先来先合并
 	slices.SortFunc(pullRequests, func(a, b PullRequest) int { return cmp.Compare(a.Index, b.Index) })
+	var failures []error
 	for _, candidate := range pullRequests {
 		merged, err := m.autoMergePullRequest(ctx, repository, candidate, protections)
 		if err != nil {
-			return false, err
+			failures = append(failures, fmt.Errorf("PR #%d: %w", candidate.Index, err))
+			if _, attempted := errors.AsType[*mergeAttemptError](err); attempted {
+				return false, errors.Join(failures...)
+			}
+			continue
 		}
 		if merged {
-			return true, nil
+			return true, errors.Join(failures...)
 		}
 	}
-	return false, nil
+	return false, errors.Join(failures...)
 }
 
 // autoMergePullRequest 对单个候选执行合并门禁并尝试合并。合并前重读最新状态：
@@ -158,7 +164,7 @@ func (m *Manager) autoMergePullRequest(
 		}
 	}
 	if err := m.api.MergePullRequest(ctx, repository, pullRequest.Index); err != nil {
-		return false, err
+		return false, &mergeAttemptError{err}
 	}
 	m.logf("%s#%d: 已 squash 合并 %q；main 前移，本轮不再处理其余 PR", repository.FullName(), pullRequest.Index, pullRequest.Title)
 	return true, nil
@@ -234,18 +240,11 @@ func (m *Manager) disarmAutoMerge(ctx context.Context, repository Repository, pu
 // approved review。作者推进 head 后旧批准失效（dismiss_stale_approvals 会由
 // Gitea 落实，这里再按 CommitID 双保险），需要重新评审后才能合并。
 func reviewerApprovedOnHead(reviews []Review, reviewer, headSHA string) bool {
-	if reviewer == "" {
+	if reviewer == "" || headSHA == "" {
 		return false
 	}
-	for _, review := range reviews {
-		if review.User != reviewer || review.Dismissed || review.State != ReviewStateApproved {
-			continue
-		}
-		if review.CommitID == "" || review.CommitID == headSHA {
-			return true
-		}
-	}
-	return false
+	latest, found := latestReviewBy(reviews, func(user string) bool { return user == reviewer })
+	return found && !latest.Stale && latest.State == ReviewStateApproved && latest.CommitID == headSHA
 }
 
 // countersignState 以当前令牌身份（状态评审者）对 head 提交状态批准。pending
@@ -270,12 +269,10 @@ func (m *Manager) countersignState(
 	if err != nil {
 		return err
 	}
-	for _, review := range reviews {
-		if review.User == identity && !review.Dismissed &&
-			review.State == ReviewStateApproved && review.CommitID == pullRequest.HeadSHA {
-			m.logf("%s#%d: 状态会签已在（head %.10s），不重复盖章", repository.FullName(), pullRequest.Index, pullRequest.HeadSHA)
-			return nil
-		}
+	latest, found := latestReviewBy(reviews, func(user string) bool { return user == identity })
+	if found && !latest.Stale && latest.State == ReviewStateApproved && latest.CommitID == pullRequest.HeadSHA {
+		m.logf("%s#%d: 状态会签已在（head %.10s），不重复盖章", repository.FullName(), pullRequest.Index, pullRequest.HeadSHA)
+		return nil
 	}
 	if pending {
 		m.logf("%s#%d: 内容已批准、检查运行中，先会签（head %.10s）满足批准门禁，再武装原生 auto-merge",
@@ -313,3 +310,8 @@ func workInProgress(title string) bool {
 	}
 	return false
 }
+
+// mergeAttemptError 标记合并请求已发出但结果未知，阻止本轮误发第二次合并。
+type mergeAttemptError struct{ error }
+
+func (e *mergeAttemptError) Unwrap() error { return e.error }

@@ -5,246 +5,111 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 
-	"github.com/Cosmic-Developers-Union/assistant/internal/config"
+	"github.com/Cosmic-Developers-Union/assistant/internal/credentials"
+	"github.com/Cosmic-Developers-Union/assistant/internal/mcps"
+	run "github.com/Cosmic-Developers-Union/assistant/internal/runtime"
 	"github.com/Cosmic-Developers-Union/assistant/internal/status"
-
 	"github.com/spf13/cobra"
 )
 
-// version 由构建注入（-ldflags -X），assistant 与 assistantd 两个二进制共用。
 var version = "dev"
 
-type managerRunner func(context.Context, io.Writer, io.Writer, commandOptions) error
-
-type commandOptions struct {
-	Repository string
-	Verbose    bool
-	// ConfigPath 是配置文件路径（--config / ASSISTANT_CONFIG / 当前目录的 ./config.json）
-	ConfigPath string
-}
-
-// NewRootCommand 构造 assistant 二进制的根命令，接上 dev 侧默认的自动化
-// runner（label-sync / automerge）；测试直接用 newRootCommand 注入替身。
+// NewRootCommand 将四个操作面接到同一二进制，运行与个人实例管理互不读取配置。
 func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
-	return newRootCommand(stdout, stderr, runLabelSync, runAutoMerge)
-}
-
-func newRootCommand(stdout, stderr io.Writer, labelSyncer, merger managerRunner) *cobra.Command {
-	options := commandOptions{}
-	command := &cobra.Command{
-		Use:           "assistant",
-		Short:         "仓库辅助机器人（Issue/PR 例行事务）与评审会话调度引擎（headless claude）",
-		Version:       version,
-		Args:          cobra.NoArgs,
-		SilenceErrors: true,
-		SilenceUsage:  true,
-		RunE: func(command *cobra.Command, _ []string) error {
-			// 无子命令时打印帮助；未知命令由 NoArgs 校验报错（与 yargs strict 同义）
-			return command.Help()
-		},
-		Example: "  assistant action label-sync --verbose\n" +
-			"  assistant action automerge --verbose\n" +
-			"  assistant run --dry-run",
+	var configPath string
+	var verbose, debug bool
+	root := &cobra.Command{Use: "assistant", Short: "平台实例、AI 工具、仓库动作与 bot 运行", Version: version, Args: cobra.NoArgs, SilenceErrors: true, SilenceUsage: true, RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }, Example: "  assistant instance add gitea --name work --url https://gitea.example --username developer\n  assistant action label-sync --dry-run\n  assistant run --config config.yaml"}
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	root.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "展示正在进行的步骤与目标")
+	root.PersistentFlags().BoolVar(&debug, "debug", false, "展示内部诊断信息")
+	log := func(format string, args ...any) { fmt.Fprintf(stderr, format+"\n", args...) }
+	root.AddCommand(newInstanceCommand())
+	action := &cobra.Command{Use: "action", Short: "对环境变量指定的一个仓库执行幂等动作", Args: cobra.NoArgs}
+	for _, kind := range []string{"label-sync", "automerge"} {
+		var dryRun bool
+		cmd := &cobra.Command{Use: kind, Args: cobra.NoArgs, Short: map[string]string{"label-sync": "收敛标签与评审状态", "automerge": "实时校验门禁并 squash 至多一个 PR"}[kind], RunE: func(cmd *cobra.Command, _ []string) error {
+			return runAction(cmd.Context(), kind, dryRun, verbose || debug, log)
+		}}
+		cmd.Flags().BoolVar(&dryRun, "dry-run", false, "只报告动作，不修改平台")
+		action.AddCommand(cmd)
 	}
-	command.SetOut(stdout)
-	command.SetErr(stderr)
-	flags := command.PersistentFlags()
-	flags.BoolVarP(&options.Verbose, "verbose", "v", false, "显示扫描和状态修改过程（不适用于调度命令）")
-	flags.StringVar(&options.Repository, "repo", "", "只扫描 owner/name 指定的仓库")
-	flags.StringVar(
-		&options.ConfigPath,
-		"config",
-		"",
-		"配置文件（缺省 ASSISTANT_CONFIG 或当前目录的 ./config.json；都没有时用环境变量单实例模式）",
-	)
-	// 保留 Cobra 默认的 `completion` 子命令（bash/zsh/fish/powershell），
-	// 以及命令/旗标的动态补全。
-	command.CompletionOptions.DisableDefaultCmd = false
-
-	actionCommand := &cobra.Command{
-		Use:   "action",
-		Short: "执行仓库自动化动作（标签同步与自动合并）",
-		Args:  cobra.NoArgs,
-	}
-	actionCommand.AddCommand(
-		newAutomationCommand("label-sync",
-			"规范 Issue 标签并把 PR 原生评审状态同步为状态标签（单次执行，供 CI 事件驱动）",
-			"", labelSyncer, &options, stdout, stderr),
-		newAutomationCommand("automerge",
-			"合并门禁全绿且分支未过期的已批准 PR（一次运行至多一个，squash；供 CI schedule 驱动）",
-			"", merger, &options, stdout, stderr),
-	)
-	command.AddCommand(actionCommand)
-	// 旧的顶层入口：已 install 的目标仓库里 workflow 仍写着 `assistant sync` /
-	// `assistant automerge`，容器镜像更新后不能直接变成 unknown command——
-	// 那会让门禁在无人察觉的情况下停摆，直到重跑 install。
-	command.AddCommand(
-		newAutomationCommand("sync", "已弃用：请改用 assistant action label-sync",
-			"请改用 assistant action label-sync", labelSyncer, &options, stdout, stderr),
-		newAutomationCommand("automerge", "已弃用：请改用 assistant action automerge",
-			"请改用 assistant action automerge", merger, &options, stdout, stderr),
-	)
-	command.AddCommand(newDispatcherCommand(&options.Repository, &options.ConfigPath))
-	command.AddCommand(newLoginCommand(&options.ConfigPath))
-	command.AddCommand(newInitCommand(&options.ConfigPath))
-	command.AddCommand(newSetupCommand(&options.ConfigPath))
-	command.AddCommand(newInstallCommand(), newUninstallCommand(), newMCPCommand(&options.ConfigPath), newDoctorCommand(&options.ConfigPath))
-	command.AddCommand(newValidateCommand(&options.ConfigPath))
-	command.AddCommand(newConfigCommand(&options.ConfigPath))
-	return command
-}
-
-// newAutomationCommand 构造执行仓库自动化动作的叶子命令：--repo / --config /
-// --verbose 等来自 root 的持久旗标，动作实现由 action 决定。deprecated 非空时
-// 兼作旧入口的兼容层——cobra 会把带 Deprecated 的命令从帮助列表里隐藏，只在
-// 实际使用到它时打印弃用提示。
-func newAutomationCommand(
-	use, short, deprecated string,
-	action managerRunner,
-	options *commandOptions,
-	stdout, stderr io.Writer,
-) *cobra.Command {
-	return &cobra.Command{
-		Use:        use,
-		Short:      short,
-		Args:       cobra.NoArgs,
-		Deprecated: deprecated,
-		RunE: func(command *cobra.Command, _ []string) error {
-			if err := options.validate(); err != nil {
-				return err
+	root.AddCommand(action)
+	mcp := &cobra.Command{Use: "mcp", Short: "提供 stdio AI 会话工具", Args: cobra.NoArgs}
+	var host, token, dir string
+	gitea := &cobra.Command{Use: "gitea", Short: "检测站点与个人令牌后启动官方 gitea-mcp", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		return mcps.RunGitea(cmd.Context(), mcps.GiteaOptions{Dir: dir, Host: host, Token: token, Stdin: cmd.InOrStdin(), Stdout: stdout, Stderr: stderr, Log: func(f string, a ...any) {
+			if verbose || debug {
+				log(f, a...)
 			}
-			return action(command.Context(), stdout, stderr, *options)
-		},
-	}
-}
-
-func (options commandOptions) validate() error {
-	if options.Repository != "" {
-		if _, err := parseRepository(options.Repository); err != nil {
+		}})
+	}}
+	gitea.Flags().StringVar(&host, "host", "", "显式指定站点")
+	gitea.Flags().StringVar(&token, "token", "", "显式指定令牌")
+	gitea.Flags().StringVar(&dir, "dir", ".", "探测 Git remote 的目录")
+	mcp.AddCommand(gitea)
+	sessions := &cobra.Command{Use: "sessions", Short: "只读查询 run 登记的会话元数据", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		path := configPath
+		if path == "" {
+			path = "config.yaml"
+		}
+		return run.ServeSessions(cmd.Context(), path, cmd.InOrStdin(), stdout, version)
+	}}
+	sessions.Flags().StringVar(&configPath, "config", "", "运行配置文件（缺省 config.yaml）")
+	mcp.AddCommand(sessions)
+	root.AddCommand(mcp)
+	var dryRun bool
+	running := &cobra.Command{Use: "run", Short: "按 config.yaml 运行评审、分诊和消息 bot", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		cfg, err := run.Load(configPath)
+		if err != nil {
 			return err
 		}
-	}
-	return nil
+		cfg.Runtime.Debug = debug
+		return run.Start(cmd.Context(), cfg, dryRun, verbose || debug, log)
+	}}
+	running.Flags().StringVar(&configPath, "config", "", "运行配置文件（缺省当前目录 config.yaml）")
+	running.Flags().BoolVar(&dryRun, "dry-run", false, "只读取并列出待办，单次退出")
+	root.AddCommand(running)
+	return root
 }
 
-func runLabelSync(ctx context.Context, _, stderr io.Writer, options commandOptions) error {
-	_, file, err := resolveInstanceFile(options)
+func runAction(ctx context.Context, kind string, dryRun, verbose bool, log func(string, ...any)) (resultErr error) {
+	defer func() { resultErr = credentials.RedactError(resultErr, os.Getenv("GITEA_ACCESS_TOKEN")) }()
+	host, token, repo := os.Getenv("GITEA_HOST"), os.Getenv("GITEA_ACCESS_TOKEN"), os.Getenv("GITEA_REPOSITORY")
+	if host == "" || token == "" || repo == "" {
+		return fmt.Errorf("action 必须设置 GITEA_HOST、GITEA_ACCESS_TOKEN、GITEA_REPOSITORY（owner/name）")
+	}
+	if err := credentials.ValidateHost(host); err != nil {
+		return err
+	}
+	repository, err := parseRepository(repo)
 	if err != nil {
 		return err
 	}
-	if file == nil {
-		return withManager(ctx, stderr, options, func(ctx context.Context, manager *status.Manager) error {
-			return manager.Sync(ctx)
-		})
-	}
-	return runManagerAction(ctx, stderr, options, file, func(ctx context.Context, manager *status.Manager) error {
-		return manager.Sync(ctx)
-	})
-}
-
-func runAutoMerge(ctx context.Context, _, stderr io.Writer, options commandOptions) error {
-	_, file, err := resolveInstanceFile(options)
-	if err != nil {
-		return err
-	}
-	if file == nil {
-		return withManager(ctx, stderr, options, func(ctx context.Context, manager *status.Manager) error {
-			return manager.AutoMerge(ctx)
-		})
-	}
-	return runManagerAction(ctx, stderr, options, file, func(ctx context.Context, manager *status.Manager) error {
-		return manager.AutoMerge(ctx)
-	})
-}
-
-// withManager 完成两个子命令共用的准备：载入 .env 与环境变量、建立客户端、
-// 认证预检（令牌被拒或地址错误时立即以退出码 78 结束，不重试）、构造 Manager。
-func withManager(
-	ctx context.Context,
-	stderr io.Writer,
-	options commandOptions,
-	run func(context.Context, *status.Manager) error,
-) error {
-	verbosef := func(format string, arguments ...any) {
-		if options.Verbose {
-			fmt.Fprintf(stderr, format+"\n", arguments...)
-		}
-	}
-
-	workingDirectory, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("获取当前目录: %w", err)
-	}
-	dotEnvPath, err := config.LoadDotEnv(workingDirectory)
-	if err != nil {
-		return err
-	}
-	if dotEnvPath == "" {
-		verbosef("未找到 .env，使用进程环境变量")
-	} else {
-		verbosef("已载入配置: %s", dotEnvPath)
-	}
-
-	configuration, err := config.Load(os.Getenv)
-	if err != nil {
-		return err
-	}
-	verbosef("连接 Gitea: %s", configuration.Host)
-
-	client, err := status.NewClient(configuration.Host, configuration.AccessToken)
+	client, err := status.NewClient(host, token)
 	if err != nil {
 		return err
 	}
 	if err := client.VerifyAuthentication(ctx); err != nil {
 		return err
 	}
-	verbosef("认证通过")
-	// 分支保护端点要求 repo admin（Actions 内置令牌无法授予）；配置了独立
-	// 令牌时仅这一处读取改用它，其余调用仍用基础令牌。
-	if configuration.BranchProtectionToken != "" {
-		if err := client.UseBranchProtectionToken(configuration.BranchProtectionToken); err != nil {
-			return err
-		}
-		verbosef("分支保护读取使用 GITEA_BRANCH_PROTECTION_TOKEN 独立令牌")
+	var api status.API = client
+	if dryRun {
+		api = status.NewDryRunAPI(client, log)
 	}
-	// 状态评审（门禁驳回）配置了独立令牌时以状态评审者账号提交，使驳回成为
-	// official review；未配置时以基础令牌身份提交（不计数，仅时间线记录）。
-	if configuration.StateToken != "" {
-		if err := client.UseStateReviewerToken(configuration.StateToken); err != nil {
-			return err
-		}
-		verbosef("状态评审提交使用 GITEA_STATE_TOKEN 独立令牌")
+	options := []status.ManagerOption{status.WithRepository(repository), status.WithStateReviewer("merge")}
+	if verbose || dryRun {
+		options = append(options, status.WithProgress(log))
 	}
-	managerOptions := []status.ManagerOption{status.WithProgress(verbosef)}
-	// 身份是约定：内容评审者 ai（NewManager 默认），状态评审者/合并者 merge。
-	// env 模式没有账号配置，按约定补默认；GITEA_STATE_REVIEWER 仍可显式覆盖。
-	stateReviewer := firstNonEmpty(configuration.StateReviewer, "merge")
-	managerOptions = append(managerOptions, status.WithStateReviewer(stateReviewer))
-	verbosef("状态评审者: %s", stateReviewer)
-
-	// 优先使用 --repo 参数，其次使用环境变量 GITEA_REPOSITORY
-	repoToUse := options.Repository
-	if repoToUse == "" && configuration.Repository != "" {
-		repoToUse = configuration.Repository
-		verbosef("使用环境变量指定的仓库: %s", repoToUse)
+	manager := status.NewManager(api, options...)
+	if kind == "automerge" {
+		return manager.AutoMerge(ctx)
 	}
-
-	if repoToUse != "" {
-		repository, err := parseRepository(repoToUse)
-		if err != nil {
-			return err
-		}
-		managerOptions = append(managerOptions, status.WithRepository(repository))
-	}
-	return run(ctx, status.NewManager(client, managerOptions...))
+	return manager.Sync(ctx)
 }
 
 func parseRepository(raw string) (status.Repository, error) {
-	owner, name, ok := strings.Cut(raw, "/")
-	if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
-		return status.Repository{}, fmt.Errorf("--repo 必须使用 owner/name 格式")
-	}
-	return status.Repository{Owner: owner, Name: name}, nil
+	owner, name, err := parseRepo(raw)
+	return status.Repository{Owner: owner, Name: name}, err
 }

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # 评审/daemon 共用镜像定义（多 target）：
-#   --target review   评审会话镜像：dispatcher 以 `docker run <image> claude ...`
+#   --target review   评审会话镜像：外部工具可用 `docker run <image> claude ...`
 #                     在其中跑 headless 评审（见 `assistant run --docker-image`）。
 #                     容器内外路径一致（worktree 与 .mcp.json 按相同绝对路径挂载），
 #                     因此不需要 ENTRYPOINT。
@@ -94,7 +94,7 @@ CMD ["bash"]
 # 评审会话镜像（会话容器形态）
 FROM review-env AS review
 
-# daemon 镜像：先构建 assistant / assistantd 二进制，再叠加到评审环境
+# daemon 镜像：先构建 assistant 二进制，再叠加到评审环境
 FROM golang:1.27 AS assistant-build
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -103,13 +103,9 @@ COPY . .
 ARG VERSION=dev
 RUN CGO_ENABLED=0 go build -trimpath \
       -ldflags="-s -w -X github.com/Cosmic-Developers-Union/assistant/internal/cli.version=${VERSION}" \
-      -o /assistant ./cmd/assistant \
- && CGO_ENABLED=0 go build -trimpath \
-      -ldflags="-s -w -X github.com/Cosmic-Developers-Union/assistant/internal/cli.version=${VERSION}" \
-      -o /assistantd ./cmd/assistantd
+      -o /assistant ./cmd/assistant
 
 FROM review-env AS daemon
 COPY --from=assistant-build /assistant /usr/local/bin/assistant
-COPY --from=assistant-build /assistantd /usr/local/bin/assistantd
 # 配置/克隆/日志都在挂载的用户目录下；worktree 在 /tmp（compose 用 tmpfs 提供）
-ENTRYPOINT ["/usr/local/bin/assistantd"]
+ENTRYPOINT ["/usr/local/bin/assistant", "run"]

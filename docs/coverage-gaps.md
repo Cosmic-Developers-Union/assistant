@@ -1,94 +1,27 @@
-# 覆盖率实测与不可达边界（如实报告）
+# 当前覆盖率与测试边界
 
-本文件记录覆盖率门禁落地后，**仍然无法在单元测试里触达**的语句及其原因。
-按 `AGENTS.md` 的约定：覆盖率是必要条件而非充分条件，达不到数字时如实说明
-是哪些函数、什么原因，**不用无意义的测试堆数字**。
+架构重构后的逐包门禁为核心 ≥90%、适配器 ≥80%。`make cover` 同时要求测试全绿。
+最近一次验证：runtime 90.4%、status 91.3%、cli 93.6%、credentials 92.1%、
+claude 95.5%、integration 97.7%、integration/gitea 100%；QQ 88.3%、微信 84.4%、
+Telegram 92.2%、MCP 91.0%、skills 100%。后续修改以实际门禁输出为准。
 
-测量方式：`GOCACHE=/tmp/assistant-gocache GOTMPDIR=/tmp go test ./<pkg>/ -coverprofile=<file>`
-后 `go tool cover -func=<file>`。门禁入口 `make cover`（阈值表见 `scripts/coverage.sh`）。
+cmd/assistant 是只调用命令层后 os.Exit 的进程入口，单测不能直接调用退出语句。
+它登记在 scripts/coverage.sh 的 entry_points，而非伪装成资源包；构建后的二进制
+另做帮助与错误退出冒烟。业务行为和信号处理由 internal/cli 测试。
 
-## 一、需要故障注入缝才可达的写入路径
+尚未完全覆盖的系统边界包括：
 
-这些函数的结构是「建临时文件 → 写 → fsync → rename」，中间每一步失败都要
-清理并报错。触发它们需要让 `os.CreateTemp` / `*os.File.Write` / `Sync` /
-`Close` / `os.Rename` 失败——标准库不提供这类注入点，且**不允许为测试改产品
-代码**（会引入仅为测试存在的间接层，反而降低可读性）。
+- credentials.Save、runtime.atomicFile 的磁盘写入、Sync、Close 等系统失败。
+  已测试创建/替换失败与权限契约；不引入只为制造磁盘错误的生产抽象。
+- runtime 会话归档与 worktree 的实际磁盘/子进程突发故障。已测不可信路径、
+  非普通文件、缺失记录、远端失败、head 漂移及收尾顺序，不能穷举操作系统故障。
+- Claude 进程的真实模型/账号登录：进程协议用替身验证，JSON 流和启动器独立测试；
+  未用生产模型凭据执行真实评审。
+- QQ/微信/Telegram 的真实账号和外网服务：协议用本地服务器与伪造消息验证，
+  登录方式及真实平台权限需集成环境验收。
+- 生产 Gitea 的分支保护和原生排定：SDK 请求契约、状态判定、双批准、未知合并响应
+  和 dry-run 写拦截都有测试，真实站点验收必须使用独立仓库。
 
-| 包 | 函数 | 覆盖率 | 未覆盖的语句 |
-|---|---|---|---|
-| `internal/credentials` | `Save` | 69.2% | `temp.Chmod` / `temp.Write` / `temp.Sync` / `temp.Close` / `os.Rename` 的失败分支 |
-| `internal/instances` | `SaveBytes` | 64.3% | `CreateTemp` / `Write` / `Close` / `Rename` 的失败分支 |
-
-`os.CreateTemp` 无法被诱导返回 `IsDir` 句柄，`Write` 到已打开的普通文件在
-tempdir 里也不会失败。**已覆盖**的部分：空/非法内容被 `Validate` 拒绝、
-父路径是普通文件（`MkdirAll` 失败）时报错而不是静默丢内容、成功路径的 0600
-权限位与无 `.tmp` 残留。
-
-## 二、依赖构建期常量的守卫
-
-| 包 | 函数 | 覆盖率 | 原因 |
-|---|---|---|---|
-| `internal/agents` | `builtin` 的 panic 守卫 | ~96% | `//go:embed` 的 `builtin.json` 损坏、缺少 main 预设——只能在构建期破坏嵌入文件触发 |
-
-`internal/claudecfg.AssistantCommand` 曾列在此（~78%）：`os.Executable` 的错误分支
-需要故障注入。现已抽出可覆盖的包级 `AssistantExecutable` var，三个分支（取不到
-路径、空路径、相对路径）都有测试，覆盖率 92.3%。同理 `ClaudeVersion` /
-`SupportsBare` 的探测改经 `Prober` 接口，失败与缓存路径不再需要造真脚本。
-
-## 三、SDK / 标准库不会失败的返回
-
-| 包 | 函数 | 原因 |
-|---|---|---|
-| `internal/setup` | `NewAdmin` 95.7%、`NewRepoClient` 95.5% | `gitea.NewClient`（SDK v1.2.0）**永不返回 error**：只应用 setup 用到的三个 `ClientOption`，而 `SetToken`/`SetHTTPClient`/`SetUserAgent` 恒返回 nil（只有 `UseSSHCert`/`UseSSHPubkey` 可能失败，setup 不用） |
-| `internal/setup` | `RandomPassword` 75% | Go 1.24+ 的 `crypto/rand.Read` 不返回错误（失败即 panic），无法注入 |
-| `internal/setup` | `do` 89.3%、`userTokenRequest` 89.3% | `json.Marshal`（入参类型固定）/ `http.NewRequestWithContext`（host 已由 `validate` 保证可解析）/ `io.ReadAll`（httptest 下无法构造读取失败） |
-| `internal/status` | `getJSON` 的相关分支 | 同上；**已覆盖** 403→`PermissionError`、非 2xx 带响应体、JSON 解析失败带路径、`out` 为 nil 与空体不解析 |
-| `cmd/assistant` | `newDispatchClient` 的 `status.NewClient` 失败臂 | 与 `internal/setup` 同因：`gitea.NewClient` 只在 ClientOption 出错时返回 error，而这里只传 `SetHTTPClient`/`SetToken`/`SetUserAgent`/`SetGiteaVersion`（皆恒返回 nil）。实测该行 0 次命中——不是漏测，是无从触发 |
-
-## 四、需要真实进程 / 网络 / 计时器
-
-会话执行已统一在 `internal/claude`：`Runner` 接口是唯一需要注入的执行点，生产实现
-`execRunner` 是唯一启动子进程的地方。它的错误/超时/信号路径由
-`internal/claude/runner_test.go` 用 `sh` 驱动的**真实子进程**覆盖（那是它唯一该被真实
-驱动的地方）；dispatcher 与 daemon 只注入假 Runner（`stubRunner`），不再写假可执行
-脚本。
-
-| 包 | 函数 | 处理方式 |
-|---|---|---|
-| `internal/dispatcher` | `RunSession` 的真实 `claude` 调用 | 逻辑经包级 `SessionRunner`（可替换，读写有锁——RunLoop 并发起会话）测到；真实调用交给 `make test-e2e` |
-| `internal/daemon` | 真实 `claude` 调用 | 经 `ChatConfig.Claude` 注入假 Runner；此前是 `RunClaude` 旁路，会绕过真实 spawn 路径，已删除 |
-| `internal/setup` | `personal_token.go` 的 `CheckRedirect` | 仅服务端返回 3xx 时调用，需真实重定向链路 |
-
-## 五、`cmd/assistant` 的剩余缺口
-
-该包阈值 90%，实测 **90.0%**（3200 条语句，未覆盖 319）。下表是**尚未覆盖**的
-部分——目标是让每一块的形态都说得清，而不是把数字凑到线以上。
-
-| 文件 | 未覆盖语句 | 主要形态 |
-|---|---|---|
-| `cmd/assistant/daemon.go` | 105 | `runWeixinLogin`（交互式扫码登录）等 |
-| `cmd/assistant/dispatch.go` | 61 | 装配后回调里需要真实待办/失败注入的分支（状态库故障臂、PR worktree 的 fetch） |
-| `main.go` | 25 | `main()` 全体：signal 接线 + `ExecuteContext` + `os.Exit`，无返回路径 |
-| `config.go` | 16 | `readAPIKey` 的 pty 分支、备份/写盘失败臂 |
-| `login_identity.go` / `login.go` / `init.go` 等 | 各 12–15 | 注缝之外的 IO 失败臂、真 pty |
-| `internal/sessionstore` | ~18 | S3 网络层的少数分歧臂（`NoSuchKey` 的 GET 分支、对象存在但 `ReadAll` 失败、桶已存在时的 `EnsureBucket` 早退）；成功往返与 403/404 已由进程内假 S3 端点覆盖，真 MinIO 见 `test/e2e` |
-| `internal/sessionindex` | ~12 | `rows.Next` 迭代中途失败、注册完毕驱动后不可达的 `sql.Open` 错误臂（同 `internal/statestore`） |
-
-**注意措辞**：这些是「当前注入缝之外」的路径，不是「原则上不可达」。其中两类确有
-可达路径，只是各有代价：
-
-- `main.go` 的 25 条可用**子进程**方式驱动（`go test` 里 exec 自己编译出的二进制、
-  发信号、断言退出码），代价是引入一个真实子进程测试装置；
-- `daemon.go` / `dispatch.go` 的 166 条（占未覆盖的 52%）需要真实扫码、失败注入或
-  真实 Gitea 往返，只能走 `make test-e2e`。
-
-按 `AGENTS.md`：这类边界用可注入的缝把逻辑测到、真实调用交给 e2e，**不为凑数字写
-无意义的测试**。因此本包的缺口如实登记；是否需要为 `main.go` 那 25 条引入子进程
-装置，是取舍问题而非「漏测」。
-
-## 六、形式化规格约束的语义核
-
-按 `AGENTS.md`：`internal/dispatcher` 的循环守卫/去重与 `internal/status/verify.go`
-（对应 `formal/Dispatcher.lean` 的 `completeOk`）无论包整体百分比起伏都应接近
-100%。这两处的语义由形式化规格钉住，改动必须同步
-`spec/ReviewStateMachine.tla` 并让 `lean formal/Dispatcher.lean` 与 TLC 重新通过。
+真实 S3 边界已补充 `TestSessionS3RoundTrip`，在临时 MinIO 验证主记录与子代理
+上传及换本地根恢复。无测试环境变量时跳过，`make test-e2e-s3` 会启动环境执行。
+并发核心另跑 race 检查；形式化规格另跑 Lean/TLC，覆盖率不能代替这些验证。

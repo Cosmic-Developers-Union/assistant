@@ -11,7 +11,7 @@
 //   - 群聊事件：bot 需关闭隐私模式（BotFather /setprivacy）才能收到全部群消息，
 //     否则只有 @ 提与回复可见。
 //
-// 本包只做协议；通道适配（会话映射、准入、切块）在 internal/daemon。
+// 本包只做协议；通道适配（会话映射、准入、切块）由本包适配器与 internal/runtime 承担。
 package telegram
 
 import (

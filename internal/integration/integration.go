@@ -1,16 +1,5 @@
-// Package integration 是消息/任务集成的通用层：定义「一个集成」是什么、
-// 共享准入与切块等公共逻辑，并驱动对话型集成的运行循环。
-//
-// 职责边界——通用层**只提供共享件，不规定平台怎么跑**：
-//
-//   - 每个集成自带运行循环与调度方式。对话型（weixin/qq/telegram）的循环是
-//     「收消息 → 回复」，调度型（gitea）的循环是「检测待办 → 执行 → 清理」。
-//     两者形态不同，由集成自己实现，通用层不代劳。
-//   - 通用层提供：准入白名单算法、回复切块、退避重试、并发闸门，以及对话侧
-//     所需的窄接口 Conversations（由 daemon.Chat 实现）。
-//
-// 子包 internal/integration/<platform> 每个平台一个包，协议客户端与该平台的
-// 通道适配都在包内——一个包就是一个完整的集成。
+// Package integration 定义消息平台的协议边界、准入与切块逻辑，
+// RunChat 消费入站消息，runtime 通过 Conversations 提供会话执行。
 package integration
 
 import (
@@ -41,8 +30,7 @@ type Inbound interface {
 // Integration 是所有集成的共同面：名字、准入、切块上限。
 //
 // 它刻意很小——运行循环不在这一层。对话型集成实现 ChatIntegration（有
-// Receive），调度型集成实现 DispatchIntegration（有 Dispatch）；两者都由各自
-// 的循环驱动，见包注释。
+// Receive），由 RunChat 驱动。仓库待办由 runtime.Source 单独处理。
 type Integration interface {
 	// Name 是集成名，同时是会话映射层的 transport 键（weixin/qq/telegram）
 	Name() string
@@ -60,25 +48,7 @@ type ChatIntegration interface {
 	Receive(ctx context.Context) (Inbound, error)
 }
 
-// DispatchIntegration 是调度型集成：它不是「收发消息」，而是「检测待办 →
-// 执行 → 清理」，由 dispatcher 常驻驱动，**不经通用层**。
-//
-// 它存在是为了让「gitea 不走对话桥」这条约束由类型表达，而不是靠运行时的
-// 类型判断加一句 error。
-type DispatchIntegration interface {
-	Integration
-	// Dispatch 由调度引擎常驻调用；实现负责完整的检测-执行-清理循环。
-	Dispatch(ctx context.Context, deps DispatchDeps) error
-}
-
-// DispatchDeps 是调度型集成运行时所需的宿主能力。具体内容由 dispatcher 决定，
-// 这里只留空接口占位，避免通用层反向依赖调度引擎。
-type DispatchDeps any
-
-// Conversations 是对话型集成所需的会话面（由 daemon.Chat 实现）。
-//
-// 放在本包而非 daemon，是为了让 internal/integration/<platform> 只依赖通用层
-// 而**不依赖 internal/daemon**——否则各平台包仍被 daemon 拖着，抽包不成立。
+// Conversations 是消息适配器依赖的会话接口，由 runtime 提供实现。
 type Conversations interface {
 	// ConversationFor 把「通道 + 通道内用户」映射成会话 id
 	ConversationFor(transport, user string) (string, error)
@@ -90,7 +60,7 @@ type Conversations interface {
 	WorkspaceDir(conversationID string) (string, error)
 }
 
-// Turn 是一轮对话请求（与 daemon 的同名类型保持一致）。
+// Turn 是一轮对话请求。
 type Turn struct {
 	// Transport 是消息来源通道（写入会话元数据）
 	Transport string

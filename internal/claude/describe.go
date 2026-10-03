@@ -9,8 +9,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/Cosmic-Developers-Union/assistant/internal/claudecfg"
 )
 
 // 展开形态（ProgressVerbose）的展示上限：日志一条一行，长结构按缩进 JSON 展开
@@ -152,7 +150,7 @@ func ToolUseLines(name string, raw json.RawMessage) string {
 		lines = append(lines, "  "+truncateRunes(singleLine(string(raw)), toolLineWidth))
 		return strings.Join(lines, "\n")
 	}
-	for _, line := range claudecfg.JSONLines(value, toolInputLineLimit) {
+	for _, line := range jsonLines(value, toolInputLineLimit) {
 		lines = append(lines, "  "+line)
 	}
 	return strings.Join(lines, "\n")
@@ -250,7 +248,7 @@ func itoa(value int) string { return strconv.Itoa(value) }
 
 // textLines 把文本按行限与宽度折成若干展示行。
 func textLines(text string, lineLimit, width int) []string {
-	return claudecfg.TextLines(text, lineLimit, width)
+	return formatTextLines(text, lineLimit, width)
 }
 
 // sortedStrings 就地排序（小切片冒泡即可，避免为几项引入 sort 的开销语义）。

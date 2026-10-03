@@ -13,8 +13,7 @@ type EnvVar struct {
 // 三处来源合并到这一个结构体（此前散在两个包各自的函数里）：
 //   - ConfigDir / ProjectDirName：CLI 自己的会话配置根与文本记录目录名。这两项
 //     **必须**走进程环境，settings.env 对它们无效；
-//   - Credentials：assistant 自己的身份与配置来源（Gitea 令牌、config.json
-//     路径），让会话内的 MCP 以与调度器相同的身份工作；
+//   - Credentials：assistant 自己的身份与配置来源（显式平台令牌等），让会话内的 MCP 以与调度器相同的身份工作；
 //   - Extra：调用方的其它注入。
 type EnvConfig struct {
 	ConfigDir      string

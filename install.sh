@@ -4,7 +4,7 @@
 #   macOS（测试形态）：二进制 + 空配置骨架。以当前用户安装、直接前台跑
 #     `assistant run`——不建服务用户/systemd（个人测试机无需隔离）；配置落
 #     ~/Library/Application Support/Cosmic-Developers-Union/assistant（Go 的
-#     显式模式：配置写在运行命令时所在的目录（./config.json）。
+#     显式模式：配置写在运行命令时所在的目录（./config.yaml）。
 #
 #   Linux（服务形态）：独立系统服务用户（nologin、无密码，无需登陆）+
 #     XDG 标准目录 + systemd 单元 + 空配置骨架，`assistant run` 由 systemd
@@ -140,13 +140,35 @@ resolve_binary() {
 
 BINDIR=$PREFIX/bin
 
-print_next_steps() { # 公共尾部：补全配置并跑 run 的说明 <bin> <work_dir>
-  echo "下一步（token 已备好时最快路径——环境变量，不用写文件）："
-  echo "  export GITEA_HOST=https://<gitea地址> GITEA_ACCESS_TOKEN=<token>"
-  echo "  $1 run                          # 前台跑，Ctrl+C 停止；--debug 看决策细节"
-  echo "  # AI 供应商 key：编辑 $2/config.json 的 providers；通道与运行时看 channels/runtimes"
-  echo "  # 没有 config.json 时自动按环境变量单实例运行"
-  echo "  # run 需要 claude CLI 在 PATH（macOS: npm i -g @anthropic-ai/claude-code 等）"
+write_config_example() {
+  cat <<'YAML'
+connects:
+  site: {type: gitea, url: https://gitea.example.com, token: "{{GITEA_REVIEW_TOKEN}}", repos: [acme/repo]}
+mcp:
+  site: {cmd: assistant, args: [mcp, gitea]}
+bots:
+  review:
+    kind: gitea-review
+    use: {gitea: site}
+    with: {identity: ai}
+    workspace: {type: worktree, repo: "{{event.repo}}", ref: "{{event.pr.ref}}"}
+    agent: {mcp: [site]}
+  triage:
+    kind: triage
+    use: {gitea: site}
+    workspace: {type: worktree, repo: "{{event.repo}}"}
+    agent: {mcp: [site]}
+session: {store: local}
+runtime: {root: data}
+YAML
+}
+
+print_next_steps() {
+  echo "下一步：编辑 $2/config.yaml 的站点、仓库与 bot。"
+  echo "  export GITEA_REVIEW_TOKEN='<评审令牌>' ANTHROPIC_API_KEY='<模型密钥>'"
+  echo "  $1 run --config $2/config.yaml --dry-run"
+  echo "  $1 run --config $2/config.yaml"
+  echo "  run 需要 Git 与 claude CLI 在 PATH；个人实例登录态不参与服务运行。"
 }
 
 # ============================================================
@@ -159,7 +181,7 @@ install_darwin() {
   binary=$(resolve_binary)
   step "二进制: $binary"
 
-  # 显式模式：配置写在你运行安装命令时所在的目录（./config.json）
+  # 显式模式：配置写在你运行安装命令时所在的目录（./config.yaml）
   local work_dir=$PWD
 
   # 安装二进制：目标目录可写直接装，否则单点 sudo（不整脚本提权，配置仍归当前用户）
@@ -174,21 +196,26 @@ install_darwin() {
   $sudo install -m 0755 "$binary" "$BINDIR/assistant"
 
   # 空配置骨架（当前用户，落在当前目录）
-  if [ -f "$work_dir/config.json" ]; then
-    step "配置已存在，跳过生成: $work_dir/config.json"
+  if [ -f "$work_dir/config.yaml" ]; then
+    step "配置已存在，跳过生成: $work_dir/config.yaml"
   else
-    step "生成空配置骨架（assistant config new，当前目录）"
+    step "生成 config.yaml 示例（当前用户）"
+    local example
+    example=$(mktemp)
+    write_config_example > "$example"
+    chmod 0644 "$example"
     if [ "$(id -u)" = 0 ] && [ -n "${SUDO_USER:-}" ]; then
-      sudo -u "$SUDO_USER" "$BINDIR/assistant" config new
+      sudo -u "$SUDO_USER" install -m 0600 "$example" "$work_dir/config.yaml"
     else
-      "$BINDIR/assistant" config new
+      install -m 0600 "$example" "$work_dir/config.yaml"
     fi
+    rm -f "$example"
   fi
 
   echo
   echo "安装完成（macOS 测试形态，当前用户运行）："
   echo "  二进制: $BINDIR/assistant"
-  echo "  配置:   $work_dir/config.json（空骨架；数据在 ./$work_dir/data）"
+  echo "  配置:   $work_dir/config.yaml（空骨架；数据在 ./$work_dir/data）"
   echo
   print_next_steps "$BINDIR/assistant" "$work_dir"
 }
@@ -215,7 +242,7 @@ install_linux() {
 
   local service_group=$SERVICE_USER
   [ -n "$SERVICE_HOME" ] || SERVICE_HOME=/var/lib/$SERVICE_USER
-  # 显式模式：工作目录即配置目录（config.json/daemon.json/data 全在这里），
+  # 显式模式：工作目录即配置目录（config.yaml/daemon.json/data 全在这里），
   # systemd 单元以它为 WorkingDirectory；credentials.json 走平台标准配置目录
   # （服务用户的 ~/.config/Cosmic-Developers-Union/assistant/）
   local work_dir=$SERVICE_HOME/work
@@ -260,11 +287,13 @@ install_linux() {
   }
 
   # ---------- 空配置骨架（服务用户身份，落在工作目录） ----------
-  if [ -f "$work_dir/config.json" ]; then
-    step "配置已存在，跳过生成: $work_dir/config.json"
+  if [ -f "$work_dir/config.yaml" ]; then
+    step "配置已存在，跳过生成: $work_dir/config.yaml"
   else
-    step "生成空配置骨架（assistant config new，以 $SERVICE_USER 身份）"
-    run_as_service_user "$BINDIR/assistant" config new --config "$work_dir/config.json"
+    step "生成 config.yaml 示例（服务用户）"
+    write_config_example > "$work_dir/config.yaml"
+    chmod 0600 "$work_dir/config.yaml"
+    chown "$SERVICE_USER:$service_group" "$work_dir/config.yaml"
   fi
 
   # ---------- systemd 单元 ----------
@@ -294,9 +323,10 @@ Wants=network-online.target
 Type=simple
 User=$SERVICE_USER
 Group=$service_group
-# 显式模式：配置与产物都在工作目录（./config.json 与 ./data）
+# 显式模式：配置与产物都在工作目录（./config.yaml 与 ./data）
 WorkingDirectory=$work_dir
 Environment=HOME=$SERVICE_HOME
+EnvironmentFile=-$work_dir/.env
 ExecStart=$BINDIR/assistant run
 Restart=on-failure
 RestartSec=5s
@@ -325,7 +355,7 @@ EOF
   echo "安装完成："
   echo "  二进制:   $BINDIR/assistant"
   echo "  服务用户: $SERVICE_USER（系统用户，$nologin，无密码，无需登陆）"
-  echo "  配置:     $work_dir/config.json（空骨架）"
+  echo "  配置:     $work_dir/config.yaml（空骨架）"
   echo "  工作目录: $work_dir（配置与 data/ 运行树都在这里）"
   if [ "$INSTALL_SYSTEMD" = yes ]; then
     echo "  systemd:  $unit_path"
@@ -333,9 +363,9 @@ EOF
   echo
   echo "配置补全（凭据与配置都在工作目录）："
   echo "  1. token 最快路径：sudo -u $SERVICE_USER -H env GITEA_HOST=https://<gitea地址> GITEA_ACCESS_TOKEN=<token> $BINDIR/assistant list   # 只读验证"
-  echo "  2. 长期配置：编辑 $work_dir/config.json（providers/channels/runtimes），"
-  echo "     或 sudo -u $SERVICE_USER -H $BINDIR/assistant login add <gitea地址> --user <管理员账号> 后 setup 建机器人账号"
-  echo "  3. 校验: sudo -u $SERVICE_USER -H $BINDIR/assistant validate；claude CLI 装到 PATH（/usr/local/bin）"
+  echo "  2. 长期配置：编辑 $work_dir/config.yaml（connects/mcp/bots），"
+  echo "     服务令牌和模型凭据写入 $work_dir/.env（0600），由 systemd 注入"
+  echo "  3. 先用注入了同样环境的 assistant run --config $work_dir/config.yaml --dry-run 检查待办；Git/claude CLI 装到 PATH"
   if [ "$INSTALL_SYSTEMD" = yes ]; then
     echo "  4. 启动: systemctl enable --now assistant；观测 journalctl -u assistant -f"
   else

@@ -1,198 +1,99 @@
 # AGENTS.md
 
-本文件约束在**本仓库**（assistant 自身）里工作的 AI agent。`CLAUDE.md` 只是
-`@AGENTS.md` 导入，不要单独维护。
+本文件约束在本仓库（assistant 自身）工作的 AI agent。CLAUDE.md 仅导入本文件。
+产品目标以 [goal.md](goal.md) 为准；本次架构是单一 `assistant` 二进制，
+不要重新引入 assistantd 或 providers/channels/runtimes 配置层。
 
-注意区分两类同名文件：本仓库根部的 `AGENTS.md` 是维护者手写的开发约定（本文件）；
-`assistant install` 写进**目标仓库**的 AGENTS.md 段落，内容源是仓库里的
-`content/`、`skills/`、`internal/repoinstall/templates/`——改生成物之前先改源文件。
+## 项目边界
 
-## 项目概览
+- `cmd/assistant` 是薄入口，信号与退出码统一走 `internal/cli.Execute`。
+- `internal/cli` 只翻译命令和装配参数，四个操作面：instance、mcp、action、run。
+- `internal/credentials` 是用户级平台实例库；按类型严格校验 credentials.json。
+- `internal/runtime` 是运行配置、事件源与 Workspace/Session/AgentRunner 流水线。
+- `internal/status` 是标签收敛、评审请求维护与机械合并门禁。
+- `internal/claude` 是外部 Claude CLI 的进程、参数与 stream-json 适配器。
+- `internal/integration/{gitea,qq,weixin,telegram}` 是平台协议适配；通用消息桥在 integration。
+- `internal/mcps` 检测开发者 Gitea 身份并启动官方 stdio MCP。
+- `skills/review/SKILL.md` 是内嵌评审协议的唯一提示词来源。
+- `content/agents.md` 保存仓库评审约定的内容源。
 
-assistant 是一组 Go 二进制，按「谁用」切分：
+主仓库是 GitHub Cosmic-Developers-Union/assistant（origin）；Gitea remote 用于
+备份与测试。与 Gitea 交互使用官方 Go SDK `gitea.dev/sdk`，复用 internal/status。
+不要手写新的 REST 客户端。
 
-- **`assistant`（dev 侧 CLI）**：交互命令（login / setup / init / install /
-  doctor / validate / config）+ 仓库机器人（`assistant action label-sync` /
-  `assistant action automerge` 在 Gitea Actions 里按事件与定时运行：标签收敛、
-  评审状态同步、机械合并）+ 会话工具面（`assistant mcp gitea`）；
-- **`assistantd`（常驻进程）**：评审调度引擎 + 对话服务端——检测待办 → 为每个
-  待办拉起 headless `claude` 会话 → 验证结论 → 清理；同一进程并行承载多个消息
-  通道（微信 / QQ / Telegram / Gitea），会话之间并发、同会话串行。旗标面与
-  `assistant run` 一致（过渡期 `assistant run` 保留）。
+## 语义约定
 
-依赖单向：assistantd 拉起的会话要执行 `assistant mcp gitea`，所以部署机上要有
-assistant（同目录 → `ASSISTANT_CLI` → PATH 解析）；反过来 assistant 不依赖
-assistantd。`claude` CLI 是外部运行时依赖（会话在容器或宿主机里跑），其余能力
-都在本仓库二进制内。
+- 内容评审者惯例 ai（别名 reviewer），会签/合并者惯例 merge；账号名是约定，
+  命令的授权以令牌权限为准。部署的合并白名单只含 merge，管理员也受分支保护。
+- 内容批准与状态会签缺一不可。内容批准必须是内容评审者最新未撤销结论，
+  明确指向当前 head；空提交号、旧 head、后续修改意见不能授权合并。
+- run 只消费平台 status/review PR 与 status/triage Issue；draft/WIP 不进入评审队列。
+  官方请求、按钮复审记录和评论提及的归一化属于 label-sync。
+- 完成看平台待办在下一轮消失，不解析模型输出判业务成功，不持久化本地 settled
+  标记压住重试。进程退出只进入观测记录。
+- 同一待办同时至多一个会话；每轮 barrier 后重新读平台；共享 Git 元数据串行。
+- Workspace 管目录准备/清理，Session 管稳定 id/记忆落点/恢复/固化，AgentRunner
+  管一次启动。新的工作区或存储实现不能把策略塞回主循环。
+- Claude JSONL 是记忆本体，不再复制一份内容数据库；observations 只存执行元数据。
+  取消与失败也固化已有记忆，远端恢复失败不得悄悄新开失忆会话。
+- PR 以 head 为记忆锚，Issue 以标题为锚。项目评审规则钉住可信基线，PR 自带
+  `.claude/` 必须先移除再从基线复制。
+- reviewer 只评内容、不改标签；标签由 action label-sync 维护。合并不看标签，
+  action automerge 重新读当前 head、分支状态、内容结论与必要检查。
+- 一轮至多实际 squash 合并一个 PR。合并请求结果未知时停止本轮，避免第二次请求。
+- action 只处理 GITEA_REPOSITORY，必须同时给 GITEA_HOST、GITEA_ACCESS_TOKEN，
+  不枚举其他仓库、不借用个人凭据；--dry-run 截断全部写操作。
 
-托管与发布：
+## 配置与数据
 
-- **主仓库在 GitHub**（`Cosmic-Developers-Union/assistant`，remote `origin`）；
-  GitHub Actions 负责 Release 与镜像发布（ghcr.io）。
-- **Gitea 侧（remote `gitea`）用于备份与测试**：仓库级 Actions、`make push` 的
-  generic package 发布演练都在这里跑。
-- 与 Gitea 交互统一用官方 Go SDK（源仓库 <https://gitea.com/gitea/go-sdk>，
-  import 路径 `gitea.dev/sdk`），不要手搓 REST 调用；优先复用
-  `internal/status`、`internal/setup` 等已有封装。
+- run 只读 --config，缺省当前目录 config.yaml；不查找 ASSISTANT_CONFIG、不自动
+  加载 .env、不读取个人 credentials.json。相对 root 锚定 YAML 所在目录。
+- credentials.json 使用平台标准用户配置目录；ASSISTANT_CREDENTIALS 可覆盖。
+  Linux 为 ~/.config/Cosmic-Developers-Union/assistant/credentials.json，与 cwd 无关。
+- connects/mcp/bots/session/runtime 分别声明连接、工具、工人、存储与运行参数。
+  未知字段、悬空引用、跨平台字段、重复事件消费者均在启动前报错。
+- 密钥用 {{VAR}} 引用，不回写、不进日志；密码只在 instance 登录时使用，不落盘。
+- 所有产物在运行 root 内：repos/workspaces/chat/sessions/observations/api.json。
+  config.yaml、.env 和 data 不入库；用户真实配置不改不删。
+- 旧版配置有意不自动迁移，格式错误应清楚报告。迁移说明在 docs/config.md。
 
-## 常用命令
+## 日志
 
-```bash
-make build-local   # 本地平台二进制 → ./assistant（开发用）
-make build         # Linux/amd64 静态二进制（generic package 发布用）
-make test          # go test ./...
-make test-e2e      # 起测试环境跑端到端（-tags e2e），结束自动清理
-make test-env-up   # 只起测试环境（Gitea + act_runner + MinIO）并写 test/e2e/.env
-make test-env-down # 清理测试环境（容器/网络 + 任务卷残留 + test/e2e/.env）
-make compose-up    # 重建容器部署（daemon + 状态 API + 对话通道，挂载宿主二进制）
-make install       # 构建并安装到 /usr/local/bin（PREFIX 可改）
-make review-image  # 评审会话镜像（images/review/Dockerfile，target review）
-```
+默认输出操作者需要的状态、结果、警告与错误（What happened）。
+--verbose 展示正在执行的步骤、目标、外部调用与进度（What is happening）。
+--debug 展示内部决策、参数与诊断上下文（Why is it happening）。
+stdout 是主体/协议输出，stderr 是日志/错误；stdio MCP 不能混入日志。
+日志不打印完整令牌；密钥展示仅保留前 6 位与后 4 位。
 
-- 提交前**只跑与本次变更相关的** fmt / lint / test / typecheck；全仓检查只在发布
-  流程或用户明确要求时跑。
-- 本机若 `~/.cache/go-build` 只读：`export GOCACHE=/tmp/assistant-gocache GOTMPDIR=/tmp`。
-- e2e 测试没有测试环境变量时自动跳过；需要真实 Gitea 时用 `make test-e2e`。
+## Go 与测试
 
-## 目录结构
+- 版本以 go.mod 为准；写 Go 前读 `.agents/skills/use-modern-go/SKILL.md`，
+  运行 Modern Go Guidelines CLI list，按需 explain。
+- 注释、日志、错误与 CLI 帮助用中文；导出标识符写清职责与原因的 Godoc。
+- 错误用 fmt.Errorf("语境: %w", err) 包装，用 errors.Is/As 识别链，不匹配错误字符串。
+- 单测与代码同目录，端到端在 test/e2e，使用 //go:build e2e。
+- 不引入无必要依赖；删死代码、旧引用和失效测试，保留有独立价值的契约测试。
+- 核心 runtime/status/credentials/cli/claude/integration ≥90%；平台/MCP/skills ≥80%。
+  覆盖率逐包算；公共 API、边界、失败/恢复与协议必须有测试，数字不是充分条件。
+- 真实 Claude、真实 Gitea、真实 S3 调用用 e2e；逻辑通过窄接口注入替身。
+  不可触达的系统故障如实登记 docs/coverage-gaps.md，不堆无意义测试。
+- 只跑变更相关检查；整体架构变更覆盖全部受影响包。make cover 是逐包门禁。
 
-- `cmd/assistant/`、`cmd/assistantd/`：两个二进制的薄入口（信号与退出码统一走
-  `internal/cli.Execute`）。
-- `internal/cli/`：共享命令层——cobra 命令树、旗标解析、配置与凭据装配，
-  一个主题一个文件；只做「命令行 → internal/* 调用」的翻译，不承载业务语义。
-- `internal/`：核心实现——`dispatcher`（调度引擎）、`daemon`（对话服务端）、
-  `status`（评审状态机）、`instances`/`config`（配置装载）、`credentials`
-  （凭据库）、`provider`（各家模型接入）、`claudecfg`（claude 会话配置）、
-  `repoinstall`（目标仓库脚手架）、`setup`、`weixin`/`qq`/`telegram`。
-- `schema/config.schema.json`：配置 JSON Schema，随二进制分发。
-- `content/` + `skills/`：install 写进目标仓库的托管内容源。
-- `images/review/Dockerfile`：评审 / daemon 镜像，多 target。
-- `test/e2e`（`//go:build e2e`）+ `docker-compose.test.yaml`（测试环境：Gitea /
-  act_runner / MinIO，起环境与凭据交给 `test/seed.sh`）。
-- `formal/Dispatcher.lean` + `spec/ReviewStateMachine.tla`：调度语义与评审状态机的
-  形式化规格。
-- `docs/`、`providers.md`、`README.md`：面向使用者的文档与供应商踩坑记录。
+改变调度或评审状态语义必须同步 formal/Dispatcher.lean、spec/ReviewStateMachine.tla，
+并运行 Lean 证明与 TLC 模型检查。规格应对应实际实现，不用删除性质绕过失败。
 
-## 硬约定（改代码前先理解）
+## 命令与提交
 
-这些是系统的语义约定，不是可调参数：
+make build-local 构建开发二进制；make build 构建 Linux/amd64 静态二进制；
+make test 跑单测；make test-e2e 起临时环境并跑端到端；make cover/cover-report 检查覆盖率；
+make compose-up 启动容器服务；make install 安装单二进制；make review-image 构建评审环境。
+只读 Go 缓存时使用 GOCACHE=/tmp/assistant-gocache GOTMPDIR=/tmp。
 
-- **身份固定**：内容评审 `ai`（别名 `reviewer`）、状态评审/合并 `merge`；合并白名单
-  只含 `merge`，管理员也走分支保护。
-- **双批准**：内容批准（`ai` 的 APPROVED）+ 状态会签（`merge` 对 head 盖章），缺一
-  不可。
-- **完成判定看 Gitea 原生 review**：调度引擎不解析会话输出来判成败——reviewer 名下
-  出现新 review、或 triage 标签被移除，才算完成。
-- **标签体系与 PR 流程**：写进目标仓库的 `AGENTS.md` / `content/agents.md` 是唯一
-  权威；reviewer 只评内容、不改标签，标签由 `assistant action label-sync` 收敛。
-- **评审协议随二进制走**：评审 / 分诊会话的协议与标签体系由内置 skill 注入（提示词
-  事实源是 `skills/review/SKILL.md`），不依赖目标仓库是否装过脚手架；项目自有约定放
-  `.assistant/review.md` 的非托管段落。
-- **会话工具面由 assistant 决定**：gitea MCP 由 `assistant mcp gitea` 提供，与仓库里
-  的 `.mcp.json` 无关；目标仓库自带的其它 MCP server 会被合并保留。
-- **配置只有两个文件**：`config.json`（用户手写）与 `credentials.json`（assistant
-  管理），没有第三处。
-- **上游变更优先 rebase**：作者 rebase 到 `origin/main` 后重新走评审 / 合并门禁。
+一个主题一个提交，type(scope): 中文描述，正文解释动机与取舍。
+提交/更新 PR 前 rebase origin/main，通读完整 diff、检查冲突标记。
+PR 先 draft/WIP；相关实现、文档与技能可在同一 PR。评审与合并遵循仓库自身
+ai 内容批准、merge 会签/合并流程；不擅自合并或部署。
 
-## 配置与数据落点
-
-- 配置定位按 `--config` → `ASSISTANT_CONFIG` → 当前目录 `./config.json`；用
-  `.env` 时只加载 config.json 同目录的那份，不向上搜索。
-- 凭据是**用户级**状态，落平台标准配置目录（XDG Base Directory Specification /
-  Windows Known Folders / macOS Library Directory 约定，Linux 为
-  `~/.config/Cosmic-Developers-Union/assistant/`），从任何目录启动都解析同一份登录
-  态，绝不锚定 cwd。
-- 运行产物跟随 runtime 的 `$root`（repos / state / review / chat / claude）；
-  `data/` 与 `config.json` 不入库（见 `.gitignore`）。
-- 密钥类字段（`*_TOKEN` / `*_KEY` / `*_SECRET` …）支持 `$VAR`、`${VAR}`、
-  `${VAR:-default}` 引用且不落盘；日志只显示前 6 位与后 4 位。
-- 完整说明见 `docs/config.md`，示例见 `config.example.json` 与 `.env.example`。
-
-## 日志与可观测性
-
-日志必须让操作者能够观察系统状态、关键事件和故障原因；`--verbose` 增加正常运行
-细节，`--debug` 进一步暴露内部诊断信息。更具体地说：
-
-- `默认`：只输出操作者真正需要知道的状态、结果、警告和错误；
-- `--verbose`：展示“系统正在做什么”，例如步骤、目标、进度、外部调用和状态变化；
-- `--debug`：展示“系统为什么这样做”，例如内部决策、参数、分支、重试、底层错误和
-  诊断上下文。
-
-```text
-default   = What happened?
-verbose   = What is happening?
-debug     = Why is it happening?
-```
-
-## 代码风格（Go）
-
-- Go 版本以 `go.mod` 为准（当前 1.27）；写 / 改 Go 代码前先读
-  `.agents/skills/use-modern-go/SKILL.md` 并按它运行 Modern Go Guidelines CLI
-  （先 `list`，必要时对相关 ID 跑 `explain`），以版本化建议为准。
-- 注释、日志、错误信息、CLI 帮助一律中文；导出标识符要有说明“为什么”的 Godoc
-  注释（新增 package 的包注释写清职责与边界）。
-- 错误用 `fmt.Errorf("语境: %w", err)` 包装；识别错误链用 `errors.As` / `errors.Is`，
-  不要用类型断言或字符串匹配（见 commit 479a1c7）。
-- 单元测试与被测代码同目录，命名 `*_test.go`；端到端测试放 `test/e2e`，用
-  `//go:build e2e` 标记。
-- 不引入新依赖除非确有必要；能复用标准库与既有封装就不另起一套。
-- 移除死代码、过时引用与失效测试；有特殊保留原因要写注释说明。
-
-## 测试与覆盖率
-
-覆盖率是必要条件，不是充分条件；数字达标不等于测试合格。
-
-- **一般模块 ≥80%，核心模块 ≥90%**，逐包达成（不是全仓平均）。
-- **核心 = 除纯适配器外的一切**：承载系统语义的包——`internal/status`（评审
-  状态机）、`internal/dispatcher`（调度引擎）、`internal/daemon`、`internal/instances`、
-  `internal/config`、`internal/credentials`、`internal/sessionstore`、`internal/sessionindex`、
-  `internal/statestore`、
-  `internal/setup`、`internal/provider`、`internal/claudecfg`、`internal/cli`。
-  一般 = I/O 适配器与胶水——`internal/weixin`、`internal/qq`、`internal/telegram`、
-  `internal/mcps`、`internal/repoinstall`、`internal/runcfg`、`internal/conversations`、
-  `internal/envref`、`internal/agents`、`internal/logcfg`、`skills`。
-- **公共 API、错误路径、边界条件、协议与接口契约必须有测试**，不受覆盖率数字
-  影响。这部分是硬要求：一个 100% 覆盖但不测错误路径的包仍不合格。
-- 门禁：`make cover`（逐包对照阈值，任一不达标即失败）；`make cover-report`
-  只打印差距不失败（摸底用）。阈值表在 `scripts/coverage.sh`，新增包必须在
-  其中登记（有逻辑走 `thresholds`，纯 `//go:embed` 资源走 `asset_only`）。
-- 形式化规格约束的语义核（`internal/dispatcher` 的循环守卫与去重、
-  `internal/status/verify.go`）无论包整体百分比起伏，都应接近 100%。
-- 需要真实进程 / 网络 / 计时器而无法在单测中覆盖的路径（如 `RunSession` 拉起
-  真实 `claude`），用可注入的缝把**逻辑**测到，真实调用交给 `make test-e2e`；
-  若某包因这类边界无法达标，如实说明是哪些函数与原因，**不要用无意义的测试
-  堆数字**。当前已知的不可达边界与原因汇总在 `docs/coverage-gaps.md`——改到
-  相关函数时先看那份清单，避免重复调查或误以为是漏测。
-
-## 形式化规格
-
-改变调度语义或评审状态机时，必须同步更新 `formal/Dispatcher.lean` /
-`spec/ReviewStateMachine.tla`，并让证明与模型检查重新通过
-（`lean formal/Dispatcher.lean`；TLA+ 模型检查：
-`java -cp <tla2tools.jar> tlc2.TLC ReviewStateMachine.tla`，在 `spec/` 下执行）。
-
-## 托管文件不要手改
-
-本仓库自身也被 `assistant install` 托管：`.gitea/workflows/assistant.yml`、
-`.claude/settings.json` 的白名单键、`.claude/` 与 `.agents/skills/` 下 install 安装的
-技能（如 `review`）都来自脚手架，带 `managed-by: assistant` 标记。要改内容就改源
-文件（`internal/repoinstall/templates/`、`content/`、`skills/`），再重新 `install`；
-目标仓库里的托管段落同理。`.assistant/review.md` 只有托管段落受管，自有内容写在
-段落之外。
-
-## 提交与 PR
-
-- 一个主题一个提交，提交信息 `type(scope): 中文描述`（type 取
-  `feat` / `fix` / `docs` / `refactor` / `test` / `chore`），正文写清动机与取舍。
-- 提交或更新 PR 前先 rebase 到 `origin/main`；解决冲突后通读完整 diff，确认没有残留
-  冲突标记（`git add -A` 会把标记一起暂存，dprint 还会把它们重排进正文，事后极难
-  发现）。
-- PR 中允许包含目标代码与相关脚手架（`AGENTS.md`、`CLAUDE.md`、`skills/` 等）的
-  同步变更，评审不应要求拆成单独 PR。
-- 相关的功能请求与 bug 修复尽量在同一个 PR 完成；PR 创建时标记 `WIP` / draft，
-  避免意外合并（draft 不进评审队列，也不参与 automerge）。
-- 提交前自查清单：变更是否单一主题；死代码是否已删；文档（`README.md`、
-  `docs/`、`providers.md`）是否同步、过时内容与不存在的引用是否清除；失效测试是否
-  已删；新行为是否有测试覆盖。
-- 评审与合并走仓库自身流程：内容批准由 `ai` 提交、状态会签与合并由 `merge` 执行，
-  合并只能由 `merge` 账号完成（分支保护对管理员同样生效）。
+`.agents/skills/` 与 `.claude/skills/` 的既有托管文件不要直接修改；修改评审协议
+用 skills/review/SKILL.md 源。本仓库没有自动脚手架安装命令，旧托管文件保留给
+开发工具使用。项目自有约定仍放 `.assistant/review.md` 的托管段落之外。

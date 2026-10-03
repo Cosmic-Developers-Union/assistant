@@ -3,10 +3,10 @@
 #
 # 阈值分两档（见 AGENTS.md「测试与覆盖率」）：
 #   - 核心（core）：90%——承载系统语义的包（评审状态机、调度引擎、配置装载、
-#     凭据、存储、setup、provider 等）。判定依据是「是否定义系统行为」而非
+#     凭据、会话存储等）。判定依据是「是否定义系统行为」而非
 #     「代码量」。
 #   - 一般（general）：80%——I/O 适配器与胶水（各消息通道、MCP 桥接、
-#     脚手架生成等）。
+#     外部协议等）。
 #
 # 覆盖率是必要条件而非充分条件：公共 API、错误路径、边界条件与协议/接口契约
 # 必须有测试，不受本脚本的数字影响（数字达标但契约无测试同样不合格）。
@@ -33,42 +33,29 @@ fi
 # 新增包时必须在此登记，否则脚本报错（防止漏管）。
 declare -A thresholds=(
 	[internal/status]=90
-	[internal/dispatcher]=90
-	[internal/daemon]=90
-	[internal/instances]=90
-	[internal/config]=90
 	[internal/credentials]=90
-	[internal/sessionstore]=90
-	[internal/sessionindex]=90
-	[internal/statestore]=90
-	[internal/setup]=90
-	[internal/provider]=90
-	[internal/claudecfg]=90
 	[internal/claude]=90
 	[internal/integration]=90
 	[internal/cli]=90
+	[internal/runtime]=90
 	[internal/integration/gitea]=90
 	[internal/integration/weixin]=80
 	[internal/integration/qq]=80
 	[internal/integration/telegram]=80
 	[internal/mcps]=80
-	[internal/repoinstall]=80
-	[internal/runcfg]=80
-	[internal/conversations]=80
-	[internal/envref]=80
-	[internal/agents]=80
-	[internal/logcfg]=80
 	[skills]=80
 )
 
 # asset-only：纯 //go:embed 资源持有者，没有可执行语句（覆盖率对它无意义）。
 # 登记在此而不是默默忽略——新增包若既不在阈值表也不在此，脚本会报错要求表态。
 declare -A asset_only=(
-	[content]=1
-	[schema]=1
 	# 测试替身包：只被 _test.go 引用，没有生产代码（覆盖率对它无意义）
 	[internal/integration/qq/qqtestsupport]=1
 )
+
+# 进程入口只负责 os.Exit，行为由 internal/cli 测试及二进制冒烟验证。
+# 单测不能直接调用 os.Exit；不把它伪装成资源包，也不降低业务包阈值。
+declare -A entry_points=([cmd/assistant]=1)
 
 module="$(go list -m)"
 
@@ -111,7 +98,7 @@ package_coverage() {
 failed=0
 while IFS=$'\t' read -r pkg pct; do
 	suffix="${pkg#"$module"/}"
-	if [[ -n "${asset_only[$suffix]:-}" ]]; then
+	if [[ -n "${asset_only[$suffix]:-}" || -n "${entry_points[$suffix]:-}" ]]; then
 		continue
 	fi
 	threshold="${thresholds[$suffix]:-}"

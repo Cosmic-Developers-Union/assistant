@@ -1,0 +1,32 @@
+connects:
+  gitea:
+    type: gitea
+    url: https://gitea.example.com
+    token: "{{GITEA_REVIEW_TOKEN}}"
+    repos: [acme/repo]
+mcp:
+  gitea:
+    cmd: assistant
+    args: [mcp, gitea]
+    env: {}
+bots:
+  reviewer:
+    kind: gitea-review
+    use: {gitea: gitea}
+    with: {identity: ai, prompt: ""}
+    workspace: {type: worktree, repo: "{{event.repo}}", ref: "{{event.pr.ref}}"}
+    agent: {system: "", mcp: [gitea], model: ""}
+  triage:
+    kind: triage
+    use: {gitea: gitea}
+    with: {identity: ai, prompt: ""}
+    workspace: {type: worktree, repo: "{{event.repo}}"}
+    agent: {system: "", mcp: [gitea], model: ""}
+session:
+  store: local
+runtime:
+  root: data
+  interval: 30s
+  timeout: 30m
+  concurrency: 8
+  api-listen: 127.0.0.1:8770

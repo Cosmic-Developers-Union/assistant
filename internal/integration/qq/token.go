@@ -40,7 +40,7 @@ func (e *FatalError) Error() string {
 	if e.Body != "" {
 		builder.WriteString("：" + e.Body)
 	}
-	builder.WriteString("。核对 q.qq.com 的 AppID/AppSecret；若 config.json 里写的是 $VAR 引用，检查变量已在 config.json 同目录的 .env 或进程环境中定义")
+	builder.WriteString("。核对 q.qq.com 的 AppID/AppSecret；若 config.yaml 使用 {{VAR}} 引用，检查进程环境已注入该变量（.env 不自动加载）")
 	return builder.String()
 }
 

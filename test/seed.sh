@@ -72,7 +72,7 @@ minio)
   fi
   mkdir -p test/e2e
   minio_env_key_values >test/e2e/.env
-  # 桶由 assistant 归档启动时自建（EnsureBucket），这里不预建，顺带验证该路径
+  # 桶由 e2e 用例创建并删除，运行时不改变远端桶配置
   echo "==> 就绪：http://$MINIO_ENDPOINT（桶 $MINIO_BUCKET 由测试自建）"
   ;;
 

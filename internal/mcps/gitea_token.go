@@ -39,12 +39,9 @@ func resolveGiteaToken(host string, getenv func(string) string) (string, string,
 	if err != nil {
 		return "", "", err
 	}
-	credential, ok, err := store.CredentialForIdentity(host, credentials.PurposeMCP)
+	token, err := store.GiteaToken(host)
 	if err != nil {
 		return "", "", err
 	}
-	if !ok {
-		return "", "", nil
-	}
-	return credential.Token, "assistant login add (" + credentialPath + "，@" + credential.User + ")", nil
+	return token, "assistant instance add gitea (" + credentialPath + ")", nil
 }

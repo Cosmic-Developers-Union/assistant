@@ -1,139 +1,18 @@
-# 正式部署：assistant daemon（调度 + 只读状态 API + 微信对话桥）常驻容器。
-#
-# - assistant 二进制由**宿主挂载**：`make build` 产出的静态 ./assistant 以只读方式
-#   覆盖 /usr/local/bin/assistant，容器跑的就是宿主这一份——升级只需重新构建再重建
-#   容器，不必重新构建镜像；镜像里不再内置副本，挂载缺失即启动失败（不会静默跑旧版）；
-# - 镜像只提供评审环境（claude / go / bun / uv / node 等），从 images/review/Dockerfile
-#   的 review target 构建（与评审会话镜像共用 review-env 层，不拉 registry）；
-#   需要自带二进制的独立镜像时用 `make daemon-image`（daemon target）；
-# - 宿主机用户目录按需**细粒度挂载**（容器内外路径一致）：
-#   ~/.config/Cosmic-Developers-Union/assistant（config.json（**AI 凭据在这里**：
-#   providers/optimizations 的 api_key）/ credentials.json / daemon.json / chat 会话 /
-#   claude/（assistant 托管的会话配置根：文本记录与 claude 全局配置））、
-#   ~/.local/share/Cosmic-Developers-Union/assistant（受管克隆 repos/ 与状态 state/）；
-#   不挂 ~/.claude：会话的配置与凭据全部由 assistant 提供，与宿主上的 Claude 安装
-#   互不影响；
-# - /tmp 用 tmpfs（16G 上限）：评审 worktree 与会话临时目录全在 /tmp，
-#   落内存、退出即清；
-# - 状态 API 只发布在宿主 127.0.0.1:8770（`assistant mcp daemon` 走 daemon.json
-#   自举发现，本机工具直接可用）；
-# - 需要 `--docker-image` 把评审会话再放进容器时，打开 docker.sock 挂载
-#   （docker-out-of-docker；默认注释）。
-#
-# 用法：
-#   make compose-up        # 构建 ./assistant（linux/amd64 静态）→ 启动/重建容器（推荐）
-#   make build && docker compose up -d --force-recreate    # 等价手工流程
-#   make daemon-image      # 可选：构建内置二进制的独立 daemon 镜像（BASE_IMAGE=... 可换基座）
-#   docker compose logs -f        # 已带 --debug：能看到 claude 的实时消息与工具调用
-#   docker compose exec -it assistant assistant login add --type weixin   # 首次扫码（终端渲染二维码，-it 必需）
-#
-# 以宿主用户身份运行：写回挂载目录的文件属主不变；UID/GID 与 HOME 由 compose
-# 插值，缺省 1000:1000，请在 .env 或 shell 环境里按需覆盖（export ASSISTANT_UID=...）。
+# make compose-up：运行宿主构建的单一二进制。
 name: assistant
-
 services:
   assistant:
     build:
       context: .
-      # 只要评审环境：二进制走下面的宿主挂载，镜像不编译、不内置 assistant
       dockerfile: images/review/Dockerfile
       target: review
-    image: ${DAEMON_IMAGE:-ghcr.io/cosmic-developers-union/assistant-daemon:latest}
-    # 入口显式指向挂载进来的宿主二进制（review 镜像本身没有 ENTRYPOINT）
-    entrypoint: ["/usr/local/bin/assistant"]
-    restart: unless-stopped
+    entrypoint: [/usr/local/bin/assistant]
+    command: [run, --config, /work/config.yaml, --verbose]
+    working_dir: /work
     user: "${ASSISTANT_UID:-1000}:${ASSISTANT_GID:-1000}"
-    environment:
-      HOME: ${HOME}
-      TZ: ${TZ:-Asia/Shanghai}
-      # 工具链缓存改到挂载的 HOME 下（镜像内默认在 /root，非 root 不可写）。
-      # GOPATH 必须落在**已挂载**的路径：gitea MCP 由 `go run <module>` 拉起，
-      # 首次要写模块缓存——GOPATH 指向未挂载的 $HOME/go 时（$HOME 根归 root）
-      # 直接 mkdir permission denied，会话里 MCP 全部起不来
-      GOCACHE: ${HOME}/.cache/go-build
-      GOMODCACHE: ${HOME}/.cache/go/pkg/mod
-      GOPATH: ${HOME}/.cache/go
-      BUN_INSTALL_CACHE_DIR: ${HOME}/.cache/bun
-      npm_config_cache: ${HOME}/.cache/npm
-      PIP_CACHE_DIR: ${HOME}/.cache/pip
-      UV_CACHE_DIR: ${HOME}/.cache/uv
-      # uv/uvx 的工具与解释器目录：容器里 $HOME 只挂了部分子目录，默认的
-      # ~/.local/share/uv 不可写（uvx 直接 EACCES，MCP 起不来且只表现为
-      # init 事件里的 "MCP 服务 X=failed"），必须指到挂载目录内
-      UV_TOOL_DIR: ${HOME}/.local/share/Cosmic-Developers-Union/assistant/uv/tools
-      UV_TOOL_BIN_DIR: ${HOME}/.local/share/Cosmic-Developers-Union/assistant/uv/bin
-      UV_PYTHON_INSTALL_DIR: ${HOME}/.cache/uv/python
-      CARGO_HOME: ${HOME}/.cargo
-      RUSTUP_HOME: ${HOME}/.rustup
-      PATH: /usr/local/go/bin:${HOME}/go/bin:${HOME}/.bun/bin:/usr/local/bin:/usr/bin:/bin
-      # AI 凭据走 assistant 配置（config.json 的 providers/optimizations）或
-      # run.yaml 的 provider.token：env_file 注入 .env 全部变量（MINIMAX_TOKEN
-      # 等），run.yaml 的 $MINIMAX_TOKEN 引用由此获得真实值；.env 不存在时注释
-      # env_file 即可（会话不读 ~/.claude 登录态）
-      # ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      # ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:-}
-    # compose 原生 env_file：.env（与 compose 文件同目录）里的键值整体注入容器
-    # 环境（不覆盖 environment 段的显式键）。run.yaml 的 provider.token 用
-    # $VAR 引用这些变量，令牌不落 run.yaml。
-    env_file:
-      - path: .env
-        required: false
-    # 容器内 DNS：宿主 /etc/resolv.conf 指向 127.0.0.53（systemd-resolved stub），
-    # 该地址在 bridge 网络的容器内不可达（docker 不代理 lo 上的 stub），显式
-    # 指向宿主真实上游（NetworkManager 报告的 DNS），否则 gitea 域名解析失败
-    dns:
-      - 192.168.49.6
-      - 192.168.49.1
-      - 192.168.1.1
+    env_file: .env
     volumes:
-      # 宿主最新二进制（make build 产物）：只读覆盖镜像同名路径，升级 = 重新构建
-      # + 重建容器（文件必须已存在，否则 docker 会把它建成目录；ASSISTANT_BINARY 可换路径）
-      - ${ASSISTANT_BINARY:-./assistant}:/usr/local/bin/assistant:ro
-      # assistant 配置与会话数据：config.json（AI 凭据）/ credentials.json（login
-      # 派生的用途令牌）/ daemon.json / chat 会话 / claude（assistant 托管的会话
-      # 配置根：文本记录与 claude 全局配置都在这里，**不挂 ~/.claude**）
-      - ${HOME}/.config/Cosmic-Developers-Union/assistant:${HOME}/.config/Cosmic-Developers-Union/assistant
-      # 受管克隆与状态：repos/（基线检出）+ state/（日志、单飞锁）
-      - ${HOME}/.local/share/Cosmic-Developers-Union/assistant:${HOME}/.local/share/Cosmic-Developers-Union/assistant
-      # SQLite 共享状态库（run.yaml 的 state-dir，XDG_STATE_HOME）：WAL 内省
-      # 与跨进程互斥都落这里；目录须先在宿主存在（容器内不可写 $HOME 根）
-      - ${XDG_STATE_HOME:-${HOME}/.local/state}/Cosmic-Developers-Union/assistant:${XDG_STATE_HOME:-${HOME}/.local/state}/Cosmic-Developers-Union/assistant
-      # 工具链与 MCP 缓存（go/npm/uv/pip/bun）：npx/uvx 首次拉取供应商 MCP
-      # 需要可写 HOME 缓存（非 root 且镜像里无 /home/<user>）
-      - ${HOME}/.cache:${HOME}/.cache
-      # 本地 git 提交身份：评审会话需要本地 commit 时才挂（文件需先存在，
-      # 否则 docker 会把它建成目录）
-      # - ${HOME}/.gitconfig:${HOME}/.gitconfig:ro
-      # docker-out-of-docker：评审会话用 --docker-image 时需要（宿主 docker.sock）
-      # - /var/run/docker.sock:/var/run/docker.sock
-      # 宿主上的 Gitea（localhost）可加：
-      # extra_hosts:
-      #   - "host.docker.internal:host-gateway"
-    ports:
-      - "127.0.0.1:8770:8770"
-    tmpfs:
-      # 评审 worktree 全在 /tmp：内存盘，上限 16G（受宿主可用内存约束，可调）
-      - /tmp:exec,mode=1777,size=16g
-    # --debug：详细日志（会话命令行、claude 原始 stream 事件、对话消息与回复、
-    # 凭据自检详情）——想安静时去掉该参数即可
-    command: ["run", "--api-listen", "0.0.0.0:8770", "--debug"]
-
-  # 会话记录归档用的本地 MinIO（可选）：启用 config.json 的 sessions.storage 时
-  # 起它做对象存储。默认账号 minioadmin/minioadmin，桶 assistant-sessions 由
-  # assistant 启动时自建；控制台 http://127.0.0.1:9001。
-  # 注意：MinIO 官方已停发预编译镜像（Docker Hub 的 minio/minio 已不可用），
-  # 缺省用社区维护的 pgsty/minio；要换别的发行版用 MINIO_IMAGE 变量覆盖。
-  # 与测试环境（docker-compose.test.yaml）里的 minio 服务保持一致，同样按摘要固定。
-  # minio:
-  #   image: ${MINIO_IMAGE:-pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372}
-  #   command: server /data --console-address ":9001"
-  #   restart: unless-stopped
-  #   environment:
-  #     MINIO_ROOT_USER: minioadmin
-  #     MINIO_ROOT_PASSWORD: minioadmin
-  #   volumes:
-  #     - minio-data:/data
-  #   ports:
-  #     - "127.0.0.1:9000:9000"
-  #     - "127.0.0.1:9001:9001"
-  # 取消上面注释时，还要在文末的顶层 volumes: 下加 minio-data:（若还没有）。
+      - ./assistant:/usr/local/bin/assistant:ro
+      - ./config.yaml:/work/config.yaml:ro
+      - ./data:/work/data
+    restart: unless-stopped
