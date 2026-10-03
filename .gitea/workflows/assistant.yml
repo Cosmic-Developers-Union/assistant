@@ -25,22 +25,16 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/cosmic-developers-union/assistant:latest
     steps:
-      - run: assistant action label-sync --verbose
-        env:
-          GITEA_HOST: ${{ github.server_url }}
-          GITEA_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITEA_REPOSITORY: ${{ github.repository }}
+      - uses: https://github.com/Cosmic-Developers-Union/assistant@879eebfd28259ec128686478fdd3ab05de87a445
+        with:
+          command: label-sync
+          token: ${{ secrets.GITHUB_TOKEN }}
   automerge:
     needs: sync
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/cosmic-developers-union/assistant:latest
     steps:
-      - run: assistant action automerge --verbose
-        env:
-          GITEA_HOST: ${{ github.server_url }}
-          GITEA_ACCESS_TOKEN: ${{ secrets.MERGE_TOKEN }}
-          GITEA_REPOSITORY: ${{ github.repository }}
+      - uses: https://github.com/Cosmic-Developers-Union/assistant@879eebfd28259ec128686478fdd3ab05de87a445
+        with:
+          command: automerge
+          token: ${{ secrets.MERGE_TOKEN }}
