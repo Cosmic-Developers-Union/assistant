@@ -474,6 +474,7 @@ assistant project uninstall mcp
 提交推送后生效；卸载只移除自己的 workflow，不关闭整个仓库 Actions、不删其他
 workflow 或共享 secret。MCP 安装无需凭据或运行配置，默认写通用启动命令；可选
 --instance 绑定账号，只写实例名不写密钥，保留其他 server 和用户字段。
+MCP server 名称固定为 gitea，assistant 只提供启动与凭据解析包装。
 无归属标记或同名用户配置拒绝覆盖/删除。
 
 ## 6. 独立轻量运行时与 TUI

@@ -73,12 +73,17 @@ func ConfigureMCP(dir, instance string, remove, dry bool) error {
 			return fmt.Errorf("mcpServers 必须是对象")
 		}
 	}
-	const key = "assistant-gitea"
+	const key = "gitea"
 	if old, exists := servers[key]; exists {
 		entry, ok := old.(map[string]any)
 		if !ok || !ownedMCP(entry) {
-			return fmt.Errorf("assistant-gitea 已被非托管 server 使用，拒绝覆盖或删除")
+			return fmt.Errorf("gitea 已被非托管 server 使用，拒绝覆盖或删除")
 		}
+	}
+	// 兼容之前误用的名称；只迁移本工具生成的配置，保留用户自有 server。
+	const legacyKey = "assistant-gitea"
+	if entry, ok := servers[legacyKey].(map[string]any); ok && ownedMCP(entry) {
+		delete(servers, legacyKey)
 	}
 	if remove {
 		delete(servers, key)

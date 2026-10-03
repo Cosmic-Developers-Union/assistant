@@ -79,13 +79,13 @@ func TestMCPPreservesOtherServersAndNeverStoresSecrets(t *testing.T) {
 		}
 	}
 	data, _ = os.ReadFile(path)
-	if strings.Contains(string(data), "assistant-gitea") || !strings.Contains(string(data), "existing-secret") {
+	if strings.Contains(string(data), `"gitea"`) || !strings.Contains(string(data), "existing-secret") {
 		t.Fatal(string(data))
 	}
 	if err := ConfigureMCP(t.TempDir(), "", true, false); err != nil {
 		t.Fatal(err)
 	}
-	for _, bad := range []string{"null", "bad", `{"mcpServers":[]}`, `{"mcpServers":{"assistant-gitea":{"command":"user-command"}}}`} {
+	for _, bad := range []string{"null", "bad", `{"mcpServers":[]}`, `{"mcpServers":{"gitea":{"command":"user-command"}}}`} {
 		if err := os.WriteFile(path, []byte(bad), 0644); err != nil {
 			t.Fatal(err)
 		}
@@ -115,7 +115,7 @@ func TestMCPDefaultAndBoundConfigurationsCanReplaceEachOther(t *testing.T) {
 		if err := json.Unmarshal(data, &config); err != nil {
 			t.Fatal(err)
 		}
-		args := config.Servers["assistant-gitea"].Args
+		args := config.Servers["gitea"].Args
 		if instance == "" {
 			if len(args) != 2 || args[0] != "mcp" || args[1] != "gitea" {
 				t.Fatal(args)
@@ -123,6 +123,63 @@ func TestMCPDefaultAndBoundConfigurationsCanReplaceEachOther(t *testing.T) {
 		} else if len(args) != 4 || args[2] != "--instance" || args[3] != instance {
 			t.Fatal(args)
 		}
+	}
+}
+
+func TestMCPNameMigrationAndCollision(t *testing.T) {
+	for _, scenario := range []struct {
+		name, original string
+		remove, dry    bool
+		wantError      bool
+		keepLegacy     bool
+	}{
+		{"默认旧配置", `{"assistant-gitea":{"command":"assistant","args":["mcp","gitea"]}}`, false, false, false, false},
+		{"绑定旧配置", `{"assistant-gitea":{"command":"assistant","args":["mcp","gitea","--instance","work-ai"]}}`, false, false, false, false},
+		{"卸载旧配置", `{"assistant-gitea":{"command":"assistant","args":["mcp","gitea"]}}`, true, false, false, false},
+		{"演练迁移", `{"assistant-gitea":{"command":"assistant","args":["mcp","gitea"]}}`, false, true, false, true},
+		{"保留旧名用户配置", `{"assistant-gitea":{"command":"user-tool"}}`, false, false, false, true},
+		{"保留旧名用户配置卸载", `{"assistant-gitea":{"command":"user-tool"}}`, true, false, false, true},
+		{"新名冲突", `{"gitea":{"command":"user-tool"},"assistant-gitea":{"command":"assistant","args":["mcp","gitea"]}}`, false, false, true, true},
+		{"卸载新名冲突", `{"gitea":{"command":"user-tool"}}`, true, false, true, false},
+		{"清理重复托管配置", `{"gitea":{"command":"assistant","args":["mcp","gitea"]},"assistant-gitea":{"command":"assistant","args":["mcp","gitea"]}}`, false, false, false, false},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, ".mcp.json")
+			original := `{"note":"保留","mcpServers":` + scenario.original + `}`
+			if err := os.WriteFile(path, []byte(original), 0644); err != nil {
+				t.Fatal(err)
+			}
+			err := ConfigureMCP(dir, "", scenario.remove, scenario.dry)
+			if (err != nil) != scenario.wantError {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario.dry || scenario.wantError {
+				if string(data) != original {
+					t.Fatal("演练或冲突修改了配置", string(data))
+				}
+				return
+			}
+			var config struct {
+				Note    string                    `json:"note"`
+				Servers map[string]map[string]any `json:"mcpServers"`
+			}
+			if err := json.Unmarshal(data, &config); err != nil {
+				t.Fatal(err)
+			}
+			_, legacy := config.Servers["assistant-gitea"]
+			_, current := config.Servers["gitea"]
+			if config.Note != "保留" || legacy != scenario.keepLegacy || current == scenario.remove {
+				t.Fatal(string(data))
+			}
+			if scenario.keepLegacy && config.Servers["assistant-gitea"]["command"] != "user-tool" {
+				t.Fatal("用户配置被修改", string(data))
+			}
+		})
 	}
 }
 

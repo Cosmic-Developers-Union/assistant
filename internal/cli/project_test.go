@@ -69,12 +69,23 @@ func TestProjectMCPInstallWithoutCredentialsOrConfig(t *testing.T) {
 			if err := json.Unmarshal(data, &config); err != nil {
 				t.Fatal(err)
 			}
-			server := config.Servers["assistant-gitea"]
+			server := config.Servers["gitea"]
 			if server.Command != "assistant" || len(server.Args) != 2 || server.Args[0] != "mcp" || server.Args[1] != "gitea" {
 				t.Fatal(string(data))
 			}
-			if _, _, err := command(t, append(args, "--instance", "missing")...); err == nil {
-				t.Fatal("显式绑定未知实例被接受")
+			if _, _, err := command(t, append(args, "--instance", "future-account")...); err != nil {
+				t.Fatal("写入可选实例名不应读取凭据", err)
+			}
+			data, err = os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(data, &config); err != nil {
+				t.Fatal(err)
+			}
+			server = config.Servers["gitea"]
+			if len(server.Args) != 4 || server.Args[2] != "--instance" || server.Args[3] != "future-account" {
+				t.Fatal(string(data))
 			}
 			if _, _, err := command(t, "project", "--dir", dir, "uninstall", "mcp"); err != nil {
 				t.Fatal(err)
