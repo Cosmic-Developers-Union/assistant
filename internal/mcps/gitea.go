@@ -49,8 +49,6 @@ func defaultGiteaScopeList() string {
 
 // GiteaOptions 控制 `assistant mcp gitea` 的解析与启动。
 type GiteaOptions struct {
-	Instance string
-
 	// Dir 是项目目录（默认 cwd），用于从 git remote 推导站点。
 	Dir string
 	// Host / Token 显式覆盖自动检测。
@@ -100,33 +98,6 @@ func ResolveGitea(ctx context.Context, options GiteaOptions) (GiteaSpec, error) 
 	dir := options.Dir
 	if dir == "" {
 		dir = "."
-	}
-	if options.Instance != "" {
-		path, err := credentials.Path()
-		if err != nil {
-			return GiteaSpec{}, err
-		}
-		file, err := credentials.Load(path)
-		if err != nil {
-			return GiteaSpec{}, err
-		}
-		found := false
-		for _, entry := range file.Instances.Gitea {
-			if entry.Name != options.Instance {
-				continue
-			}
-			if options.Host != "" && credentials.NormalizeHost(options.Host) != credentials.NormalizeHost(entry.URL) {
-				return GiteaSpec{}, fmt.Errorf("--host 与实例站点不匹配")
-			}
-			options.Host = entry.URL
-			if options.Token == "" {
-				options.Token = entry.Token
-			}
-			found = true
-		}
-		if !found {
-			return GiteaSpec{}, fmt.Errorf("Gitea 实例 %s 不存在", options.Instance)
-		}
 	}
 	spec := GiteaSpec{}
 	var err error

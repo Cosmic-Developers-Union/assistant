@@ -88,8 +88,9 @@ local 方案需备份 sessions；s3 方案备份对象桶。观测元数据不�
 
 `assistant instance add gitea --name work --url https://site --username developer`。
 缺字段在 TTY 逐项询问；密码不回显，非交互用 `--password-file`。
-Gitea 登录后保存 MCP 令牌与使用内置密钥加密的密码。instance token 复用密码发令牌，
-管理员可通过 --user 为其他账号发令牌；目标凭据独立保存，详见 [bootstrap.md](bootstrap.md)。
+Gitea 登录后保存 MCP 令牌与使用内置密钥加密的密码。instance token 只读输出已有令牌；
+instance create-token 复用密码创建令牌，管理员可通过 --user 为其他账号发令牌。
+目标凭据独立保存，详见 [bootstrap.md](bootstrap.md)。
 QQ 用 `--app-id`/`--app-secret-file`，Telegram 用 `--token-file`，微信扫码登录。
 添加前实测平台身份，成功后保存唯一用户级 credentials.json，0600。
 
@@ -120,5 +121,5 @@ MCP token：--token → GITEA_ACCESS_TOKEN → GITEA_ACCESS_TOKEN_FILE → 对�
 --debug 会在 --verbose 信息上增加装配与续接原因，所有已知连接密钥均从日志遮蔽。
 
 MCP 安装默认无需配置或凭据，只写 assistant mcp gitea 启动命令；连接在启动时解析。
-可选 --instance 明确选择同站点的某个个人账号，安装时只写实例名，不写密钥。
+同站点多账号通过已有的令牌参数或环境变量选择，MCP 不增加实例参数。
 站点接入与项目安装见 [bootstrap.md](bootstrap.md)，不会改写 run 的服务连接。

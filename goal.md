@@ -31,7 +31,8 @@ assistant instance show instance-name
 
 - `add` 对缺失的参数逐项交互询问；Gitea 登录成功即创建 MCP 可用的令牌，密码用
   内置密钥加密保存，不写明文、不回显。重复登录同一实例会更新凭据，失败不覆盖旧值。
-- `instance token <登录实例名>` 复用已保存密码，为当前账号创建令牌，不再询问密码。
+- `instance token <实例名>` 只向 stdout 输出已保存的令牌，不联网、不询问密码、不修改状态。
+- `instance create-token <登录实例名>` 复用已保存密码，为当前账号创建并保存新令牌。
   `--user <目标用户名>` 为其他用户创建令牌，需要管理员；`--name` 指定目标实例名。
   管理员凭据与目标账号凭据分开保存，MCP 只使用目标账号的令牌。
 - `remove` 只删本地实例条目,不动平台侧的账号。
@@ -461,7 +462,7 @@ instance 负责管理员接入、机器人账号与令牌；project 负责当前
 
 ```shell
 assistant instance provision gitea --admin admin-instance
-assistant instance token ai-instance --password-file /secure/password
+assistant instance create-token ai-instance
 assistant project configure --instance admin-instance
 assistant project labels --instance admin-instance
 assistant project install action --instance admin-instance --merge-instance merge-instance
@@ -476,8 +477,8 @@ assistant project uninstall mcp
 
 只读演练不写平台或文件。Actions secret 通过 SDK 注入，托管 workflow 本地生成，
 提交推送后生效；卸载只移除自己的 workflow，不关闭整个仓库 Actions、不删其他
-workflow 或共享 secret。MCP 安装无需凭据或运行配置，默认写通用启动命令；可选
---instance 绑定账号，只写实例名不写密钥，保留其他 server 和用户字段。
+workflow 或共享 secret。MCP 安装无需凭据或运行配置，只写 assistant mcp gitea
+通用启动命令，不增加实例参数、不写密钥，保留其他 server 和用户字段。
 MCP server 名称固定为 gitea，assistant 只提供启动与凭据解析包装。
 无归属标记或同名用户配置拒绝覆盖/删除。
 

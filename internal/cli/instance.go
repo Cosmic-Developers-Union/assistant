@@ -71,7 +71,7 @@ func newInstanceCommand() *cobra.Command {
 }
 func newInstanceCommandWithLogins(logins instanceLogins) *cobra.Command {
 	root := &cobra.Command{Use: "instance", Short: "管理用户级平台连接（与 run 配置独立）", Args: cobra.NoArgs}
-	root.AddCommand(newProvisionCommand(), newTokenCommand())
+	root.AddCommand(newProvisionCommand(), newTokenCommand(), newCreateTokenCommand())
 	load := func() (string, *credentials.File, error) {
 		path, err := credentials.Path()
 		if err != nil {

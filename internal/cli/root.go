@@ -37,15 +37,14 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	}
 	root.AddCommand(action)
 	mcp := &cobra.Command{Use: "mcp", Short: "提供 stdio AI 会话工具", Args: cobra.NoArgs}
-	var host, token, dir, instance string
+	var host, token, dir string
 	gitea := &cobra.Command{Use: "gitea", Short: "检测站点与个人令牌后启动官方 gitea-mcp", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		return mcps.RunGitea(cmd.Context(), mcps.GiteaOptions{Instance: instance, Dir: dir, Host: host, Token: token, Stdin: cmd.InOrStdin(), Stdout: stdout, Stderr: stderr, Log: func(f string, a ...any) {
+		return mcps.RunGitea(cmd.Context(), mcps.GiteaOptions{Dir: dir, Host: host, Token: token, Stdin: cmd.InOrStdin(), Stdout: stdout, Stderr: stderr, Log: func(f string, a ...any) {
 			if verbose || debug {
 				log(f, a...)
 			}
 		}})
 	}}
-	gitea.Flags().StringVar(&instance, "instance", "", "明确选择个人 Gitea 实例")
 	gitea.Flags().StringVar(&host, "host", "", "显式指定站点")
 	gitea.Flags().StringVar(&token, "token", "", "显式指定令牌")
 	gitea.Flags().StringVar(&dir, "dir", ".", "探测 Git remote 的目录")

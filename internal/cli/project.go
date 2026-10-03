@@ -102,8 +102,19 @@ func newProvisionCommand() *cobra.Command {
 	return root
 }
 func newTokenCommand() *cobra.Command {
+	return &cobra.Command{Use: "token <实例名>", Short: "只读取并输出已保存的 Gitea 令牌，不修改任何状态", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		_, _, entry, err := giteaInstance(args[0])
+		if err != nil {
+			return err
+		}
+		cmd.Println(entry.Token)
+		return nil
+	}}
+}
+
+func newCreateTokenCommand() *cobra.Command {
 	var passwordFile, user, name, otp string
-	cmd := &cobra.Command{Use: "token <登录实例名>", Short: "用保存的登录凭据发令牌；管理员可指定目标用户", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) (resultErr error) {
+	cmd := &cobra.Command{Use: "create-token <登录实例名>", Short: "创建并保存新令牌；管理员可指定目标用户", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) (resultErr error) {
 		path, file, entry, err := giteaInstance(args[0])
 		if err != nil {
 			return err
@@ -276,12 +287,15 @@ func newProjectCommand() *cobra.Command {
 	}}
 	action.Flags().StringVar(&mergeInstance, "merge-instance", "", "用于 MERGE_TOKEN 的实例名（缺省该站点唯一 merge 账号）")
 	install.AddCommand(action)
-	install.AddCommand(&cobra.Command{Use: "mcp", Short: "安装 gitea MCP server，无需凭据，可选绑定实例", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	install.AddCommand(&cobra.Command{Use: "mcp", Short: "安装 gitea MCP server，无需凭据或实例参数", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		if cmd.Flag("instance").Changed {
+			return fmt.Errorf("MCP 安装不使用 --instance，只写 assistant mcp gitea 启动命令")
+		}
 		path, err := projectDir(dir)
 		if err != nil {
 			return err
 		}
-		if err := project.ConfigureMCP(path, instance, false, dry); err != nil {
+		if err := project.ConfigureMCP(path, false, dry); err != nil {
 			return err
 		}
 		cmd.Println("MCP 配置已处理：gitea（不含密钥）")
@@ -300,7 +314,7 @@ func newProjectCommand() *cobra.Command {
 				cmd.Println("本地 workflow 已处理；提交推送后生效，MERGE_TOKEN 与其他 workflow 保留")
 				return nil
 			}
-			if err := project.ConfigureMCP(path, "", true, dry); err != nil {
+			if err := project.ConfigureMCP(path, true, dry); err != nil {
 				return err
 			}
 			cmd.Println("MCP 托管 server 已处理，其他配置保留")

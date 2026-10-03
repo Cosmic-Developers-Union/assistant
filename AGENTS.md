@@ -14,6 +14,8 @@
 - `internal/claude` 是外部 Claude CLI 的进程、参数与 stream-json 适配器。
 - `internal/integration/{gitea,qq,weixin,telegram}` 是平台协议适配；通用消息桥在 integration。
 - `internal/mcps` 检测开发者 Gitea 身份并启动官方 stdio MCP。
+- `instance token` 只读输出已保存令牌，禁止联网或修改凭据；发令牌使用 create-token。
+  MCP 包装层沿用 goal.md 的 host/token 解析接口，不增加实例选择参数。
 - `skills/review/SKILL.md` 是内嵌评审协议的唯一提示词来源。
 - `content/agents.md` 保存仓库评审约定的内容源。
 

@@ -42,8 +42,8 @@ func InstallWorkflow(dir string, remove, dry bool) error {
 }
 
 // ConfigureMCP 安装或卸载一个命名 server，保留所有其他 server 和顶层字段。
-// 工具配置可选绑定个人实例，不写 token；站点和凭据在启动时解析。
-func ConfigureMCP(dir, instance string, remove, dry bool) error {
+// 工具配置只写包装层启动命令，不写 token；站点和凭据在启动时解析。
+func ConfigureMCP(dir string, remove, dry bool) error {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return err
@@ -88,11 +88,7 @@ func ConfigureMCP(dir, instance string, remove, dry bool) error {
 	if remove {
 		delete(servers, key)
 	} else {
-		args := []string{"mcp", "gitea"}
-		if instance != "" {
-			args = append(args, "--instance", instance)
-		}
-		servers[key] = map[string]any{"command": "assistant", "args": args}
+		servers[key] = map[string]any{"command": "assistant", "args": []string{"mcp", "gitea"}}
 	}
 	config["mcpServers"] = servers
 	if dry {

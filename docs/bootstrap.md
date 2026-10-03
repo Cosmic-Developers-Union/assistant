@@ -33,11 +33,12 @@ SIGTERM 也会取消输入并退出（退出码 143）；取消输入不会写�
 assistant instance provision gitea --admin work \
   --reviewer-password-file /secure/ai-password \
   --merger-password-file /secure/merge-password
-# 给登录账号发新令牌，无需再输入用户名和密码：
-assistant instance token work
+# 给登录账号创建并保存新令牌，无需再输入用户名和密码：
+assistant instance create-token work
 # 管理员为其他用户发令牌，保存为独立实例供 MCP 使用：
-assistant instance token work --user ai --name work-ai
-assistant mcp gitea --instance work-ai
+assistant instance create-token work --user ai --name work-ai
+# 只读取已保存令牌，通过原有环境变量交给 MCP：
+GITEA_ACCESS_TOKEN="$(assistant instance token work-ai)" assistant mcp gitea
 ```
 
 首次登录成功即创建令牌供 MCP 使用，并以 AES-GCM 加密密码保存到 credentials.json。
@@ -45,7 +46,8 @@ assistant mcp gitea --instance work-ai
 安全边界。文件仍为 0600，目录 0700；list/show 不显示密码或令牌。
 旧记录仅有令牌时，重新运行 instance add gitea --name work 登录一次补齐加密密码，
 站点和用户名复用原记录，登录失败保留旧凭据。密码变更后也用该方式重新登录。
-token 可用 --password-file 覆盖已保存密码；启用两步验证时用 --otp 提供当前验证码。
+instance token 只向 stdout 输出已保存令牌，不联网、不询问密码、不修改平台或本地状态。
+create-token 可用 --password-file 覆盖已保存密码；启用两步验证时用 --otp 提供当前验证码。
 未指定 --user 时更新登录账号令牌；指定其他用户时，缺省保存为“登录实例名-用户名”，
 可用 --name 指定名称。管理员密码不会复制到目标账号，旧平台令牌不自动撤销。
 
@@ -96,19 +98,18 @@ assistant project uninstall action
 
 ```sh
 assistant project install mcp
-# 可选：绑定实例名（账号在启动时解析）
-assistant project install mcp --instance work-ai
 assistant project uninstall mcp
 ```
 
 .mcp.json 内新增命名 server gitea，默认启动参数为 assistant mcp gitea。
 安装只需要本地 Git 项目，无需凭据、Gitea remote 或运行配置；站点与令牌在 MCP
-启动时按现有规则解析，缺失或歧义届时报错。显式指定 --instance 时，只把实例名
-写入启动参数，不读取凭据或检查账号，不写密钥。同一站点有多个账号时可用此方式明确选择。
+启动时按现有规则解析，缺失或歧义届时报错。MCP 不增加 --instance 参数；同一站点
+有多个账号时，通过原有 GITEA_ACCESS_TOKEN 或 GITEA_ACCESS_TOKEN_FILE 明确提供令牌。
 
 保留所有其他 server 和顶层字段；同名 server 若不是本工具的启动配置则拒绝
 覆盖或卸载。读写限制在当前项目根，symlink 越界报错。卸载不删除用户的其他配置。
 重新安装会将此前本工具生成的 assistant-gitea 配置迁移为 gitea；卸载也兼容旧名称。
+此前生成的 --instance 启动参数会在重新安装时移除。
 原 assistant mcp gitea 的显式 host/token 与 remote 探测方式继续可用。
 
 ## 召唤与验证

@@ -142,13 +142,13 @@ func TestProjectGiteaBootstrapAndCrossRepositoryMention(t *testing.T) {
 	if err := project.InstallWorkflow(dir, false, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := project.ConfigureMCP(dir, accounts[0].Name, false, false); err != nil {
+	if err := project.ConfigureMCP(dir, false, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := project.InstallWorkflow(dir, true, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := project.ConfigureMCP(dir, "", true, false); err != nil {
+	if err := project.ConfigureMCP(dir, true, false); err != nil {
 		t.Fatal(err)
 	}
 	public := "public-" + suffix

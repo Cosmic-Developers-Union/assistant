@@ -18,6 +18,7 @@ type projectFixture struct {
 	host, path, dir      string
 	users                map[string]bool
 	writes               int
+	requests             int
 	admin                bool
 	failMethod, failPath string
 	onToken              func()
@@ -73,19 +74,8 @@ func TestProjectMCPInstallWithoutCredentialsOrConfig(t *testing.T) {
 			if server.Command != "assistant" || len(server.Args) != 2 || server.Args[0] != "mcp" || server.Args[1] != "gitea" {
 				t.Fatal(string(data))
 			}
-			if _, _, err := command(t, append(args, "--instance", "future-account")...); err != nil {
-				t.Fatal("写入可选实例名不应读取凭据", err)
-			}
-			data, err = os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := json.Unmarshal(data, &config); err != nil {
-				t.Fatal(err)
-			}
-			server = config.Servers["gitea"]
-			if len(server.Args) != 4 || server.Args[2] != "--instance" || server.Args[3] != "future-account" {
-				t.Fatal(string(data))
+			if _, _, err := command(t, append(args, "--instance", "future-account")...); err == nil {
+				t.Fatal("MCP 安装接受实例绑定")
 			}
 			if _, _, err := command(t, "project", "--dir", dir, "uninstall", "mcp"); err != nil {
 				t.Fatal(err)
@@ -103,6 +93,7 @@ func projectTestFixture(t *testing.T) *projectFixture {
 	t.Helper()
 	f := &projectFixture{users: map[string]bool{"admin": true}, admin: true}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.requests++
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method != "GET" {
 			f.writes++
@@ -248,7 +239,47 @@ func TestProvisionCommandDryRunAndFailurePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 }
-func TestTokenCommandOnlyReplacesChosenLocalCredential(t *testing.T) {
+func TestTokenCommandIsReadOnlyAndPrintsOnlyStoredToken(t *testing.T) {
+	f := projectTestFixture(t)
+	before, err := os.ReadFile(f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		out, errOut, err := command(t, "instance", "token", "admin")
+		if err != nil || out != "token-admin\n" || errOut != "" {
+			t.Fatal(out, errOut, err)
+		}
+	}
+	for _, args := range [][]string{
+		{"instance", "token", "missing"},
+		{"instance", "token", "admin", "--user", "ai"},
+		{"instance", "token", "admin", "--password-file", "/missing"},
+		{"mcp", "gitea", "--instance", "admin"},
+	} {
+		out, _, err := command(t, args...)
+		if err == nil || out != "" {
+			t.Fatal("查询或 MCP 接受了错误的写操作参数", args, out, err)
+		}
+	}
+	after, err := os.ReadFile(f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterInfo, err := os.Stat(f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.requests != 0 || string(before) != string(after) || !info.ModTime().Equal(afterInfo.ModTime()) {
+		t.Fatal("token 查询产生网络请求或修改凭据")
+	}
+}
+
+func TestCreateTokenCommandOnlyReplacesChosenLocalCredential(t *testing.T) {
 	for _, scenario := range []string{"ok", "saved-password", "missing-password", "bad-password", "issue-failure", "save-failure"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := projectTestFixture(t)
@@ -264,7 +295,7 @@ func TestTokenCommandOnlyReplacesChosenLocalCredential(t *testing.T) {
 			}
 			password := filepath.Join(t.TempDir(), "password")
 			_ = os.WriteFile(password, []byte("secret-password"), 0600)
-			args := []string{"instance", "token", "admin", "--password-file", password}
+			args := []string{"instance", "create-token", "admin", "--password-file", password}
 			switch scenario {
 			case "saved-password":
 				args = args[:3]
@@ -293,7 +324,7 @@ func TestTokenCommandOnlyReplacesChosenLocalCredential(t *testing.T) {
 		})
 	}
 }
-func TestTokenCommandAdminTargetAndLocalIsolation(t *testing.T) {
+func TestCreateTokenCommandAdminTargetAndLocalIsolation(t *testing.T) {
 	for _, scenario := range []string{"new", "named", "existing", "not-admin", "missing-user", "name-collision", "platform-collision", "missing-login-password", "empty-name"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := projectTestFixture(t)
@@ -305,7 +336,7 @@ func TestTokenCommandAdminTargetAndLocalIsolation(t *testing.T) {
 			if err := file.Instances.Gitea[0].SetPassword("admin-password"); err != nil {
 				t.Fatal(err)
 			}
-			args := []string{"instance", "token", "admin", "--user", "ai"}
+			args := []string{"instance", "create-token", "admin", "--user", "ai"}
 			name := "admin-ai"
 			switch scenario {
 			case "named":
@@ -315,7 +346,7 @@ func TestTokenCommandAdminTargetAndLocalIsolation(t *testing.T) {
 				args = append(args, "--name", " ")
 			case "existing":
 				name = "merge"
-				args = []string{"instance", "token", "admin", "--user", "merge", "--name", name}
+				args = []string{"instance", "create-token", "admin", "--user", "merge", "--name", name}
 				file.Instances.Gitea[1].Token = "old-merge"
 				if err := file.Instances.Gitea[1].SetPassword("merge-password"); err != nil {
 					t.Fatal(err)
@@ -384,7 +415,11 @@ func TestTokenCommandAdminTargetAndLocalIsolation(t *testing.T) {
 func TestProjectCommandLifecycle(t *testing.T) {
 	f := projectTestFixture(t)
 	for _, args := range [][]string{{"configure", "--required-checks", "build"}, {"labels"}, {"install", "action"}, {"install", "mcp"}} {
-		args = append([]string{"project", "--instance", "admin", "--dir", f.dir}, args...)
+		prefix := []string{"project", "--dir", f.dir}
+		if args[len(args)-1] != "mcp" {
+			prefix = append(prefix, "--instance", "admin")
+		}
+		args = append(prefix, args...)
 		if _, _, err := command(t, args...); err != nil {
 			t.Fatal(args, err)
 		}
@@ -407,7 +442,11 @@ func TestProjectCommandLifecycle(t *testing.T) {
 func TestProjectCommandDryRunAndValidation(t *testing.T) {
 	f := projectTestFixture(t)
 	for _, args := range [][]string{{"configure"}, {"labels"}, {"install", "action", "--merge-instance", "merge"}, {"install", "mcp"}, {"uninstall", "action"}, {"uninstall", "mcp"}} {
-		args = append([]string{"project", "--instance", "admin", "--dir", f.dir, "--dry-run"}, args...)
+		prefix := []string{"project", "--dir", f.dir, "--dry-run"}
+		if args[len(args)-1] != "mcp" {
+			prefix = append(prefix, "--instance", "admin")
+		}
+		args = append(prefix, args...)
 		if _, _, err := command(t, args...); err != nil {
 			t.Fatal(args, err)
 		}
